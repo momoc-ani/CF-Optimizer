@@ -592,8 +592,8 @@ hosts:
 | 阶段1：工程骨架与网段 | 已完成 | Go module、严格 YAML 配置、原子 JSON 状态、轮换日志、网段更新/双版本回退、确定性候选生成 | Go test 与 go vet 通过，`1b08836` |
 | 阶段2：测速与评分核心 | 已完成 | 并发 TCP 初筛、TLS/可选限流下载复筛、综合评分、历史平滑、失败冷却、迟滞与最短保持 | Go test/vet 与六目标交叉编译通过，`284bc90` |
 | 阶段3：跨平台直连层 | 已完成 | 三平台 Socket 绑定与物理出口发现、平台隔离路由后端、事务日志、验证/回滚/启动恢复、诊断证据 | 单元/race 测试及六目标交叉编译通过；三平台真机路由验证待发布验收，`fc87d53` |
-| 阶段4：代理适配器 | 已完成 | 统一生命周期与策略协调器、Generic Route、Mihomo provider/API、sing-box/Xray 受管片段、External JSON-RPC | 幂等、验证失败回滚和文件恢复测试通过，见阶段4提交 |
-| 阶段5：后台服务与IPC | 进行中 | 优化运行器与协议设计中 | 待守护调度、权限 IPC 和服务安装集成测试 |
+| 阶段4：代理适配器 | 已完成 | 统一生命周期与策略协调器、Generic Route、Mihomo provider/API、sing-box/Xray 受管片段、External JSON-RPC | 幂等、验证失败回滚和文件恢复测试通过，`97844e5` |
+| 阶段5：后台服务与IPC | 已完成 | 完整优选运行器、版本化 JSON Lines IPC 与事件流、单任务取消、周期/网络变化调度、Windows Service/systemd/LaunchDaemon 控制器、CLI 与可选 Windows Hosts | Go test/vet/race、IPC/CLI/服务单元测试及六目标交叉编译通过；服务安装和路由修改真机验证留待阶段7发布验收，见阶段5提交 |
 | 阶段6A：Stitch UI设计 | 未开始 | - | 待提示词与设计评审清单 |
 | 阶段6B：Wails桌面界面 | 未开始 | - | 待前端测试与 Playwright |
 | 阶段7：发布与稳定性 | 未开始 | - | 待六平台 CI、打包与中英双语 README |

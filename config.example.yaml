@@ -80,6 +80,11 @@ proxy:
     args: []
     timeout: 15s
 
+hosts:
+  enabled: false
+  path: /etc/hosts
+  domains: []
+
 ipc:
   endpoint: ""
 

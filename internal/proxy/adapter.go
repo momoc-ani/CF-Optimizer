@@ -98,6 +98,21 @@ func (c *Coordinator) Detect(ctx context.Context) map[string]Detection {
 	return result
 }
 
+// Capabilities 合并全部已配置适配器的静态能力，用于生成最小必要策略。
+func (c *Coordinator) Capabilities() Capabilities {
+	combined := Capabilities{}
+	for _, adapter := range c.adapters {
+		capability := adapter.Capabilities()
+		combined.Processes = combined.Processes || capability.Processes
+		combined.IPv4 = combined.IPv4 || capability.IPv4
+		combined.IPv6 = combined.IPv6 || capability.IPv6
+		combined.Domains = combined.Domains || capability.Domains
+		combined.HotReload = combined.HotReload || capability.HotReload
+		combined.Rollback = combined.Rollback || capability.Rollback
+	}
+	return combined
+}
+
 // Apply 将规范化策略应用到可用适配器，验证失败时回滚全部已应用项。
 func (c *Coordinator) Apply(ctx context.Context, policy DirectPolicy) (ApplyResult, error) {
 	normalized, err := policy.Normalize()
@@ -144,6 +159,14 @@ func (c *Coordinator) Apply(ctx context.Context, policy DirectPolicy) (ApplyResu
 	return result, nil
 }
 
+// Rollback 逆序撤销一组已验证收据，供跨阶段切换失败时恢复旧策略。
+func (c *Coordinator) Rollback(ctx context.Context, result ApplyResult) error {
+	if len(result.Receipts) == 0 {
+		return nil
+	}
+	return errors.Join(c.rollbackReceipts(ctx, result.Receipts)...)
+}
+
 func adapterSupportsAny(policy DirectPolicy, capabilities Capabilities) bool {
 	return (len(policy.Processes) > 0 && capabilities.Processes) ||
 		(len(policy.IPv4CIDRs) > 0 && capabilities.IPv4) ||
@@ -177,6 +200,12 @@ func ensurePolicyCoverage(policy DirectPolicy, adapters []Adapter) error {
 
 func (c *Coordinator) rollbackAll(ctx context.Context, receipts []Receipt, cause error) error {
 	rollbackErrors := []error{cause}
+	rollbackErrors = append(rollbackErrors, c.rollbackReceipts(ctx, receipts)...)
+	return errors.Join(rollbackErrors...)
+}
+
+func (c *Coordinator) rollbackReceipts(ctx context.Context, receipts []Receipt) []error {
+	var rollbackErrors []error
 	for index := len(receipts) - 1; index >= 0; index-- {
 		receipt := receipts[index]
 		adapter := c.adapterByName(receipt.Adapter)
@@ -191,7 +220,7 @@ func (c *Coordinator) rollbackAll(ctx context.Context, receipts []Receipt, cause
 			c.logPhase(adapter.Name(), receipt.ID, "rollback", "completed", nil)
 		}
 	}
-	return errors.Join(rollbackErrors...)
+	return rollbackErrors
 }
 
 func (c *Coordinator) adapterByName(name string) Adapter {

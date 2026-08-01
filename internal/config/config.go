@@ -61,6 +61,7 @@ type Config struct {
 	Benchmark BenchmarkConfig `yaml:"benchmark" json:"benchmark"`
 	Network   NetworkConfig   `yaml:"network" json:"network"`
 	Proxy     ProxyConfig     `yaml:"proxy" json:"proxy"`
+	Hosts     HostsConfig     `yaml:"hosts" json:"hosts"`
 	IPC       IPCConfig       `yaml:"ipc" json:"ipc"`
 	History   HistoryConfig   `yaml:"history" json:"history"`
 }
@@ -163,6 +164,13 @@ type ExternalProxyConfig struct {
 	Timeout    Duration `yaml:"timeout" json:"timeout"`
 }
 
+// HostsConfig 定义 Windows 可选的受管 Hosts 区块。
+type HostsConfig struct {
+	Enabled bool     `yaml:"enabled" json:"enabled"`
+	Path    string   `yaml:"path" json:"path"`
+	Domains []string `yaml:"domains" json:"domains"`
+}
+
 // IPCConfig 定义本地特权服务端点。
 type IPCConfig struct {
 	Endpoint string `yaml:"endpoint" json:"endpoint"`
@@ -201,6 +209,7 @@ func Default() Config {
 			Xray:     ManagedProxyConfig{DirectOutbound: "direct", Timeout: Duration(10 * time.Second)},
 			External: ExternalProxyConfig{Timeout: Duration(15 * time.Second)},
 		},
+		Hosts:   HostsConfig{Path: defaultHostsPath()},
 		History: HistoryConfig{SummaryRetention: Duration(30 * 24 * time.Hour), DetailRetention: Duration(7 * 24 * time.Hour), MaxRuns: 500},
 	}
 }
@@ -284,8 +293,9 @@ func (c Config) Validate() error {
 		return errors.New("ranges.max_change_percent must be between 0 and 100")
 	}
 	for name, value := range map[string]Duration{
-		"schedule.interval": c.Schedule.Interval, "ranges.refresh_interval": c.Ranges.RefreshInterval,
-		"ranges.stale_after": c.Ranges.StaleAfter, "benchmark.connect_timeout": c.Benchmark.ConnectTimeout,
+		"schedule.interval": c.Schedule.Interval, "schedule.network_poll": c.Schedule.NetworkPoll,
+		"ranges.refresh_interval": c.Ranges.RefreshInterval,
+		"ranges.stale_after":      c.Ranges.StaleAfter, "benchmark.connect_timeout": c.Benchmark.ConnectTimeout,
 		"benchmark.latency_limit": c.Benchmark.LatencyLimit, "benchmark.tls_timeout": c.Benchmark.TLSTimeout,
 		"benchmark.failure_cooldown": c.Benchmark.FailureCooldown,
 		"network.command_timeout":    c.Network.CommandTimeout,
@@ -314,6 +324,22 @@ func (c Config) Validate() error {
 	}
 	if err := validateProxyConfig(c.Proxy); err != nil {
 		return err
+	}
+	if c.Hosts.Enabled {
+		if runtime.GOOS != "windows" {
+			return errors.New("Hosts management is supported only on Windows")
+		}
+		if !filepath.IsAbs(c.Hosts.Path) {
+			return errors.New("hosts.path must be absolute when Hosts management is enabled")
+		}
+		if len(c.Hosts.Domains) == 0 {
+			return errors.New("hosts.domains must not be empty when Hosts management is enabled")
+		}
+		for _, domain := range c.Hosts.Domains {
+			if err := validateConfigDomain(domain); err != nil {
+				return fmt.Errorf("invalid hosts domain %q: %w", domain, err)
+			}
+		}
 	}
 	return nil
 }
@@ -372,6 +398,35 @@ func validateHTTPSURL(raw string) error {
 	return nil
 }
 
+func validateConfigDomain(domain string) error {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" || len(domain) > 253 || strings.ContainsAny(domain, "\r\n, /\\\x00") {
+		return errors.New("domain contains an unsafe character")
+	}
+	for _, label := range strings.Split(domain, ".") {
+		if label == "" || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return errors.New("domain label is invalid")
+		}
+		for _, character := range label {
+			if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+				return errors.New("domain label must use ASCII letters, digits, or hyphen")
+			}
+		}
+	}
+	return nil
+}
+
+func defaultHostsPath() string {
+	if runtime.GOOS == "windows" {
+		root := os.Getenv("SystemRoot")
+		if root == "" {
+			root = `C:\Windows`
+		}
+		return filepath.Join(root, "System32", "drivers", "etc", "hosts")
+	}
+	return "/etc/hosts"
+}
+
 // DefaultDataDir 返回系统服务使用的默认状态目录。
 func DefaultDataDir() string {
 	if runtime.GOOS == "windows" {
@@ -399,4 +454,15 @@ func DefaultEndpoint(dataDir string) string {
 		return `\\.\pipe\cf-optimizer-v1`
 	}
 	return filepath.Join(dataDir, "daemon.sock")
+}
+
+// DefaultConfigPath 返回系统服务使用的默认 YAML 配置路径。
+func DefaultConfigPath() string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(DefaultDataDir(), "config.yaml")
+	}
+	if runtime.GOOS == "darwin" {
+		return "/Library/Application Support/CF Optimizer/config.yaml"
+	}
+	return "/etc/cf-optimizer/config.yaml"
 }
