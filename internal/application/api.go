@@ -25,6 +25,7 @@ type API struct {
 	runtime      *Runtime
 	activeMutex  sync.Mutex
 	activeCancel context.CancelFunc
+	activeEvent  *optimizer.Event
 }
 
 // NewAPI 创建后台服务业务处理器。
@@ -71,9 +72,13 @@ func (a *API) Handle(ctx context.Context, request ipc.Request, emit func(any) er
 }
 
 func (a *API) systemStatus() map[string]any {
+	a.activeMutex.Lock()
+	activeEvent := cloneEvent(a.activeEvent)
+	a.activeMutex.Unlock()
 	return map[string]any{
 		"build": version.Metadata(), "protocol_version": ipc.ProtocolVersion,
 		"state": a.runtime.Store.Snapshot(), "physical_path": a.runtime.PhysicalPath,
+		"active_event": activeEvent,
 	}
 }
 
@@ -97,24 +102,19 @@ func (a *API) RunOptimization(ctx context.Context, parameters optimizer.RunOptio
 		a.clearActiveCancel()
 	}()
 	var emitMutex sync.Mutex
-	var emitError error
+	streamConnected := true
 	report, err := a.runtime.Runner.Run(runContext, parameters, func(event optimizer.Event) {
+		a.setActiveEvent(event)
 		emitMutex.Lock()
 		defer emitMutex.Unlock()
-		if emitError != nil {
-			return
-		}
-		if emit == nil {
+		if !streamConnected || emit == nil {
 			return
 		}
 		if eventErr := emit(event); eventErr != nil {
-			emitError = eventErr
-			cancel()
+			streamConnected = false
+			a.runtime.Logger.Warn("任务事件订阅已断开，后台任务继续运行", "component", "ipc", "run_id", event.RunID, "error", eventErr)
 		}
 	})
-	if emitError != nil {
-		return report, emitError
-	}
 	if errors.Is(err, optimizer.ErrAlreadyRunning) {
 		return report, &ipc.Error{Code: "conflict", Message: err.Error()}
 	}
@@ -147,7 +147,26 @@ func (a *API) setActiveCancel(cancel context.CancelFunc) bool {
 func (a *API) clearActiveCancel() {
 	a.activeMutex.Lock()
 	a.activeCancel = nil
+	a.activeEvent = nil
 	a.activeMutex.Unlock()
+}
+
+func (a *API) setActiveEvent(event optimizer.Event) {
+	a.activeMutex.Lock()
+	a.activeEvent = cloneEvent(&event)
+	a.activeMutex.Unlock()
+}
+
+func cloneEvent(event *optimizer.Event) *optimizer.Event {
+	if event == nil {
+		return nil
+	}
+	clone := *event
+	if event.Progress != nil {
+		progress := *event.Progress
+		clone.Progress = &progress
+	}
+	return &clone
 }
 
 func (a *API) routeDiagnostics(ctx context.Context, raw json.RawMessage) (diagnostics.Report, error) {
