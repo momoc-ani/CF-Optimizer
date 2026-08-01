@@ -49,6 +49,8 @@ network:
 
 proxy:
   auto_detect: true
+  generic:
+    enabled: true
   mihomo:
     enabled: false
     controller: http://127.0.0.1:9090
@@ -56,6 +58,27 @@ proxy:
     provider_file: ""
     reload_config: ""
     timeout: 5s
+  sing_box:
+    enabled: false
+    executable: sing-box
+    managed_file: ""
+    direct_outbound: direct
+    validate_args: [check, -C, "{{dir}}"]
+    reload_args: []
+    timeout: 10s
+  xray:
+    enabled: false
+    executable: xray
+    managed_file: ""
+    direct_outbound: direct
+    validate_args: [run, -test, -confdir, "{{dir}}"]
+    reload_args: []
+    timeout: 10s
+  external:
+    enabled: false
+    executable: ""
+    args: []
+    timeout: 15s
 
 ipc:
   endpoint: ""

@@ -271,6 +271,37 @@ func (c *RouteController) Recover(ctx context.Context) error {
 	return errors.Join(recoveredErrors...)
 }
 
+// Rollback 按事务 ID 恢复修改前路由，并记录验证后的回滚状态。
+func (c *RouteController) Rollback(ctx context.Context, transactionID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for index := range c.journal.Transactions {
+		transaction := &c.journal.Transactions[index]
+		if transaction.ID != transactionID {
+			continue
+		}
+		if transaction.State == "rolled_back" || transaction.State == "recovered" {
+			return nil
+		}
+		if err := c.rollback(ctx, transaction); err != nil {
+			transaction.State = "rollback_failed"
+			transaction.Error = err.Error()
+			transaction.UpdatedAt = c.now().UTC()
+			_ = c.persist()
+			return err
+		}
+		transaction.State = "rolled_back"
+		transaction.Error = ""
+		transaction.UpdatedAt = c.now().UTC()
+		if err := c.persist(); err != nil {
+			return err
+		}
+		c.logPhase(*transaction, "rollback", "completed", nil)
+		return nil
+	}
+	return fmt.Errorf("route transaction %s is missing", transactionID)
+}
+
 // Transactions 返回路由审计记录的副本。
 func (c *RouteController) Transactions() []Transaction {
 	c.mu.Lock()

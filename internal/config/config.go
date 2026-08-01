@@ -121,8 +121,17 @@ type NetworkConfig struct {
 
 // ProxyConfig 定义代理内核探测和适配器配置。
 type ProxyConfig struct {
-	AutoDetect bool         `yaml:"auto_detect" json:"auto_detect"`
-	Mihomo     MihomoConfig `yaml:"mihomo" json:"mihomo"`
+	AutoDetect bool                `yaml:"auto_detect" json:"auto_detect"`
+	Generic    GenericProxyConfig  `yaml:"generic" json:"generic"`
+	Mihomo     MihomoConfig        `yaml:"mihomo" json:"mihomo"`
+	SingBox    ManagedProxyConfig  `yaml:"sing_box" json:"sing_box"`
+	Xray       ManagedProxyConfig  `yaml:"xray" json:"xray"`
+	External   ExternalProxyConfig `yaml:"external" json:"external"`
+}
+
+// GenericProxyConfig 控制只维护系统路由的通用适配器。
+type GenericProxyConfig struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
 }
 
 // MihomoConfig 定义受管理的 Mihomo 控制端与规则提供文件。
@@ -133,6 +142,25 @@ type MihomoConfig struct {
 	ProviderFile string   `yaml:"provider_file" json:"provider_file"`
 	ReloadConfig string   `yaml:"reload_config" json:"reload_config"`
 	Timeout      Duration `yaml:"timeout" json:"timeout"`
+}
+
+// ManagedProxyConfig 定义 sing-box 与 Xray 的受管配置片段及验证/重载命令。
+type ManagedProxyConfig struct {
+	Enabled        bool     `yaml:"enabled" json:"enabled"`
+	Executable     string   `yaml:"executable" json:"executable"`
+	ManagedFile    string   `yaml:"managed_file" json:"managed_file"`
+	DirectOutbound string   `yaml:"direct_outbound" json:"direct_outbound"`
+	ValidateArgs   []string `yaml:"validate_args" json:"validate_args"`
+	ReloadArgs     []string `yaml:"reload_args" json:"reload_args"`
+	Timeout        Duration `yaml:"timeout" json:"timeout"`
+}
+
+// ExternalProxyConfig 定义版本化 JSON-RPC 外部适配器进程。
+type ExternalProxyConfig struct {
+	Enabled    bool     `yaml:"enabled" json:"enabled"`
+	Executable string   `yaml:"executable" json:"executable"`
+	Args       []string `yaml:"args" json:"args"`
+	Timeout    Duration `yaml:"timeout" json:"timeout"`
 }
 
 // IPCConfig 定义本地特权服务端点。
@@ -166,7 +194,13 @@ func Default() Config {
 			FailureThreshold: 3, FailureCooldown: Duration(6 * time.Hour),
 		},
 		Network: NetworkConfig{CommandTimeout: Duration(10 * time.Second)},
-		Proxy:   ProxyConfig{AutoDetect: true, Mihomo: MihomoConfig{Controller: "http://127.0.0.1:9090", Timeout: Duration(5 * time.Second)}},
+		Proxy: ProxyConfig{
+			AutoDetect: true, Generic: GenericProxyConfig{Enabled: true},
+			Mihomo:   MihomoConfig{Controller: "http://127.0.0.1:9090", Timeout: Duration(5 * time.Second)},
+			SingBox:  ManagedProxyConfig{DirectOutbound: "direct", Timeout: Duration(10 * time.Second)},
+			Xray:     ManagedProxyConfig{DirectOutbound: "direct", Timeout: Duration(10 * time.Second)},
+			External: ExternalProxyConfig{Timeout: Duration(15 * time.Second)},
+		},
 		History: HistoryConfig{SummaryRetention: Duration(30 * 24 * time.Hour), DetailRetention: Duration(7 * 24 * time.Hour), MaxRuns: 500},
 	}
 }
@@ -277,6 +311,47 @@ func (c Config) Validate() error {
 	}
 	if c.Network.ManageRoutes && c.Network.Interface == "" {
 		return errors.New("network.interface is required when network.manage_routes is true")
+	}
+	if err := validateProxyConfig(c.Proxy); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateProxyConfig(proxy ProxyConfig) error {
+	if proxy.Mihomo.Enabled {
+		controller, err := url.Parse(proxy.Mihomo.Controller)
+		if err != nil || controller.Hostname() == "" || (controller.Scheme != "http" && controller.Scheme != "https") {
+			return errors.New("proxy.mihomo.controller must be an absolute HTTP(S) URL")
+		}
+		host := strings.ToLower(controller.Hostname())
+		address := netip.Addr{}
+		if parsed, err := netip.ParseAddr(host); err == nil {
+			address = parsed
+		}
+		if host != "localhost" && (!address.IsValid() || !address.IsLoopback()) {
+			return errors.New("proxy.mihomo.controller must use a loopback address to protect its secret")
+		}
+		if proxy.Mihomo.ProviderFile == "" {
+			return errors.New("proxy.mihomo.provider_file is required when Mihomo is enabled")
+		}
+	}
+	for name, managed := range map[string]ManagedProxyConfig{"sing_box": proxy.SingBox, "xray": proxy.Xray} {
+		if !managed.Enabled {
+			continue
+		}
+		if managed.ManagedFile == "" || managed.DirectOutbound == "" {
+			return fmt.Errorf("proxy.%s.managed_file and direct_outbound are required", name)
+		}
+		if (len(managed.ValidateArgs) > 0 || len(managed.ReloadArgs) > 0) && managed.Executable == "" {
+			return fmt.Errorf("proxy.%s.executable is required when command arguments are configured", name)
+		}
+	}
+	if proxy.External.Enabled && proxy.External.Executable == "" {
+		return errors.New("proxy.external.executable is required when the external adapter is enabled")
+	}
+	if proxy.External.Enabled && !filepath.IsAbs(proxy.External.Executable) {
+		return errors.New("proxy.external.executable must be an absolute path")
 	}
 	return nil
 }
