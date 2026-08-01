@@ -104,7 +104,14 @@ func (a *API) planQuickStart(ctx context.Context, raw json.RawMessage) (QuickSta
 			plan.Warnings = append(plan.Warnings, unavailableAdapterWarnings(view.Config, detections)...)
 		}
 	}
-	plan.CanApply = err == nil && !hasPendingConfig && pathErr == nil && pathValid && fingerprintErr == nil && plan.Detections[cleanupAdapterGeneric].Present
+	policyPathReady := plan.Detections[cleanupAdapterGeneric].Present
+	if hostsDetection, exists := plan.Detections[cleanupAdapterHosts]; exists && view.Config.Acceleration.Enabled {
+		policyPathReady = policyPathReady && hostsDetection.Present && hostsDetection.Manageable
+	}
+	if mihomoDetection, exists := plan.Detections[cleanupAdapterMihomo]; exists && mihomoDetection.Present && view.Config.Proxy.AutoDetect {
+		policyPathReady = policyPathReady && mihomoDetection.Manageable
+	}
+	plan.CanApply = err == nil && !hasPendingConfig && pathErr == nil && pathValid && fingerprintErr == nil && policyPathReady
 	plan.ManualRequired = !plan.CanApply
 	record := &quickStartPlanRecord{
 		plan: plan, networkFingerprint: fingerprint, configSummary: configSummary,
@@ -279,16 +286,16 @@ func quickStartEffects(cfg config.Config, detections map[string]proxy.Detection)
 	effectByAdapter := map[string]string{
 		cleanupAdapterGeneric: "system_routes", cleanupAdapterMihomo: "mihomo_policy",
 		cleanupAdapterSingBox: "sing_box_policy", cleanupAdapterXray: "xray_policy",
-		cleanupAdapterExternal: "external_policy", cleanupAdapterHosts: "windows_hosts",
+		cleanupAdapterExternal: "external_policy", cleanupAdapterHosts: "system_hosts",
 	}
 	configured := map[string]bool{
-		cleanupAdapterGeneric: true, cleanupAdapterMihomo: cfg.Proxy.Mihomo.Enabled,
+		cleanupAdapterGeneric: true, cleanupAdapterMihomo: cfg.Proxy.Mihomo.Enabled || cfg.Proxy.AutoDetect,
 		cleanupAdapterSingBox: cfg.Proxy.SingBox.Enabled, cleanupAdapterXray: cfg.Proxy.Xray.Enabled,
-		cleanupAdapterExternal: cfg.Proxy.External.Enabled, cleanupAdapterHosts: cfg.Hosts.Enabled,
+		cleanupAdapterExternal: cfg.Proxy.External.Enabled, cleanupAdapterHosts: cfg.Acceleration.Enabled,
 	}
 	var effects []string
 	for _, name := range presentAdapterNames(detections) {
-		if effect := effectByAdapter[name]; effect != "" && configured[name] {
+		if effect := effectByAdapter[name]; effect != "" && configured[name] && detections[name].Manageable {
 			effects = append(effects, effect)
 		}
 	}
@@ -298,14 +305,16 @@ func quickStartEffects(cfg config.Config, detections map[string]proxy.Detection)
 // unavailableAdapterWarnings 明确说明本次不会修改已配置但当前不可用的适配器。
 func unavailableAdapterWarnings(cfg config.Config, detections map[string]proxy.Detection) []string {
 	configured := map[string]bool{
-		cleanupAdapterMihomo: cfg.Proxy.Mihomo.Enabled, cleanupAdapterSingBox: cfg.Proxy.SingBox.Enabled,
+		cleanupAdapterMihomo: cfg.Proxy.Mihomo.Enabled || cfg.Proxy.AutoDetect, cleanupAdapterSingBox: cfg.Proxy.SingBox.Enabled,
 		cleanupAdapterXray: cfg.Proxy.Xray.Enabled, cleanupAdapterExternal: cfg.Proxy.External.Enabled,
-		cleanupAdapterHosts: cfg.Hosts.Enabled,
+		cleanupAdapterHosts: cfg.Acceleration.Enabled,
 	}
 	var warnings []string
 	for name, enabled := range configured {
 		if enabled && !detections[name].Present {
 			warnings = append(warnings, fmt.Sprintf("已配置的 %s 适配器当前不可用，本次不会修改它", name))
+		} else if enabled && detections[name].Present && !detections[name].Manageable {
+			warnings = append(warnings, fmt.Sprintf("已发现 %s，但当前不能安全管理：%s", name, detections[name].Message))
 		}
 	}
 	sort.Strings(warnings)

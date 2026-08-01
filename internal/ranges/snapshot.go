@@ -347,6 +347,28 @@ func (s Snapshot) ExcludedPrefixes() []netip.Prefix {
 	return result
 }
 
+// Contains 报告地址是否属于当前有效 Cloudflare 网段且未命中排除项。
+func (s Snapshot) Contains(address netip.Addr) bool {
+	if !address.IsValid() {
+		return false
+	}
+	for _, excluded := range s.ExcludedPrefixes() {
+		if excluded.Contains(address) {
+			return false
+		}
+	}
+	rawPrefixes := s.IPv6
+	if address.Is4() {
+		rawPrefixes = s.IPv4
+	}
+	for _, raw := range rawPrefixes {
+		if prefix, err := netip.ParsePrefix(raw); err == nil && prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
 func normalizeStrings(values []string) []string {
 	seen := make(map[string]struct{}, len(values))
 	result := make([]string, 0, len(values))

@@ -53,16 +53,47 @@ func (s *Service) Run(ctx context.Context) error {
 	go func() { serverErrors <- s.server.Serve(serviceContext) }()
 	schedulerErrors := make(chan error, 1)
 	go func() { schedulerErrors <- s.schedule(serviceContext) }()
+	discoveryErrors := make(chan error, 1)
+	go func() { discoveryErrors <- s.observeDomains(serviceContext) }()
 	select {
 	case <-ctx.Done():
 		<-serverErrors
 		<-schedulerErrors
+		<-discoveryErrors
 		s.logger.Info("后台服务停止", "result", "context_cancelled")
 		return nil
 	case err := <-serverErrors:
 		return fmt.Errorf("IPC server stopped: %w", err)
 	case err := <-schedulerErrors:
 		return fmt.Errorf("scheduler stopped: %w", err)
+	case err := <-discoveryErrors:
+		return fmt.Errorf("domain discovery stopped: %w", err)
+	}
+}
+
+// observeDomains 按配置周期执行只读发现，并记录验证与策略刷新结果。
+func (s *Service) observeDomains(ctx context.Context) error {
+	initialConfig := s.runtime.View().Config
+	if !initialConfig.Acceleration.Enabled || !initialConfig.Acceleration.AutoDiscover {
+		<-ctx.Done()
+		return nil
+	}
+	ticker := time.NewTicker(initialConfig.Acceleration.DiscoveryInterval.Duration())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			result, err := s.runtime.DiscoverAccelerationDomains(ctx)
+			if err != nil {
+				s.logger.Debug("自动发现加速域名未完成", "component", "acceleration", "error", err)
+				continue
+			}
+			if result.Verified > 0 || result.Activated > 0 {
+				s.logger.Info("自动发现加速域名完成", "component", "acceleration", "observed", result.Observed, "verified", result.Verified, "activated", result.Activated, "policy_refreshed", result.PolicyRefreshed)
+			}
+		}
 	}
 }
 

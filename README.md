@@ -15,6 +15,7 @@ CF Optimizer 是面向 Windows、Linux 和 macOS 的 Cloudflare 节点测速、�
 - 按成功率、延迟、抖动、丢包和吞吐评分，并通过历史平滑、冷却、迟滞与最短保持时间避免频繁切换。
 - 在启用后，以事务方式计划、应用、验证和回滚临时网段路由及最终 `/32`、`/128` 主机路由。
 - 支持 Generic Route、Mihomo、sing-box、Xray、版本化 External JSON-RPC 与可选 Windows Hosts 适配。
+- 将手动或已验证自动发现的 Cloudflare 精确域名映射到当前优选 IP，同时保留 TLS SNI 与 HTTP Host；Mihomo 可自动发现活动控制端口和配置，其他内核使用同一领域策略生成受管片段。
 - 通过 Windows Service、systemd 或 LaunchDaemon 运行后台服务；关闭桌面窗口会隐藏到系统托盘，退出 UI 不会停止服务或正在运行的任务。
 - 提供总览、测速优选、代理适配、网络路由、网段管理、历史、日志诊断和设置八个桌面页面。
 
@@ -60,6 +61,7 @@ Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix
 
 - `network.manage_routes: false`：默认不修改系统路由。
 - `benchmark.download_url: ""`：默认不产生下载测速流量。
+- `acceleration.manual_domains: [ani.momoc.top]`：首个手动加速域名；自动发现默认开启但自动应用默认关闭，发现结果只保存在本机。
 - 测速 Dialer 不读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `ALL_PROXY`。
 - `ranges.max_change_percent` 限制远程网段异常变化。
 - 代理密钥不会写入诊断导出；日志和导出还会再次脱敏。
@@ -127,6 +129,7 @@ The project does not treat a successful configuration write as proof that traffi
 - Score success rate, latency, jitter, loss, and throughput, with history smoothing, cooldown, hysteresis, and minimum hold time.
 - Plan, apply, verify, audit, and roll back temporary range routes and final `/32` or `/128` host routes when route management is enabled.
 - Integrate with Generic Route, Mihomo, sing-box, Xray, versioned External JSON-RPC, and optional Windows Hosts adapters.
+- Map manually configured or verified auto-discovered Cloudflare hostnames to the selected IP while preserving TLS SNI and HTTP Host. Mihomo can discover its active controller and configuration; other cores consume the same domain policy through managed fragments.
 - Run under Windows Service, systemd, or LaunchDaemon. Closing the desktop window hides it to the system tray; quitting the UI does not stop the service or an active task.
 - Provide eight operational views: overview, benchmark, proxy adapters, routes, ranges, history, logs/diagnostics, and settings.
 
@@ -172,6 +175,7 @@ See [config.example.yaml](config.example.yaml) for every field. Important defaul
 
 - `network.manage_routes: false`: the default configuration does not change system routes.
 - `benchmark.download_url: ""`: download benchmark traffic is disabled by default.
+- `acceleration.manual_domains: [ani.momoc.top]`: the first manual acceleration hostname. Discovery is enabled by default, automatic activation is disabled, and observations remain local.
 - Benchmark dialers do not read `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY`.
 - `ranges.max_change_percent` limits abnormal remote range changes.
 - Proxy secrets are excluded from diagnostics, and exported logs are redacted again.

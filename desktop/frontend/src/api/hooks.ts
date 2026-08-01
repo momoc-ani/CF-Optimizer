@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { request } from './client';
-import type { AppConfig, ProxyDetections, RangeSnapshot, RouteTransaction, RunSummary, SystemStatus } from './types';
+import type { AppConfig, DomainDiscoveryResult, ProxyDetections, RangeSnapshot, RouteTransaction, RunSummary, SystemStatus } from './types';
 
 export const queryKeys = {
   status: ['system', 'status'] as const,
@@ -10,6 +10,7 @@ export const queryKeys = {
   history: ['history'] as const,
   logs: ['logs'] as const,
   config: ['config'] as const,
+  accelerationDomains: ['acceleration', 'domains'] as const,
 };
 
 export function useStatus() {
@@ -38,4 +39,12 @@ export function useLogs(lines = 500) {
 
 export function useConfig() {
   return useQuery({ queryKey: queryKeys.config, queryFn: () => request<AppConfig>('config.get') });
+}
+
+export function useAccelerationDomains() {
+  return useQuery({
+    queryKey: queryKeys.accelerationDomains,
+    queryFn: () => request<DomainDiscoveryResult>('acceleration.domains'),
+    refetchInterval: 5_000,
+  });
 }

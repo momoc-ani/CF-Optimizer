@@ -58,29 +58,50 @@ type NodeStats struct {
 	CooldownUntil time.Time `json:"cooldown_until,omitempty"`
 }
 
+// DomainDiscovery 保存本机观察到的精确域名及其 Cloudflare 和预检状态。
+type DomainDiscovery struct {
+	Domain                string    `json:"domain"`
+	Source                string    `json:"source"`
+	FirstSeenAt           time.Time `json:"first_seen_at"`
+	LastSeenAt            time.Time `json:"last_seen_at"`
+	CloudflareVerified    bool      `json:"cloudflare_verified"`
+	PreflightVerified     bool      `json:"preflight_verified"`
+	Active                bool      `json:"active"`
+	LastResolvedAddresses []string  `json:"last_resolved_addresses,omitempty"`
+	LastError             string    `json:"last_error,omitempty"`
+}
+
 // State 保存后台服务当前节点、运行状态和历史摘要。
 type State struct {
-	Version       int                  `json:"version"`
-	UpdatedAt     time.Time            `json:"updated_at"`
-	CurrentIPv4   *Selection           `json:"current_ipv4,omitempty"`
-	CurrentIPv6   *Selection           `json:"current_ipv6,omitempty"`
-	History       []RunSummary         `json:"history"`
-	Nodes         map[string]NodeStats `json:"nodes"`
-	Policy        *PolicySnapshot      `json:"policy,omitempty"`
-	LastError     string               `json:"last_error,omitempty"`
-	LastStartedAt time.Time            `json:"last_started_at,omitempty"`
-	LastEndedAt   time.Time            `json:"last_ended_at,omitempty"`
-	Running       bool                 `json:"running"`
+	Version           int                        `json:"version"`
+	UpdatedAt         time.Time                  `json:"updated_at"`
+	CurrentIPv4       *Selection                 `json:"current_ipv4,omitempty"`
+	CurrentIPv6       *Selection                 `json:"current_ipv6,omitempty"`
+	History           []RunSummary               `json:"history"`
+	Nodes             map[string]NodeStats       `json:"nodes"`
+	DiscoveredDomains map[string]DomainDiscovery `json:"discovered_domains"`
+	Policy            *PolicySnapshot            `json:"policy,omitempty"`
+	LastError         string                     `json:"last_error,omitempty"`
+	LastStartedAt     time.Time                  `json:"last_started_at,omitempty"`
+	LastEndedAt       time.Time                  `json:"last_ended_at,omitempty"`
+	Running           bool                       `json:"running"`
 }
 
 // PolicySnapshot 保存最后一次已验证策略及适配器回滚收据。
 type PolicySnapshot struct {
-	IPv4CIDRs []string        `json:"ipv4_cidrs"`
-	IPv6CIDRs []string        `json:"ipv6_cidrs"`
-	Domains   []string        `json:"domains"`
-	Processes []string        `json:"processes"`
-	Receipts  json.RawMessage `json:"receipts"`
-	AppliedAt time.Time       `json:"applied_at"`
+	IPv4CIDRs      []string                `json:"ipv4_cidrs"`
+	IPv6CIDRs      []string                `json:"ipv6_cidrs"`
+	Domains        []string                `json:"domains"`
+	DomainMappings []DomainMappingSnapshot `json:"domain_mappings,omitempty"`
+	Processes      []string                `json:"processes"`
+	Receipts       json.RawMessage         `json:"receipts"`
+	AppliedAt      time.Time               `json:"applied_at"`
+}
+
+// DomainMappingSnapshot 保存已提交策略中的精确域名与地址映射。
+type DomainMappingSnapshot struct {
+	Domain    string   `json:"domain"`
+	Addresses []string `json:"addresses"`
 }
 
 // Store 串行化状态更新，并将每次变更原子写入磁盘。
@@ -97,7 +118,7 @@ func Open(dataDir string, maxRuns int) (*Store, error) {
 	if maxRuns < 1 {
 		maxRuns = 500
 	}
-	s := &Store{dataDir: dataDir, path: filepath.Join(dataDir, "state.json"), maxRuns: maxRuns, state: State{Version: StateSchemaVersion, History: []RunSummary{}, Nodes: map[string]NodeStats{}}}
+	s := &Store{dataDir: dataDir, path: filepath.Join(dataDir, "state.json"), maxRuns: maxRuns, state: State{Version: StateSchemaVersion, History: []RunSummary{}, Nodes: map[string]NodeStats{}, DiscoveredDomains: map[string]DomainDiscovery{}}}
 	data, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
@@ -113,6 +134,9 @@ func Open(dataDir string, maxRuns int) (*Store, error) {
 	}
 	if s.state.Nodes == nil {
 		s.state.Nodes = map[string]NodeStats{}
+	}
+	if s.state.DiscoveredDomains == nil {
+		s.state.DiscoveredDomains = map[string]DomainDiscovery{}
 	}
 	return s, nil
 }
@@ -191,6 +215,9 @@ func (s *Store) Update(fn func(*State) error) error {
 	next.Version = StateSchemaVersion
 	if next.Nodes == nil {
 		next.Nodes = map[string]NodeStats{}
+	}
+	if next.DiscoveredDomains == nil {
+		next.DiscoveredDomains = map[string]DomainDiscovery{}
 	}
 	next.UpdatedAt = time.Now().UTC()
 	if len(next.History) > s.maxRuns {

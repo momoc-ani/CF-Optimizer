@@ -80,6 +80,16 @@ proxy:
     args: []
     timeout: 15s
 
+acceleration:
+  enabled: true
+  manual_domains:
+    - ani.momoc.top
+  excluded_domains: []
+  auto_discover: true
+  auto_apply: false
+  discovery_interval: 15s
+  max_discovered_domains: 1000
+
 hosts:
   enabled: false
   path: /etc/hosts

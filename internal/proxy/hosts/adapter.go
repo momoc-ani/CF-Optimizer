@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -32,8 +31,11 @@ type planPayload struct {
 }
 
 type receiptPayload struct {
-	Previous    []byte `json:"previous"`
-	AppliedHash string `json:"applied_hash"`
+	Previous             []byte `json:"previous"`
+	AppliedHash          string `json:"applied_hash"`
+	BackupPreviousExists bool   `json:"backup_previous_exists"`
+	BackupPrevious       []byte `json:"backup_previous,omitempty"`
+	BackupAppliedHash    string `json:"backup_applied_hash,omitempty"`
 }
 
 // Adapter 只替换带标记的 Windows Hosts 区块，并为每次修改保留备份。
@@ -43,8 +45,8 @@ type Adapter struct {
 
 // New 创建受管 Hosts 适配器。
 func New(cfg config.HostsConfig) (*Adapter, error) {
-	if cfg.Path == "" || len(cfg.Domains) == 0 {
-		return nil, errors.New("Hosts path and domains are required")
+	if cfg.Path == "" {
+		return nil, errors.New("Hosts path is required")
 	}
 	return &Adapter{config: cfg}, nil
 }
@@ -54,7 +56,7 @@ func (a *Adapter) Name() string { return adapterName }
 
 // Capabilities 声明 Hosts 可表达 IPv4、IPv6 与域名映射并支持回滚。
 func (a *Adapter) Capabilities() proxy.Capabilities {
-	return proxy.Capabilities{IPv4: true, IPv6: true, Domains: true, Rollback: true}
+	return proxy.Capabilities{DomainMappings: true, Rollback: true}
 }
 
 // Detect 确认目标 Hosts 文件存在且可读取。
@@ -78,18 +80,14 @@ func (a *Adapter) Plan(_ context.Context, policy proxy.DirectPolicy) (proxy.Plan
 	if err != nil {
 		return proxy.Plan{}, err
 	}
-	domains := append([]string(nil), a.config.Domains...)
-	sort.Strings(domains)
-	addresses := append(append([]string{}, policy.IPv4CIDRs...), policy.IPv6CIDRs...)
 	var lines []string
-	for _, prefix := range addresses {
-		address := strings.SplitN(prefix, "/", 2)[0]
-		for _, domain := range domains {
-			lines = append(lines, address+" "+domain)
+	for _, mapping := range policy.DomainMappings {
+		for _, address := range mapping.Addresses {
+			lines = append(lines, address+" "+mapping.Domain)
 		}
 	}
 	if len(lines) == 0 {
-		return proxy.Plan{}, errors.New("Hosts policy has no IP address")
+		return proxy.Plan{}, errors.New("Hosts policy has no domain mapping")
 	}
 	content := append([]byte(nil), base...)
 	if len(content) > 0 && !bytes.HasSuffix(content, []byte(newline)) {
@@ -124,15 +122,23 @@ func (a *Adapter) Apply(_ context.Context, plan proxy.Plan) (proxy.Receipt, erro
 		return proxy.Receipt{}, errors.New("Hosts file changed after planning")
 	}
 	changed := !bytes.Equal(previous, payload.Content)
+	backupPath := a.config.Path + ".cf-optimizer.backup"
+	backupPrevious, backupExisted, err := readOptionalFile(backupPath)
+	if err != nil {
+		return proxy.Receipt{}, fmt.Errorf("read Hosts backup: %w", err)
+	}
 	if changed {
-		if err := fsutil.WriteFileAtomic(a.config.Path+".cf-optimizer.backup", previous, 0o600); err != nil {
+		if err := fsutil.WriteFileAtomic(backupPath, previous, 0o600); err != nil {
 			return proxy.Receipt{}, fmt.Errorf("back up Hosts file: %w", err)
 		}
-		if err := fsutil.WriteFileAtomic(a.config.Path, payload.Content, 0o644); err != nil {
+		if err := writeHostsFile(a.config.Path, payload.Content, previous, 0o644); err != nil {
 			return proxy.Receipt{}, fmt.Errorf("write Hosts file: %w", err)
 		}
 	}
-	receiptData, err := json.Marshal(receiptPayload{Previous: previous, AppliedHash: hash(payload.Content)})
+	receiptData, err := json.Marshal(receiptPayload{
+		Previous: previous, AppliedHash: hash(payload.Content), BackupPreviousExists: backupExisted,
+		BackupPrevious: backupPrevious, BackupAppliedHash: hash(previous),
+	})
 	if err != nil {
 		return proxy.Receipt{}, err
 	}
@@ -168,13 +174,59 @@ func (a *Adapter) Rollback(_ context.Context, receipt proxy.Receipt) error {
 	if err != nil {
 		return err
 	}
-	if bytes.Equal(current, payload.Previous) {
-		return nil
-	}
-	if hash(current) != payload.AppliedHash {
+	hostsRestored := bytes.Equal(current, payload.Previous)
+	if !hostsRestored && hash(current) != payload.AppliedHash {
 		return errors.New("Hosts changed after apply; refusing rollback overwrite")
 	}
-	return fsutil.WriteFileAtomic(a.config.Path, payload.Previous, 0o644)
+	if payload.BackupAppliedHash == "" {
+		if hostsRestored {
+			return nil
+		}
+		return writeHostsFile(a.config.Path, payload.Previous, current, 0o644)
+	}
+	backupPath := a.config.Path + ".cf-optimizer.backup"
+	backupCurrent, backupExists, err := readOptionalFile(backupPath)
+	if err != nil {
+		return err
+	}
+	backupRestored := optionalFileEquals(backupCurrent, backupExists, payload.BackupPrevious, payload.BackupPreviousExists)
+	if !backupRestored && (!backupExists || hash(backupCurrent) != payload.BackupAppliedHash) {
+		return errors.New("Hosts backup changed after apply; refusing rollback overwrite")
+	}
+	if !hostsRestored {
+		if err := writeHostsFile(a.config.Path, payload.Previous, current, 0o644); err != nil {
+			return err
+		}
+	}
+	if backupRestored {
+		return nil
+	}
+	return restoreOptionalFile(backupPath, payload.BackupPrevious, payload.BackupPreviousExists, 0o600)
+}
+
+// readOptionalFile 区分不存在的可选文件与实际读取失败。
+func readOptionalFile(path string) ([]byte, bool, error) {
+	content, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	return content, err == nil, err
+}
+
+// restoreOptionalFile 按收据恢复旧内容，或移除本次新建的受管文件。
+func restoreOptionalFile(path string, content []byte, existed bool, permission os.FileMode) error {
+	if existed {
+		return fsutil.WriteFileAtomic(path, content, permission)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// optionalFileEquals 同时比较可选文件的存在状态和内容。
+func optionalFileEquals(current []byte, currentExists bool, previous []byte, previousExists bool) bool {
+	return currentExists == previousExists && (!currentExists || bytes.Equal(current, previous))
 }
 
 func removeManagedBlock(content []byte) ([]byte, string, error) {

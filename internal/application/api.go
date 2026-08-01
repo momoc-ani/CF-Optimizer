@@ -77,6 +77,10 @@ func (a *API) Handle(ctx context.Context, request ipc.Request, emit func(any) er
 		return a.runtime.Routes.Transactions(), nil
 	case "proxy.detect":
 		return a.runtime.DetectProxyAdapters(ctx), nil
+	case "acceleration.domains":
+		return a.runtime.domainDiscoverySnapshot(), nil
+	case "acceleration.discover":
+		return a.runtime.DiscoverAccelerationDomains(ctx)
 	case "diagnostics.route":
 		return a.routeDiagnostics(ctx, request.Params)
 	case "config.get":

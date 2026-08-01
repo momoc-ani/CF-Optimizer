@@ -11,10 +11,17 @@ import (
 
 // DirectPolicy 是所有代理内核共享的最小直连策略模型。
 type DirectPolicy struct {
-	Processes []string `json:"processes"`
-	IPv4CIDRs []string `json:"ipv4_cidrs"`
-	IPv6CIDRs []string `json:"ipv6_cidrs"`
-	Domains   []string `json:"domains"`
+	Processes      []string        `json:"processes"`
+	IPv4CIDRs      []string        `json:"ipv4_cidrs"`
+	IPv6CIDRs      []string        `json:"ipv6_cidrs"`
+	Domains        []string        `json:"domains"`
+	DomainMappings []DomainMapping `json:"domain_mappings"`
+}
+
+// DomainMapping 将一个精确 FQDN 映射到已预检的优选地址集合。
+type DomainMapping struct {
+	Domain    string   `json:"domain"`
+	Addresses []string `json:"addresses"`
 }
 
 // Normalize 校验地址族和可注入文本，并返回稳定排序、去重后的策略。
@@ -48,11 +55,35 @@ func (p DirectPolicy) Normalize() (DirectPolicy, error) {
 		}
 		result.Domains = append(result.Domains, domain)
 	}
+	mappings := make(map[string][]string, len(p.DomainMappings))
+	for _, mapping := range p.DomainMappings {
+		domain := strings.ToLower(strings.TrimSpace(mapping.Domain))
+		if strings.HasPrefix(domain, "+.") || strings.HasPrefix(domain, "*.") {
+			return DirectPolicy{}, fmt.Errorf("domain mapping %q must use an exact FQDN", mapping.Domain)
+		}
+		if err := validateDomain(domain); err != nil {
+			return DirectPolicy{}, fmt.Errorf("invalid domain mapping %q: %w", mapping.Domain, err)
+		}
+		if len(mapping.Addresses) == 0 {
+			return DirectPolicy{}, fmt.Errorf("domain mapping %q has no address", mapping.Domain)
+		}
+		for _, rawAddress := range mapping.Addresses {
+			address, err := netip.ParseAddr(strings.TrimSpace(rawAddress))
+			if err != nil || !address.IsGlobalUnicast() || address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast() {
+				return DirectPolicy{}, fmt.Errorf("domain mapping %q contains an unsafe address %q", mapping.Domain, rawAddress)
+			}
+			mappings[domain] = append(mappings[domain], address.Unmap().String())
+		}
+	}
+	for domain, addresses := range mappings {
+		result.DomainMappings = append(result.DomainMappings, DomainMapping{Domain: domain, Addresses: normalizeList(addresses)})
+	}
+	sort.Slice(result.DomainMappings, func(i, j int) bool { return result.DomainMappings[i].Domain < result.DomainMappings[j].Domain })
 	result.IPv4CIDRs = normalizeList(result.IPv4CIDRs)
 	result.IPv6CIDRs = normalizeList(result.IPv6CIDRs)
 	result.Processes = normalizeList(result.Processes)
 	result.Domains = normalizeList(result.Domains)
-	if len(result.IPv4CIDRs)+len(result.IPv6CIDRs)+len(result.Processes)+len(result.Domains) == 0 {
+	if len(result.IPv4CIDRs)+len(result.IPv6CIDRs)+len(result.Processes)+len(result.Domains)+len(result.DomainMappings) == 0 {
 		return DirectPolicy{}, errors.New("direct policy must contain at least one target")
 	}
 	return result, nil

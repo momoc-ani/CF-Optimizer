@@ -45,6 +45,7 @@ const baseStatus = (): SystemStatus => ({
     current_ipv4: { ip: '104.16.132.229', family: 4, score: 94.6, selected_at: iso(-3), last_successful_at: iso(-3), consecutive_failures: 0, policy_verified: true },
     current_ipv6: { ip: '2606:4700:3037::6815:1d8', family: 6, score: 89.8, selected_at: iso(-363), last_successful_at: iso(-3), consecutive_failures: 0, policy_verified: true },
     history,
+    discovered_domains: {},
     last_started_at: iso(-6),
     last_ended_at: iso(-3),
     running,
@@ -71,10 +72,10 @@ const routes: RouteTransaction[] = [
 ];
 
 const proxyDetections: ProxyDetections = {
-  generic: { present: true, version: 'route-v1', message: 'Host route lifecycle available' },
-  mihomo: { present: true, version: 'v1.19.4', message: 'Controller and managed provider reachable' },
-  'sing-box': { present: false, message: 'Managed file is not configured' },
-  xray: { present: false, message: 'Managed file is not configured' },
+  generic: { present: true, manageable: true, version: 'route-v1', message: 'Host route lifecycle available' },
+  mihomo: { present: true, manageable: true, version: 'v1.19.4', endpoint: 'http://127.0.0.1:9097', config_path: 'C:\\Users\\demo\\AppData\\Roaming\\Clash Verge\\clash-verge.yaml', message: 'Controller and active config reachable' },
+  'sing-box': { present: false, manageable: false, message: 'Managed file is not configured' },
+  xray: { present: false, manageable: false, message: 'Managed file is not configured' },
 };
 
 export const mockConfig: AppConfig = {
@@ -84,6 +85,7 @@ export const mockConfig: AppConfig = {
   ranges: { source: 'cloudflare-api', api_url: 'https://api.cloudflare.com/client/v4/ips', ipv4_url: 'https://www.cloudflare.com/ips-v4', ipv6_url: 'https://www.cloudflare.com/ips-v6', refresh_interval: '24h0m0s', stale_after: '168h0m0s', max_change_percent: 30, request_timeout: '20s', include: [], exclude: ['104.16.10.0/24'] },
   benchmark: { ipv4: true, ipv6: true, candidates: 1000, connect_attempts: 4, concurrency: 200, connect_timeout: '1.5s', latency_limit: '300ms', loss_limit: 0.25, download_top: 20, download_url: 'https://speed.example.net/10mb.bin', tls_server_name: 'speed.example.net', tls_timeout: '5s', download_duration: '8s', download_max_bytes: 33554432, switch_improvement: 0.15, minimum_hold: '30m0s', failure_threshold: 3, failure_cooldown: '6h0m0s', daily_seed: '' },
   network: { interface: 'Ethernet 2', gateway_ipv4: '192.168.50.1', gateway_ipv6: 'fe80::1', manage_routes: true, command_timeout: '10s' },
+  acceleration: { enabled: true, manual_domains: ['ani.momoc.top'], excluded_domains: [], auto_discover: true, auto_apply: false, discovery_interval: '15s', max_discovered_domains: 1000 },
   proxy: { auto_detect: true, generic: { enabled: true }, mihomo: { enabled: true, controller: 'http://127.0.0.1:9090', provider_file: '/etc/mihomo/rules/cf-optimizer.yaml', reload_config: '', timeout: '5s' }, sing_box: { enabled: false }, xray: { enabled: false }, external: { enabled: false } },
   hosts: { enabled: false, path: 'C:\\Windows\\System32\\drivers\\etc\\hosts', domains: [] },
   ipc: { endpoint: '\\\\.\\pipe\\cf-optimizer-v1' },
@@ -95,7 +97,7 @@ function emit(event: OptimizerEvent) {
   listeners.forEach((listener) => listener(event));
 }
 
-async function runOptimization(): Promise<RunReport> {
+async function runOptimization(shouldHoldForCancellation = false): Promise<RunReport> {
   if (running) throw new Error('conflict: an optimization run is already active');
   running = true;
   cancelled = false;
@@ -107,7 +109,7 @@ async function runOptimization(): Promise<RunReport> {
     { run_id: runId, type: 'benchmark.progress', stage: 'download', progress: { stage: 'download', completed: 12, total: 20, qualified: 27, ip: '104.16.132.229' }, timestamp: new Date().toISOString(), delay: 220 },
     { run_id: runId, type: 'selection.completed', stage: 'selection', message: 'IPv4 improved 18.4%; IPv6 kept', timestamp: new Date().toISOString(), delay: 180 },
   ];
-  for (const stage of stages) {
+  for (const [index, stage] of stages.entries()) {
     await new Promise((resolve) => window.setTimeout(resolve, stage.delay));
     if (cancelled) {
       running = false;
@@ -115,6 +117,13 @@ async function runOptimization(): Promise<RunReport> {
       throw new Error('cancelled: optimization was cancelled');
     }
     emit(stage);
+    // 普通优选在首个事件后保留稳定的取消窗口，避免并行 E2E 受机器调度速度影响。
+    if (shouldHoldForCancellation && index === 0) {
+      const deadline = Date.now() + 3_000;
+      while (!cancelled && Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 25));
+      }
+    }
   }
   running = false;
   activeEvent = undefined;
@@ -130,14 +139,14 @@ export async function mockRequest<T>(method: string, parameters: Record<string, 
   await new Promise((resolve) => window.setTimeout(resolve, 40));
   switch (method) {
     case 'system.status': return baseStatus() as T;
-    case 'optimizer.run': return runOptimization() as Promise<T>;
+    case 'optimizer.run': return runOptimization(true) as Promise<T>;
     case 'quickstart.plan': return {
       plan_id: `plan-${Date.now()}`,
       expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
       physical_path: baseStatus().physical_path,
       effects: ['system_routes', 'mihomo_policy'],
       warnings: [],
-      detections: { 'generic-route': { present: true }, mihomo: proxyDetections.mihomo },
+      detections: { 'generic-route': { present: true, manageable: true }, mihomo: proxyDetections.mihomo },
       can_apply: true,
       manual_required: false,
       auto_maintenance_enabled: false,
@@ -161,6 +170,8 @@ export async function mockRequest<T>(method: string, parameters: Record<string, 
     case 'history.list': return history as T;
     case 'routes.list': return routes as T;
     case 'proxy.detect': return proxyDetections as T;
+    case 'acceleration.domains': return { observed: 0, verified: 1, activated: 0, policy_refreshed: false, domains: [{ domain: 'ani.momoc.top', source: 'manual', first_seen_at: iso(-60), last_seen_at: iso(0), cloudflare_verified: true, preflight_verified: true, active: true, last_resolved_addresses: ['104.21.92.119', '172.67.192.253'] }] } as T;
+    case 'acceleration.discover': return { observed: 12, verified: 1, activated: 0, policy_refreshed: false, domains: [] } as T;
     case 'config.get': return mockConfig as T;
     case 'config.update': return { saved: true, restart_required: true } as T;
     case 'logs.tail': return [

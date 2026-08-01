@@ -11,20 +11,23 @@ import (
 
 // Capabilities 声明适配器能够安全管理的策略类型和生命周期能力。
 type Capabilities struct {
-	Processes bool `json:"processes"`
-	IPv4      bool `json:"ipv4"`
-	IPv6      bool `json:"ipv6"`
-	Domains   bool `json:"domains"`
-	HotReload bool `json:"hot_reload"`
-	Rollback  bool `json:"rollback"`
+	Processes      bool `json:"processes"`
+	IPv4           bool `json:"ipv4"`
+	IPv6           bool `json:"ipv6"`
+	Domains        bool `json:"domains"`
+	DomainMappings bool `json:"domain_mappings"`
+	HotReload      bool `json:"hot_reload"`
+	Rollback       bool `json:"rollback"`
 }
 
 // Detection 表示代理内核是否存在以及可展示的非敏感版本信息。
 type Detection struct {
-	Present  bool   `json:"present"`
-	Version  string `json:"version,omitempty"`
-	Endpoint string `json:"endpoint,omitempty"`
-	Message  string `json:"message,omitempty"`
+	Present    bool   `json:"present"`
+	Manageable bool   `json:"manageable"`
+	Version    string `json:"version,omitempty"`
+	Endpoint   string `json:"endpoint,omitempty"`
+	ConfigPath string `json:"config_path,omitempty"`
+	Message    string `json:"message,omitempty"`
 }
 
 // Plan 是可审计、可序列化但尚未应用的适配器变更。
@@ -94,6 +97,9 @@ func (c *Coordinator) Detect(ctx context.Context) map[string]Detection {
 		if err != nil {
 			detection.Message = err.Error()
 		}
+		if detection.Present && err == nil {
+			detection.Manageable = true
+		}
 		result[adapter.Name()] = detection
 	}
 	return result
@@ -108,6 +114,7 @@ func (c *Coordinator) Capabilities() Capabilities {
 		combined.IPv4 = combined.IPv4 || capability.IPv4
 		combined.IPv6 = combined.IPv6 || capability.IPv6
 		combined.Domains = combined.Domains || capability.Domains
+		combined.DomainMappings = combined.DomainMappings || capability.DomainMappings
 		combined.HotReload = combined.HotReload || capability.HotReload
 		combined.Rollback = combined.Rollback || capability.Rollback
 	}
@@ -172,7 +179,8 @@ func adapterSupportsAny(policy DirectPolicy, capabilities Capabilities) bool {
 	return (len(policy.Processes) > 0 && capabilities.Processes) ||
 		(len(policy.IPv4CIDRs) > 0 && capabilities.IPv4) ||
 		(len(policy.IPv6CIDRs) > 0 && capabilities.IPv6) ||
-		(len(policy.Domains) > 0 && capabilities.Domains)
+		(len(policy.Domains) > 0 && capabilities.Domains) ||
+		(len(policy.DomainMappings) > 0 && capabilities.DomainMappings)
 }
 
 func ensurePolicyCoverage(policy DirectPolicy, adapters []Adapter) error {
@@ -183,6 +191,7 @@ func ensurePolicyCoverage(policy DirectPolicy, adapters []Adapter) error {
 		combined.IPv4 = combined.IPv4 || capability.IPv4
 		combined.IPv6 = combined.IPv6 || capability.IPv6
 		combined.Domains = combined.Domains || capability.Domains
+		combined.DomainMappings = combined.DomainMappings || capability.DomainMappings
 	}
 	if len(policy.Processes) > 0 && !combined.Processes {
 		return errors.New("no active adapter supports process DIRECT rules")
@@ -195,6 +204,9 @@ func ensurePolicyCoverage(policy DirectPolicy, adapters []Adapter) error {
 	}
 	if len(policy.Domains) > 0 && !combined.Domains {
 		return errors.New("no active adapter supports domain DIRECT rules")
+	}
+	if len(policy.DomainMappings) > 0 && !combined.DomainMappings {
+		return errors.New("no active adapter supports domain mappings")
 	}
 	return nil
 }

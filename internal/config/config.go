@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -54,16 +55,28 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 
 // Config 汇总版本化的服务端配置。
 type Config struct {
-	Version   int             `yaml:"version" json:"version"`
-	DataDir   string          `yaml:"data_dir,omitempty" json:"data_dir"`
-	Schedule  ScheduleConfig  `yaml:"schedule" json:"schedule"`
-	Ranges    RangesConfig    `yaml:"ranges" json:"ranges"`
-	Benchmark BenchmarkConfig `yaml:"benchmark" json:"benchmark"`
-	Network   NetworkConfig   `yaml:"network" json:"network"`
-	Proxy     ProxyConfig     `yaml:"proxy" json:"proxy"`
-	Hosts     HostsConfig     `yaml:"hosts" json:"hosts"`
-	IPC       IPCConfig       `yaml:"ipc" json:"ipc"`
-	History   HistoryConfig   `yaml:"history" json:"history"`
+	Version      int                `yaml:"version" json:"version"`
+	DataDir      string             `yaml:"data_dir,omitempty" json:"data_dir"`
+	Schedule     ScheduleConfig     `yaml:"schedule" json:"schedule"`
+	Ranges       RangesConfig       `yaml:"ranges" json:"ranges"`
+	Benchmark    BenchmarkConfig    `yaml:"benchmark" json:"benchmark"`
+	Network      NetworkConfig      `yaml:"network" json:"network"`
+	Proxy        ProxyConfig        `yaml:"proxy" json:"proxy"`
+	Acceleration AccelerationConfig `yaml:"acceleration" json:"acceleration"`
+	Hosts        HostsConfig        `yaml:"hosts" json:"hosts"`
+	IPC          IPCConfig          `yaml:"ipc" json:"ipc"`
+	History      HistoryConfig      `yaml:"history" json:"history"`
+}
+
+// AccelerationConfig 定义精确域名加速、自动发现和自动应用边界。
+type AccelerationConfig struct {
+	Enabled              bool     `yaml:"enabled" json:"enabled"`
+	ManualDomains        []string `yaml:"manual_domains" json:"manual_domains"`
+	ExcludedDomains      []string `yaml:"excluded_domains" json:"excluded_domains"`
+	AutoDiscover         bool     `yaml:"auto_discover" json:"auto_discover"`
+	AutoApply            bool     `yaml:"auto_apply" json:"auto_apply"`
+	DiscoveryInterval    Duration `yaml:"discovery_interval" json:"discovery_interval"`
+	MaxDiscoveredDomains int      `yaml:"max_discovered_domains" json:"max_discovered_domains"`
 }
 
 // ScheduleConfig 定义周期任务与网络变化检测行为。
@@ -192,7 +205,7 @@ func Default() Config {
 			Source: "cloudflare-api", APIURL: "https://api.cloudflare.com/client/v4/ips",
 			IPv4URL: "https://www.cloudflare.com/ips-v4", IPv6URL: "https://www.cloudflare.com/ips-v6",
 			RefreshInterval: Duration(24 * time.Hour), StaleAfter: Duration(7 * 24 * time.Hour),
-			MaxChangePercent: 30, RequestTimeout: Duration(20 * time.Second),
+			MaxChangePercent: 30, RequestTimeout: Duration(20 * time.Second), Include: []string{}, Exclude: []string{},
 		},
 		Benchmark: BenchmarkConfig{
 			IPv4: true, IPv6: true, Candidates: 1000, ConnectAttempts: 4, Concurrency: 200,
@@ -208,6 +221,10 @@ func Default() Config {
 			SingBox:  ManagedProxyConfig{DirectOutbound: "direct", Timeout: Duration(10 * time.Second)},
 			Xray:     ManagedProxyConfig{DirectOutbound: "direct", Timeout: Duration(10 * time.Second)},
 			External: ExternalProxyConfig{Timeout: Duration(15 * time.Second)},
+		},
+		Acceleration: AccelerationConfig{
+			Enabled: true, ManualDomains: []string{"ani.momoc.top"}, ExcludedDomains: []string{}, AutoDiscover: true,
+			DiscoveryInterval: Duration(15 * time.Second), MaxDiscoveredDomains: 1000,
 		},
 		Hosts:   HostsConfig{Path: defaultHostsPath()},
 		History: HistoryConfig{SummaryRetention: Duration(30 * 24 * time.Hour), DetailRetention: Duration(7 * 24 * time.Hour), MaxRuns: 500},
@@ -239,6 +256,7 @@ func Load(path, dataDirOverride string) (Config, error) {
 	if cfg.IPC.Endpoint == "" {
 		cfg.IPC.Endpoint = DefaultEndpoint(cfg.DataDir)
 	}
+	cfg.normalizeCollections()
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -247,11 +265,31 @@ func Load(path, dataDirOverride string) (Config, error) {
 
 // Save 以原子方式保存 YAML 配置。
 func Save(path string, cfg Config) error {
+	cfg.normalizeCollections()
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return err
 	}
 	return fsutil.WriteFileAtomic(path, data, 0o600)
+}
+
+// normalizeCollections 保证 JSON/YAML 边界使用空数组而不是 null，兼容旧配置迁移和前端表单。
+func (c *Config) normalizeCollections() {
+	if c.Ranges.Include == nil {
+		c.Ranges.Include = []string{}
+	}
+	if c.Ranges.Exclude == nil {
+		c.Ranges.Exclude = []string{}
+	}
+	if c.Acceleration.ManualDomains == nil {
+		c.Acceleration.ManualDomains = []string{}
+	}
+	if c.Acceleration.ExcludedDomains == nil {
+		c.Acceleration.ExcludedDomains = []string{}
+	}
+	if c.Hosts.Domains == nil {
+		c.Hosts.Domains = []string{}
+	}
 }
 
 // Validate 校验配置边界以及会影响网络安全的组合约束。
@@ -297,8 +335,9 @@ func (c Config) Validate() error {
 		"ranges.refresh_interval": c.Ranges.RefreshInterval,
 		"ranges.stale_after":      c.Ranges.StaleAfter, "benchmark.connect_timeout": c.Benchmark.ConnectTimeout,
 		"benchmark.latency_limit": c.Benchmark.LatencyLimit, "benchmark.tls_timeout": c.Benchmark.TLSTimeout,
-		"benchmark.failure_cooldown": c.Benchmark.FailureCooldown,
-		"network.command_timeout":    c.Network.CommandTimeout,
+		"benchmark.failure_cooldown":      c.Benchmark.FailureCooldown,
+		"network.command_timeout":         c.Network.CommandTimeout,
+		"acceleration.discovery_interval": c.Acceleration.DiscoveryInterval,
 	} {
 		if value.Duration() <= 0 {
 			return fmt.Errorf("%s must be positive", name)
@@ -325,15 +364,17 @@ func (c Config) Validate() error {
 	if err := validateProxyConfig(c.Proxy); err != nil {
 		return err
 	}
-	if c.Hosts.Enabled {
-		if runtime.GOOS != "windows" {
-			return errors.New("Hosts management is supported only on Windows")
+	if c.Acceleration.MaxDiscoveredDomains < 1 || c.Acceleration.MaxDiscoveredDomains > 100000 {
+		return errors.New("acceleration.max_discovered_domains must be between 1 and 100000")
+	}
+	for _, domain := range append(append([]string{}, c.Acceleration.ManualDomains...), c.Acceleration.ExcludedDomains...) {
+		if err := validateConfigDomain(domain); err != nil {
+			return fmt.Errorf("invalid acceleration domain %q: %w", domain, err)
 		}
+	}
+	if c.Hosts.Enabled {
 		if !filepath.IsAbs(c.Hosts.Path) {
 			return errors.New("hosts.path must be absolute when Hosts management is enabled")
-		}
-		if len(c.Hosts.Domains) == 0 {
-			return errors.New("hosts.domains must not be empty when Hosts management is enabled")
 		}
 		for _, domain := range c.Hosts.Domains {
 			if err := validateConfigDomain(domain); err != nil {
@@ -342,6 +383,32 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// AccelerationDomains 返回兼容旧 hosts.domains 后的手动精确域名集合。
+func (c Config) AccelerationDomains() []string {
+	seen := make(map[string]struct{}, len(c.Acceleration.ManualDomains)+len(c.Hosts.Domains))
+	excluded := make(map[string]struct{}, len(c.Acceleration.ExcludedDomains))
+	for _, domain := range c.Acceleration.ExcludedDomains {
+		excluded[strings.ToLower(strings.TrimSpace(domain))] = struct{}{}
+	}
+	result := make([]string, 0, len(c.Acceleration.ManualDomains)+len(c.Hosts.Domains))
+	for _, domain := range append(append([]string{}, c.Acceleration.ManualDomains...), c.Hosts.Domains...) {
+		domain = strings.ToLower(strings.TrimSpace(domain))
+		if domain == "" {
+			continue
+		}
+		if _, blocked := excluded[domain]; blocked {
+			continue
+		}
+		if _, exists := seen[domain]; exists {
+			continue
+		}
+		seen[domain] = struct{}{}
+		result = append(result, domain)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func validateProxyConfig(proxy ProxyConfig) error {

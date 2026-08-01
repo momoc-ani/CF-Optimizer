@@ -10,6 +10,7 @@ import { request } from '../api/client';
 import { queryKeys, useConfig } from '../api/hooks';
 import type { AppConfig } from '../api/types';
 import { ErrorState, LoadingState, PageHeader, Section } from '../components/Page';
+import { joinConfigLines } from '../lib/configCollections';
 
 const durationPattern = /^\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h)$/;
 const settingsSchema = z.object({
@@ -29,6 +30,12 @@ const settingsSchema = z.object({
   rangeInclude: z.string(),
   rangeExclude: z.string(),
   proxyAutoDetect: z.boolean(),
+  accelerationEnabled: z.boolean(),
+  accelerationManualDomains: z.string(),
+  accelerationExcludedDomains: z.string(),
+  accelerationAutoDiscover: z.boolean(),
+  accelerationAutoApply: z.boolean(),
+  accelerationDiscoveryInterval: z.string().regex(durationPattern, '请输入带单位的发现间隔，例如 15s'),
   networkInterface: z.string(),
   gatewayIPv4: z.string(),
   gatewayIPv6: z.string(),
@@ -43,6 +50,11 @@ type SettingsForm = z.infer<typeof settingsSchema>;
 /** parseCIDRList 将多行或逗号分隔输入规范化为后台继续校验的字符串数组。 */
 function parseCIDRList(value: string): string[] {
   return [...new Set(value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean))];
+}
+
+/** parseDomainList 将多行精确域名规范化为稳定去重列表。 */
+function parseDomainList(value: string): string[] {
+  return [...new Set(value.split(/[\n,]/).map((item) => item.trim().toLowerCase().replace(/\.$/, '')).filter(Boolean))].sort();
 }
 
 /** formFromConfig 将后台配置投影为只含可编辑字段的表单。 */
@@ -61,9 +73,15 @@ function formFromConfig(config: AppConfig): SettingsForm {
     downloadURL: config.benchmark.download_url,
     tlsServerName: config.benchmark.tls_server_name,
     rangeRefreshInterval: config.ranges.refresh_interval,
-    rangeInclude: config.ranges.include.join('\n'),
-    rangeExclude: config.ranges.exclude.join('\n'),
+    rangeInclude: joinConfigLines(config.ranges.include),
+    rangeExclude: joinConfigLines(config.ranges.exclude),
     proxyAutoDetect: Boolean(config.proxy.auto_detect),
+    accelerationEnabled: config.acceleration.enabled,
+    accelerationManualDomains: joinConfigLines(config.acceleration.manual_domains),
+    accelerationExcludedDomains: joinConfigLines(config.acceleration.excluded_domains),
+    accelerationAutoDiscover: config.acceleration.auto_discover,
+    accelerationAutoApply: config.acceleration.auto_apply,
+    accelerationDiscoveryInterval: config.acceleration.discovery_interval,
     networkInterface: config.network.interface,
     gatewayIPv4: config.network.gateway_ipv4,
     gatewayIPv6: config.network.gateway_ipv6,
@@ -91,6 +109,15 @@ function mergeSettings(config: AppConfig, form: SettingsForm): AppConfig {
     },
     network: { ...config.network, interface: form.networkInterface.trim(), gateway_ipv4: form.gatewayIPv4.trim(), gateway_ipv6: form.gatewayIPv6.trim(), manage_routes: form.manageRoutes },
     proxy: { ...config.proxy, auto_detect: form.proxyAutoDetect },
+    acceleration: {
+      ...config.acceleration,
+      enabled: form.accelerationEnabled,
+      manual_domains: parseDomainList(form.accelerationManualDomains),
+      excluded_domains: parseDomainList(form.accelerationExcludedDomains),
+      auto_discover: form.accelerationAutoDiscover,
+      auto_apply: form.accelerationAutoApply,
+      discovery_interval: form.accelerationDiscoveryInterval,
+    },
   };
 }
 
@@ -100,7 +127,7 @@ export function SettingsPage() {
   const queryClient = useQueryClient();
   const { colorScheme, setColorScheme } = useMantineColorScheme();
   const form = useForm<SettingsForm>({ resolver: zodResolver(settingsSchema), defaultValues: {
-    scheduleEnabled: true, scheduleInterval: '6h', runOnNetworkChange: true, ipv4: true, ipv6: true, candidates: 1000, concurrency: 200, connectAttempts: 4, lossLimitPercent: 25, switchImprovementPercent: 15, downloadURL: '', tlsServerName: '', rangeRefreshInterval: '24h', rangeInclude: '', rangeExclude: '', proxyAutoDetect: true, networkInterface: '', gatewayIPv4: '', gatewayIPv6: '', manageRoutes: false,
+    scheduleEnabled: true, scheduleInterval: '6h', runOnNetworkChange: true, ipv4: true, ipv6: true, candidates: 1000, concurrency: 200, connectAttempts: 4, lossLimitPercent: 25, switchImprovementPercent: 15, downloadURL: '', tlsServerName: '', rangeRefreshInterval: '24h', rangeInclude: '', rangeExclude: '', proxyAutoDetect: true, accelerationEnabled: true, accelerationManualDomains: 'ani.momoc.top', accelerationExcludedDomains: '', accelerationAutoDiscover: true, accelerationAutoApply: false, accelerationDiscoveryInterval: '15s', networkInterface: '', gatewayIPv4: '', gatewayIPv6: '', manageRoutes: false,
   } });
   useEffect(() => { if (config.data) form.reset(formFromConfig(config.data)); }, [config.data, form]);
   const save = useMutation({
@@ -162,6 +189,16 @@ export function SettingsPage() {
           </Stack>
 
           <Stack gap="md">
+            <Section title="加速域名" className="inspector-section">
+              <Stack gap="md">
+                <Controller control={form.control} name="accelerationEnabled" render={({ field }) => <Switch label="启用 Cloudflare 域名加速" checked={field.value} onChange={field.onChange} />} />
+                <Controller control={form.control} name="accelerationManualDomains" render={({ field }) => <Textarea {...field} label="手动域名" autosize minRows={4} ff="monospace" placeholder="每行一个精确域名" />} />
+                <Controller control={form.control} name="accelerationExcludedDomains" render={({ field }) => <Textarea {...field} label="排除域名" autosize minRows={3} ff="monospace" placeholder="每行一个精确域名" />} />
+                <Controller control={form.control} name="accelerationAutoDiscover" render={({ field }) => <Switch label="自动发现 Cloudflare 域名" checked={field.value} onChange={field.onChange} />} />
+                <Controller control={form.control} name="accelerationAutoApply" render={({ field }) => <Switch color="orange" label="自动应用已验证域名" checked={field.value} onChange={field.onChange} />} />
+                <Controller control={form.control} name="accelerationDiscoveryInterval" render={({ field }) => <TextInput {...field} label="发现间隔" error={errors.accelerationDiscoveryInterval?.message} />} />
+              </Stack>
+            </Section>
             <Section title="系统与代理" className="inspector-section">
               <Stack gap="md">
                 <Controller control={form.control} name="proxyAutoDetect" render={({ field }) => <Switch label="自动检测代理适配器" checked={field.value} onChange={field.onChange} />} />

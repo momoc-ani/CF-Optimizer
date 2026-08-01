@@ -9,12 +9,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
-	"net/url"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/cf-optimizer/cf-optimizer/internal/acceleration"
 	"github.com/cf-optimizer/cf-optimizer/internal/benchmark"
 	"github.com/cf-optimizer/cf-optimizer/internal/candidates"
 	"github.com/cf-optimizer/cf-optimizer/internal/config"
@@ -42,6 +41,17 @@ type PolicyApplier interface {
 	Capabilities() proxy.Capabilities
 	Apply(context.Context, proxy.DirectPolicy) (proxy.ApplyResult, error)
 	Rollback(context.Context, proxy.ApplyResult) error
+}
+
+// DomainMappingVerifier 验证映射应用前后的 HTTPS 连接证据。
+type DomainMappingVerifier interface {
+	VerifyPreflight(context.Context, []proxy.DomainMapping) error
+	VerifyApplied(context.Context, []proxy.DomainMapping) error
+}
+
+// DomainResolver 通过物理网络返回域名的真实地址，用于 Cloudflare 归属校验。
+type DomainResolver interface {
+	Resolve(context.Context, string) ([]netip.Addr, error)
 }
 
 // Event 是后台任务发送给 IPC 和桌面界面的版本稳定进度载荷。
@@ -76,16 +86,28 @@ type RunReport struct {
 
 // Runner 协调网段、候选、测速、稳定选择、路由和代理策略的完整事务。
 type Runner struct {
-	config       config.Config
-	ranges       RangeSource
-	benchmark    Benchmarker
-	store        *store.Store
-	routes       *cfnetwork.RouteController
-	physicalPath cfnetwork.PhysicalPath
-	policy       PolicyApplier
-	logger       *slog.Logger
-	now          func() time.Time
-	runMutex     sync.Mutex
+	config         config.Config
+	ranges         RangeSource
+	benchmark      Benchmarker
+	store          *store.Store
+	routes         *cfnetwork.RouteController
+	physicalPath   cfnetwork.PhysicalPath
+	policy         PolicyApplier
+	domainVerifier DomainMappingVerifier
+	domainResolver DomainResolver
+	logger         *slog.Logger
+	now            func() time.Time
+	runMutex       sync.Mutex
+}
+
+// SetDomainMappingVerifier 注入生产环境的物理接口 HTTPS 验证器。
+func (r *Runner) SetDomainMappingVerifier(verifier DomainMappingVerifier) {
+	r.domainVerifier = verifier
+}
+
+// SetDomainResolver 注入绕过代理 Fake-IP 的物理 DNS 解析器。
+func (r *Runner) SetDomainResolver(resolver DomainResolver) {
+	r.domainResolver = resolver
 }
 
 // NewRunner 创建依赖显式注入的优选运行器。
@@ -173,7 +195,7 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 
 	var applied proxy.ApplyResult
 	if options.ApplyPolicy {
-		applied, err = r.applySelectedPolicy(ctx, stateBefore, report)
+		applied, err = r.applySelectedPolicy(ctx, stateBefore, report, rangeResult.Snapshot)
 		if err != nil {
 			return report, err
 		}
@@ -200,6 +222,73 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 // CleanupManagedPolicy 逆序撤销全部已持久化收据，并仅在完整成功后清空当前策略状态。
 func (r *Runner) CleanupManagedPolicy(ctx context.Context) error {
 	return CleanupManagedPolicy(ctx, r.store, r.routes, r.policy)
+}
+
+// RefreshPolicy 使用当前已选节点重新应用域名集合，供自动发现和订阅刷新恢复调用。
+func (r *Runner) RefreshPolicy(ctx context.Context) error {
+	if !r.runMutex.TryLock() {
+		return ErrAlreadyRunning
+	}
+	defer r.runMutex.Unlock()
+	if r.policy == nil {
+		return errors.New("policy refresh requested but no adapter is configured")
+	}
+	before := r.store.Snapshot()
+	policy, err := r.policyForDecisions(before, RunReport{}, false)
+	if err != nil {
+		return err
+	}
+	rangeResult, err := r.ranges.Update(ctx, false)
+	if err != nil {
+		return fmt.Errorf("load ranges for policy refresh: %w", err)
+	}
+	if err := r.verifyCloudflareDomains(ctx, rangeResult.Snapshot, policy.DomainMappings); err != nil {
+		return err
+	}
+	if len(policy.DomainMappings) > 0 {
+		if r.domainVerifier == nil {
+			return errors.New("domain mapping verification is unavailable")
+		}
+		if err := r.domainVerifier.VerifyPreflight(ctx, policy.DomainMappings); err != nil {
+			return fmt.Errorf("verify optimized domains before refresh: %w", err)
+		}
+	}
+	applied, err := r.policy.Apply(ctx, policy)
+	if err != nil {
+		return fmt.Errorf("refresh policy: %w", err)
+	}
+	newApplied := applied
+	if len(policy.DomainMappings) > 0 {
+		if err := r.domainVerifier.VerifyApplied(ctx, policy.DomainMappings); err != nil {
+			if rollbackErr := r.policy.Rollback(ctx, applied); rollbackErr != nil {
+				err = errors.Join(err, rollbackErr)
+			}
+			return fmt.Errorf("verify refreshed domains: %w", err)
+		}
+	}
+	if before.Policy != nil {
+		var previous proxy.ApplyResult
+		if err := json.Unmarshal(before.Policy.Receipts, &previous); err != nil {
+			_ = r.policy.Rollback(ctx, newApplied)
+			return fmt.Errorf("decode previous policy receipts: %w", err)
+		}
+		applied.Receipts = append(previous.Receipts, applied.Receipts...)
+	}
+	receipts, err := json.Marshal(applied)
+	if err != nil {
+		_ = r.policy.Rollback(ctx, newApplied)
+		return err
+	}
+	if err := r.store.Update(func(state *store.State) error {
+		state.Policy = policySnapshot(policy, receipts, r.now().UTC())
+		return nil
+	}); err != nil {
+		if rollbackErr := r.policy.Rollback(ctx, newApplied); rollbackErr != nil {
+			return errors.Join(err, rollbackErr)
+		}
+		return err
+	}
+	return nil
 }
 
 // CleanupManagedPolicy 恢复路由事务和累计适配器收据，供运行器与卸载专用运行时复用。
@@ -319,13 +408,25 @@ func (r *Runner) rollbackRoutes(ctx context.Context, transactionIDs []string) er
 	return errors.Join(rollbackErrors...)
 }
 
-func (r *Runner) applySelectedPolicy(ctx context.Context, state store.State, report RunReport) (proxy.ApplyResult, error) {
+// applySelectedPolicy 构造节点与域名联合策略，并在应用前后分别完成 SNI 和系统映射验证。
+func (r *Runner) applySelectedPolicy(ctx context.Context, state store.State, report RunReport, snapshot ranges.Snapshot) (proxy.ApplyResult, error) {
 	if r.policy == nil {
 		return proxy.ApplyResult{}, errors.New("policy application requested but no adapter is configured")
 	}
 	finalPolicy, err := r.policyForDecisions(state, report, false)
 	if err != nil {
 		return proxy.ApplyResult{}, err
+	}
+	if err := r.verifyCloudflareDomains(ctx, snapshot, finalPolicy.DomainMappings); err != nil {
+		return proxy.ApplyResult{}, err
+	}
+	if len(finalPolicy.DomainMappings) > 0 {
+		if r.domainVerifier == nil {
+			return proxy.ApplyResult{}, errors.New("domain mapping verification is unavailable")
+		}
+		if err := r.domainVerifier.VerifyPreflight(ctx, finalPolicy.DomainMappings); err != nil {
+			return proxy.ApplyResult{}, fmt.Errorf("verify optimized domains before apply: %w", err)
+		}
 	}
 	transitionPolicy, err := r.policyForDecisions(state, report, true)
 	if err != nil {
@@ -345,7 +446,44 @@ func (r *Runner) applySelectedPolicy(ctx context.Context, state store.State, rep
 		}
 		return proxy.ApplyResult{}, fmt.Errorf("apply final policy: %w", err)
 	}
-	return finalResult, nil
+	combined := proxy.ApplyResult{
+		Receipts: append(append([]proxy.Receipt{}, transition.Receipts...), finalResult.Receipts...),
+		Skipped:  append(append([]string{}, transition.Skipped...), finalResult.Skipped...),
+	}
+	if len(finalPolicy.DomainMappings) > 0 {
+		if err := r.domainVerifier.VerifyApplied(ctx, finalPolicy.DomainMappings); err != nil {
+			if rollbackErr := r.policy.Rollback(ctx, combined); rollbackErr != nil {
+				err = errors.Join(err, rollbackErr)
+			}
+			return proxy.ApplyResult{}, fmt.Errorf("verify optimized domains after apply: %w", err)
+		}
+	}
+	return combined, nil
+}
+
+// verifyCloudflareDomains 用物理 DNS 确认域名归属 Cloudflare 后再执行目标 IP 的 TLS 预检。
+func (r *Runner) verifyCloudflareDomains(ctx context.Context, snapshot ranges.Snapshot, mappings []proxy.DomainMapping) error {
+	if len(mappings) == 0 {
+		return nil
+	}
+	if r.domainResolver == nil {
+		return errors.New("physical domain resolver is unavailable")
+	}
+	for _, mapping := range mappings {
+		addresses, err := r.domainResolver.Resolve(ctx, mapping.Domain)
+		if err != nil {
+			return fmt.Errorf("resolve acceleration domain %s: %w", mapping.Domain, err)
+		}
+		if len(addresses) == 0 {
+			return fmt.Errorf("acceleration domain %s has no public address", mapping.Domain)
+		}
+		for _, address := range addresses {
+			if !snapshot.Contains(address) {
+				return fmt.Errorf("acceleration domain %s resolved outside verified Cloudflare ranges: %s", mapping.Domain, address)
+			}
+		}
+	}
+	return nil
 }
 
 func (r *Runner) policyForDecisions(state store.State, report RunReport, includePrevious bool) (proxy.DirectPolicy, error) {
@@ -384,19 +522,25 @@ func (r *Runner) policyForDecisions(state store.State, report RunReport, include
 			appendAddress(state.CurrentIPv6.IP)
 		}
 	}
-	if capabilities.Domains {
-		policy.Domains = append(policy.Domains, r.config.Hosts.Domains...)
-		if serverName := strings.TrimSpace(r.config.Benchmark.TLSServerName); serverName != "" {
-			policy.Domains = append(policy.Domains, serverName)
-		}
-		if r.config.Benchmark.DownloadURL != "" {
-			if parsed, err := url.Parse(r.config.Benchmark.DownloadURL); err == nil && parsed.Hostname() != "" {
-				policy.Domains = append(policy.Domains, parsed.Hostname())
-			}
-		}
-	}
 	if len(policy.IPv4CIDRs)+len(policy.IPv6CIDRs) == 0 {
 		return proxy.DirectPolicy{}, errors.New("no qualified or current IP is available for policy application")
+	}
+	if capabilities.Domains || capabilities.DomainMappings {
+		domains := acceleration.EffectiveDomains(r.config, state)
+		addresses := make([]string, 0, len(policy.IPv4CIDRs)+len(policy.IPv6CIDRs))
+		for _, prefix := range append(append([]string{}, policy.IPv4CIDRs...), policy.IPv6CIDRs...) {
+			if address, parseErr := netip.ParsePrefix(prefix); parseErr == nil {
+				addresses = append(addresses, address.Addr().String())
+			}
+		}
+		for _, domain := range domains {
+			if capabilities.Domains {
+				policy.Domains = append(policy.Domains, domain)
+			}
+			if capabilities.DomainMappings {
+				policy.DomainMappings = append(policy.DomainMappings, proxy.DomainMapping{Domain: domain, Addresses: addresses})
+			}
+		}
 	}
 	normalized, err := policy.Normalize()
 	if err != nil {
@@ -467,10 +611,7 @@ func (r *Runner) persistSuccessfulRun(report RunReport, before store.State, appl
 			if err != nil {
 				return err
 			}
-			state.Policy = &store.PolicySnapshot{
-				IPv4CIDRs: policy.IPv4CIDRs, IPv6CIDRs: policy.IPv6CIDRs, Domains: policy.Domains,
-				Processes: policy.Processes, Receipts: receipts, AppliedAt: now,
-			}
+			state.Policy = policySnapshot(policy, receipts, now)
 		}
 		return nil
 	}); err != nil {
@@ -481,6 +622,18 @@ func (r *Runner) persistSuccessfulRun(report RunReport, before store.State, appl
 		return err
 	}
 	return r.store.SaveRunDetail(report.ID, details, r.config.History.DetailRetention.Duration())
+}
+
+// policySnapshot 将规范化策略和累计回滚收据转换为可持久化状态。
+func policySnapshot(policy proxy.DirectPolicy, receipts json.RawMessage, appliedAt time.Time) *store.PolicySnapshot {
+	mappings := make([]store.DomainMappingSnapshot, 0, len(policy.DomainMappings))
+	for _, mapping := range policy.DomainMappings {
+		mappings = append(mappings, store.DomainMappingSnapshot{Domain: mapping.Domain, Addresses: append([]string(nil), mapping.Addresses...)})
+	}
+	return &store.PolicySnapshot{
+		IPv4CIDRs: policy.IPv4CIDRs, IPv6CIDRs: policy.IPv6CIDRs, Domains: policy.Domains,
+		DomainMappings: mappings, Processes: policy.Processes, Receipts: receipts, AppliedAt: appliedAt,
+	}
 }
 
 func updateSelection(current *store.Selection, decision Decision, now time.Time) *store.Selection {

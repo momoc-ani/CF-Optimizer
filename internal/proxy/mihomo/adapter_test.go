@@ -3,10 +3,12 @@ package mihomo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,8 +39,13 @@ func TestAdapterApplyVerifyRollbackAndIdempotency(t *testing.T) {
 
 	directory := t.TempDir()
 	providerPath := filepath.Join(directory, "cf-optimizer.yaml")
+	activeConfigPath := filepath.Join(directory, "config.yaml")
 	previous := []byte("payload: []\n")
 	if err := os.WriteFile(providerPath, previous, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	activePrevious := []byte("dns:\n  use-hosts: false\nhosts:\n  existing.example: 9.9.9.9\nrules:\n  - MATCH,proxy\n")
+	if err := os.WriteFile(activeConfigPath, activePrevious, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Default().Proxy.Mihomo
@@ -46,13 +53,24 @@ func TestAdapterApplyVerifyRollbackAndIdempotency(t *testing.T) {
 	cfg.Controller = server.URL
 	cfg.Secret = secret
 	cfg.ProviderFile = providerPath
-	cfg.ReloadConfig = filepath.Join(directory, "config.yaml")
+	cfg.ReloadConfig = activeConfigPath
 	cfg.Timeout = config.Duration(time.Second)
 	adapter, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := (proxy.DirectPolicy{IPv4CIDRs: []string{"1.1.1.1/32"}, Domains: []string{"example.com"}}).Normalize()
+	detection, err := adapter.Detect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detection.ConfigPath != activeConfigPath {
+		t.Fatalf("detected active config = %q, want %q", detection.ConfigPath, activeConfigPath)
+	}
+	adapter.connectionVerifier = func(context.Context, []proxy.DomainMapping) error { return nil }
+	policy, err := (proxy.DirectPolicy{
+		IPv4CIDRs: []string{"1.1.1.1/32"}, Domains: []string{"example.com"},
+		DomainMappings: []proxy.DomainMapping{{Domain: "example.com", Addresses: []string{"1.1.1.1"}}},
+	}).Normalize()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,6 +89,13 @@ func TestAdapterApplyVerifyRollbackAndIdempotency(t *testing.T) {
 	}
 	if !receipt.Changed {
 		t.Fatal("first apply should change the provider")
+	}
+	activeContent, err := os.ReadFile(activeConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(activeContent), "example.com: 1.1.1.1") || !strings.Contains(string(activeContent), "- DOMAIN,example.com,DIRECT") {
+		t.Fatalf("active config was not patched: %s", activeContent)
 	}
 	if err := adapter.Verify(context.Background(), policy, receipt); err != nil {
 		t.Fatal(err)
@@ -98,6 +123,16 @@ func TestAdapterApplyVerifyRollbackAndIdempotency(t *testing.T) {
 	}
 	if string(restored) != string(previous) {
 		t.Fatalf("provider was not restored: %q", restored)
+	}
+	restoredConfig, err := os.ReadFile(activeConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restoredConfig) != string(activePrevious) {
+		t.Fatalf("active config was not restored: %q", restoredConfig)
+	}
+	if _, err := os.Stat(managedMetadataPath(providerPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("new managed metadata was not removed: %v", err)
 	}
 }
 

@@ -85,3 +85,42 @@ func TestManagedSingBoxRollbackChainRestoresOriginalState(t *testing.T) {
 		t.Fatalf("rollback chain did not restore the missing original file: %v", err)
 	}
 }
+
+func TestFormatIncludesDomainMappingDNSAndDirectRoute(t *testing.T) {
+	content, _, err := format(proxy.DirectPolicy{
+		Domains:        []string{"ani.momoc.top"},
+		DomainMappings: []proxy.DomainMapping{{Domain: "ani.momoc.top", Addresses: []string{"104.17.158.152"}}},
+	}, "direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		DNS struct {
+			Servers []struct {
+				Type       string              `json:"type"`
+				Tag        string              `json:"tag"`
+				Predefined map[string][]string `json:"predefined"`
+			} `json:"servers"`
+			Rules []struct {
+				Domain []string `json:"domain"`
+				Server string   `json:"server"`
+			} `json:"rules"`
+		} `json:"dns"`
+		Route struct {
+			Rules []struct {
+				Domain   []string `json:"domain"`
+				Outbound string   `json:"outbound"`
+			} `json:"rules"`
+		} `json:"route"`
+	}
+	if err := json.Unmarshal(content, &document); err != nil {
+		t.Fatal(err)
+	}
+	addresses := document.DNS.Servers[0].Predefined["ani.momoc.top"]
+	if len(addresses) != 1 || addresses[0] != "104.17.158.152" || document.DNS.Rules[0].Server != "cf-optimizer" {
+		t.Fatalf("unexpected sing-box DNS mapping: %#v", document.DNS)
+	}
+	if len(document.Route.Rules) != 1 || document.Route.Rules[0].Outbound != "direct" || document.Route.Rules[0].Domain[0] != "ani.momoc.top" {
+		t.Fatalf("unexpected sing-box direct route: %#v", document.Route.Rules)
+	}
+}

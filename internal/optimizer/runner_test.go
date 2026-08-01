@@ -161,6 +161,27 @@ func TestRunnerAccumulatesReceiptsAndCleansManagedPolicy(t *testing.T) {
 	}
 }
 
+func TestRefreshPolicyRollsBackOnlyNewReceiptsWhenPreviousReceiptsAreInvalid(t *testing.T) {
+	policy := &recordingPolicy{}
+	runner, stateStore := newTestRunner(t, policy)
+	if err := stateStore.Update(func(state *store.State) error {
+		state.CurrentIPv4 = &store.Selection{IP: "1.1.1.1", Family: 4, PolicyVerified: true}
+		state.Policy = &store.PolicySnapshot{Receipts: json.RawMessage(`[]`)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.RefreshPolicy(context.Background()); err == nil {
+		t.Fatal("expected invalid previous receipts to fail refresh")
+	}
+	if len(policy.rollbacks) != 1 || len(policy.rollbacks[0].Receipts) != 1 {
+		t.Fatalf("refresh should roll back only its new receipt: %#v", policy.rollbacks)
+	}
+	if got := stateStore.Snapshot().Policy.Receipts; string(got) != `[]` {
+		t.Fatalf("failed refresh changed stored receipts: %s", got)
+	}
+}
+
 func TestRollbackRoutesUsesIndependentCleanupTimeouts(t *testing.T) {
 	backend := &delayedRouteBackend{routes: map[string]cfnetwork.RouteSpec{}, delay: 5 * time.Millisecond}
 	controller, err := cfnetwork.NewRouteController(t.TempDir(), backend, true, slog.New(slog.NewTextHandler(io.Discard, nil)))

@@ -16,7 +16,7 @@ import (
 
 const (
 	adapterName     = "external"
-	protocolVersion = "1.0"
+	protocolVersion = "1.1"
 	maxRPCOutput    = 1 << 20
 )
 
@@ -72,7 +72,7 @@ func (a *Adapter) Name() string { return adapterName }
 
 // Capabilities 声明协议可表达全部统一策略；实际能力由 detect 结果进一步展示。
 func (a *Adapter) Capabilities() proxy.Capabilities {
-	return proxy.Capabilities{Processes: true, IPv4: true, IPv6: true, Domains: true, HotReload: true, Rollback: true}
+	return proxy.Capabilities{Processes: true, IPv4: true, IPv6: true, Domains: true, DomainMappings: true, HotReload: true, Rollback: true}
 }
 
 // Detect 调用外部进程的 detect 方法并解码状态。

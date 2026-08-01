@@ -43,10 +43,31 @@ export interface ServiceState {
   current_ipv4?: Selection;
   current_ipv6?: Selection;
   history: RunSummary[];
+  discovered_domains?: Record<string, DomainDiscovery>;
   last_error?: string;
   last_started_at?: string;
   last_ended_at?: string;
   running: boolean;
+}
+
+export interface DomainDiscovery {
+  domain: string;
+  source: string;
+  first_seen_at: string;
+  last_seen_at: string;
+  cloudflare_verified: boolean;
+  preflight_verified: boolean;
+  active: boolean;
+  last_resolved_addresses?: string[];
+  last_error?: string;
+}
+
+export interface DomainDiscoveryResult {
+  observed: number;
+  verified: number;
+  activated: number;
+  policy_refreshed: boolean;
+  domains: DomainDiscovery[];
 }
 
 export interface Progress {
@@ -182,8 +203,10 @@ export interface RouteTransaction {
 
 export interface ProxyDetection {
   present: boolean;
+  manageable: boolean;
   version?: string;
   endpoint?: string;
+  config_path?: string;
   message?: string;
 }
 
@@ -207,8 +230,8 @@ export interface AppConfig {
     stale_after: string;
     max_change_percent: number;
     request_timeout: string;
-    include: string[];
-    exclude: string[];
+    include: string[] | null;
+    exclude: string[] | null;
   };
   benchmark: {
     ipv4: boolean;
@@ -237,6 +260,15 @@ export interface AppConfig {
     gateway_ipv6: string;
     manage_routes: boolean;
     command_timeout: string;
+  };
+  acceleration: {
+    enabled: boolean;
+    manual_domains: string[] | null;
+    excluded_domains: string[] | null;
+    auto_discover: boolean;
+    auto_apply: boolean;
+    discovery_interval: string;
+    max_discovered_domains: number;
   };
   proxy: Record<string, unknown>;
   hosts: { enabled: boolean; path: string; domains: string[] };

@@ -206,14 +206,16 @@ func TestQuickStartVerificationFailureReportsRollback(t *testing.T) {
 func TestQuickStartEffectsExcludeReadOnlyMihomoDetection(t *testing.T) {
 	cfg := config.Default()
 	detections := map[string]proxy.Detection{
-		cleanupAdapterGeneric: {Present: true},
+		cleanupAdapterGeneric: {Present: true, Manageable: true},
 		cleanupAdapterMihomo:  {Present: true, Endpoint: "http://127.0.0.1:19097"},
 	}
 	effects := quickStartEffects(cfg, detections)
 	if strings.Join(effects, ",") != "system_routes" {
 		t.Fatalf("只读 Mihomo 发现不应进入写入影响清单：%#v", effects)
 	}
-	cfg.Proxy.Mihomo.Enabled = true
+	detection := detections[cleanupAdapterMihomo]
+	detection.Manageable = true
+	detections[cleanupAdapterMihomo] = detection
 	effects = quickStartEffects(cfg, detections)
 	if strings.Join(effects, ",") != "system_routes,mihomo_policy" {
 		t.Fatalf("已启用 Mihomo 应进入写入影响清单：%#v", effects)

@@ -29,23 +29,37 @@ const (
 )
 
 type planPayload struct {
-	Content      []byte   `json:"content"`
-	ExpectedHash string   `json:"expected_hash"`
-	Rules        []string `json:"rules"`
+	Content              []byte   `json:"content"`
+	ExpectedHash         string   `json:"expected_hash"`
+	ConfigContent        []byte   `json:"config_content,omitempty"`
+	ConfigExpectedHash   string   `json:"config_expected_hash,omitempty"`
+	MetadataContent      []byte   `json:"metadata_content,omitempty"`
+	MetadataExpectedHash string   `json:"metadata_expected_hash,omitempty"`
+	Rules                []string `json:"rules"`
 }
 
 type receiptPayload struct {
-	PreviousExists bool     `json:"previous_exists"`
-	Previous       []byte   `json:"previous"`
-	AppliedHash    string   `json:"applied_hash"`
-	Rules          []string `json:"rules"`
+	ProviderFile           string   `json:"provider_file"`
+	ConfigFile             string   `json:"config_file,omitempty"`
+	MetadataFile           string   `json:"metadata_file,omitempty"`
+	PreviousExists         bool     `json:"previous_exists"`
+	Previous               []byte   `json:"previous"`
+	AppliedHash            string   `json:"applied_hash"`
+	ConfigPreviousExists   bool     `json:"config_previous_exists"`
+	ConfigPrevious         []byte   `json:"config_previous,omitempty"`
+	ConfigAppliedHash      string   `json:"config_applied_hash,omitempty"`
+	MetadataPreviousExists bool     `json:"metadata_previous_exists"`
+	MetadataPrevious       []byte   `json:"metadata_previous,omitempty"`
+	MetadataAppliedHash    string   `json:"metadata_applied_hash,omitempty"`
+	Rules                  []string `json:"rules"`
 }
 
 // Adapter 管理独立 Mihomo rule-provider 文件，并通过控制 API 重载和验证。
 type Adapter struct {
-	config     config.MihomoConfig
-	controller *url.URL
-	client     *http.Client
+	config             config.MihomoConfig
+	controller         *url.URL
+	client             *http.Client
+	connectionVerifier func(context.Context, []proxy.DomainMapping) error
 }
 
 // New 创建强制禁用系统代理的 Mihomo 控制 API 客户端。
@@ -56,7 +70,9 @@ func New(cfg config.MihomoConfig) (*Adapter, error) {
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
-	return &Adapter{config: cfg, controller: controller, client: &http.Client{Transport: transport, Timeout: cfg.Timeout.Duration()}}, nil
+	adapter := &Adapter{config: cfg, controller: controller, client: &http.Client{Transport: transport, Timeout: cfg.Timeout.Duration()}}
+	adapter.connectionVerifier = adapter.verifyMappedConnections
+	return adapter, nil
 }
 
 // Name 返回稳定的适配器标识。
@@ -64,7 +80,7 @@ func (a *Adapter) Name() string { return adapterName }
 
 // Capabilities 返回 Mihomo 受管规则支持的策略类型。
 func (a *Adapter) Capabilities() proxy.Capabilities {
-	return proxy.Capabilities{Processes: true, IPv4: true, IPv6: true, Domains: true, HotReload: a.config.ReloadConfig != "", Rollback: true}
+	return proxy.Capabilities{Processes: true, IPv4: true, IPv6: true, Domains: true, DomainMappings: a.config.ReloadConfig != "", HotReload: a.config.ReloadConfig != "", Rollback: true}
 }
 
 // Detect 读取控制端版本，不把认证信息写入结果。
@@ -85,7 +101,13 @@ func (a *Adapter) Detect(ctx context.Context) (proxy.Detection, error) {
 	if strings.TrimSpace(version.Version) == "" {
 		return proxy.Detection{Present: false}, errors.New("Mihomo version endpoint returned an empty version")
 	}
-	return proxy.Detection{Present: true, Version: version.Version, Endpoint: a.controller.String(), Message: "控制 API 可访问"}, nil
+	return proxy.Detection{
+		Present:    true,
+		Version:    version.Version,
+		Endpoint:   a.controller.String(),
+		ConfigPath: a.config.ReloadConfig,
+		Message:    "控制 API 可访问",
+	}, nil
 }
 
 // Plan 生成完整受管 provider 内容，并记录当前文件哈希用于并发修改检查。
@@ -109,7 +131,36 @@ func (a *Adapter) Plan(_ context.Context, policy proxy.DirectPolicy) (proxy.Plan
 	if exists {
 		expectedHash = contentHash(existing)
 	}
-	payload, err := json.Marshal(planPayload{Content: content, ExpectedHash: expectedHash, Rules: rules})
+	payloadDocument := planPayload{Content: content, ExpectedHash: expectedHash, Rules: rules}
+	if len(policy.DomainMappings) > 0 {
+		if a.config.ReloadConfig == "" {
+			return proxy.Plan{}, errors.New("Mihomo active config path is required for domain mappings")
+		}
+		configContent, configExists, readErr := readOptionalFile(a.config.ReloadConfig)
+		if readErr != nil {
+			return proxy.Plan{}, fmt.Errorf("read Mihomo active config: %w", readErr)
+		}
+		if !configExists {
+			return proxy.Plan{}, errors.New("Mihomo active config does not exist")
+		}
+		metadataPath := managedMetadataPath(a.config.ProviderFile)
+		metadataContent, metadataExists, readErr := readOptionalFile(metadataPath)
+		if readErr != nil {
+			return proxy.Plan{}, fmt.Errorf("read Mihomo managed metadata: %w", readErr)
+		}
+		patchedConfig, patchedMetadata, patchErr := patchManagedConfig(configContent, metadataContent, metadataExists, policy, rules)
+		if patchErr != nil {
+			return proxy.Plan{}, patchErr
+		}
+		payloadDocument.ConfigContent = patchedConfig
+		payloadDocument.ConfigExpectedHash = contentHash(configContent)
+		payloadDocument.MetadataContent = patchedMetadata
+		payloadDocument.MetadataExpectedHash = missingFileHash
+		if metadataExists {
+			payloadDocument.MetadataExpectedHash = contentHash(metadataContent)
+		}
+	}
+	payload, err := json.Marshal(payloadDocument)
 	if err != nil {
 		return proxy.Plan{}, err
 	}
@@ -140,18 +191,68 @@ func (a *Adapter) Apply(ctx context.Context, plan proxy.Plan) (proxy.Receipt, er
 	if actualHash != payload.ExpectedHash {
 		return proxy.Receipt{}, errors.New("Mihomo provider changed after planning")
 	}
-	changed := !bytes.Equal(previous, payload.Content) || !existed
-	if changed {
+	configPrevious, configExisted, metadataPrevious, metadataExisted := []byte(nil), false, []byte(nil), false
+	if len(payload.ConfigContent) > 0 {
+		configPrevious, configExisted, err = readOptionalFile(a.config.ReloadConfig)
+		if err != nil {
+			return proxy.Receipt{}, fmt.Errorf("read Mihomo active config: %w", err)
+		}
+		if !configExisted || contentHash(configPrevious) != payload.ConfigExpectedHash {
+			return proxy.Receipt{}, errors.New("Mihomo active config changed after planning")
+		}
+		metadataPrevious, metadataExisted, err = readOptionalFile(managedMetadataPath(a.config.ProviderFile))
+		if err != nil {
+			return proxy.Receipt{}, fmt.Errorf("read Mihomo managed metadata: %w", err)
+		}
+		metadataHash := missingFileHash
+		if metadataExisted {
+			metadataHash = contentHash(metadataPrevious)
+		}
+		if metadataHash != payload.MetadataExpectedHash {
+			return proxy.Receipt{}, errors.New("Mihomo managed metadata changed after planning")
+		}
+	}
+	providerChanged := !bytes.Equal(previous, payload.Content) || !existed
+	configChanged := len(payload.ConfigContent) > 0 && !bytes.Equal(configPrevious, payload.ConfigContent)
+	metadataChanged := len(payload.MetadataContent) > 0 && (!metadataExisted || !bytes.Equal(metadataPrevious, payload.MetadataContent))
+	changed := providerChanged || configChanged || metadataChanged
+	restoreAll := func() {
+		if len(payload.ConfigContent) > 0 {
+			_ = restoreOptionalFile(a.config.ReloadConfig, configPrevious, configExisted)
+			_ = restoreOptionalFile(managedMetadataPath(a.config.ProviderFile), metadataPrevious, metadataExisted)
+		}
+		_ = restoreOptionalFile(a.config.ProviderFile, previous, existed)
+	}
+	if providerChanged {
 		if err := fsutil.WriteFileAtomic(a.config.ProviderFile, payload.Content, 0o640); err != nil {
 			return proxy.Receipt{}, fmt.Errorf("write Mihomo provider: %w", err)
 		}
+	}
+	if metadataChanged {
+		if err := fsutil.WriteFileAtomic(managedMetadataPath(a.config.ProviderFile), payload.MetadataContent, 0o600); err != nil {
+			restoreAll()
+			return proxy.Receipt{}, fmt.Errorf("write Mihomo managed metadata: %w", err)
+		}
+	}
+	if configChanged {
+		if err := fsutil.WriteFileAtomic(a.config.ReloadConfig, payload.ConfigContent, 0o640); err != nil {
+			restoreAll()
+			return proxy.Receipt{}, fmt.Errorf("write Mihomo active config: %w", err)
+		}
+	}
+	if changed {
 		if err := a.reload(ctx); err != nil {
-			_ = restoreOptionalFile(a.config.ProviderFile, previous, existed)
+			restoreAll()
+			_ = a.reload(ctx)
 			return proxy.Receipt{}, err
 		}
 	}
 	receiptData, err := json.Marshal(receiptPayload{
-		PreviousExists: existed, Previous: previous, AppliedHash: contentHash(payload.Content), Rules: payload.Rules,
+		ProviderFile: a.config.ProviderFile, ConfigFile: a.config.ReloadConfig, MetadataFile: managedMetadataPath(a.config.ProviderFile),
+		PreviousExists: existed, Previous: previous, AppliedHash: contentHash(payload.Content),
+		ConfigPreviousExists: configExisted, ConfigPrevious: configPrevious, ConfigAppliedHash: optionalAppliedHash(payload.ConfigContent),
+		MetadataPreviousExists: metadataExisted, MetadataPrevious: metadataPrevious, MetadataAppliedHash: optionalAppliedHash(payload.MetadataContent),
+		Rules: payload.Rules,
 	})
 	if err != nil {
 		return proxy.Receipt{}, err
@@ -160,15 +261,30 @@ func (a *Adapter) Apply(ctx context.Context, plan proxy.Plan) (proxy.Receipt, er
 }
 
 // Verify 轮询活动规则列表，确认每条受管规则已经以 DIRECT 生效。
-func (a *Adapter) Verify(ctx context.Context, _ proxy.DirectPolicy, receipt proxy.Receipt) error {
+func (a *Adapter) Verify(ctx context.Context, policy proxy.DirectPolicy, receipt proxy.Receipt) error {
 	var payload receiptPayload
 	if err := json.Unmarshal(receipt.Payload, &payload); err != nil {
 		return err
 	}
+	if payload.ConfigAppliedHash != "" {
+		content, exists, err := readOptionalFile(payload.ConfigFile)
+		if err != nil || !exists || contentHash(content) != payload.ConfigAppliedHash {
+			return errors.New("Mihomo active config verification failed")
+		}
+	}
+	if payload.MetadataAppliedHash != "" {
+		content, exists, err := readOptionalFile(payload.MetadataFile)
+		if err != nil || !exists || contentHash(content) != payload.MetadataAppliedHash {
+			return errors.New("Mihomo managed metadata verification failed")
+		}
+	}
 	deadline := time.Now().Add(a.config.Timeout.Duration())
 	for {
 		if err := a.verifyOnce(ctx, payload.Rules); err == nil {
-			return nil
+			if len(policy.DomainMappings) == 0 {
+				return nil
+			}
+			return a.connectionVerifier(ctx, policy.DomainMappings)
 		} else if time.Now().After(deadline) {
 			return err
 		}
@@ -191,27 +307,77 @@ func (a *Adapter) Rollback(ctx context.Context, receipt proxy.Receipt) error {
 	if err := json.Unmarshal(receipt.Payload, &payload); err != nil {
 		return err
 	}
-	current, exists, err := readOptionalFile(a.config.ProviderFile)
+	providerFile := payload.ProviderFile
+	if providerFile == "" {
+		providerFile = a.config.ProviderFile
+	}
+	configFile := payload.ConfigFile
+	if configFile == "" {
+		configFile = a.config.ReloadConfig
+	}
+	metadataFile := payload.MetadataFile
+	if metadataFile == "" && providerFile != "" {
+		metadataFile = managedMetadataPath(providerFile)
+	}
+	current, exists, err := readOptionalFile(providerFile)
 	if err != nil {
 		return err
 	}
-	if (payload.PreviousExists && exists && bytes.Equal(current, payload.Previous)) || (!payload.PreviousExists && !exists) {
+	providerRestored := optionalFileEquals(current, exists, payload.Previous, payload.PreviousExists)
+	configCurrent, configExists, metadataCurrent, metadataExists := []byte(nil), false, []byte(nil), false
+	configRestored, metadataRestored := true, true
+	if payload.ConfigAppliedHash != "" {
+		configCurrent, configExists, err = readOptionalFile(configFile)
+		if err != nil {
+			return err
+		}
+		configRestored = optionalFileEquals(configCurrent, configExists, payload.ConfigPrevious, payload.ConfigPreviousExists)
+	}
+	if payload.MetadataAppliedHash != "" {
+		metadataCurrent, metadataExists, err = readOptionalFile(metadataFile)
+		if err != nil {
+			return err
+		}
+		metadataRestored = optionalFileEquals(metadataCurrent, metadataExists, payload.MetadataPrevious, payload.MetadataPreviousExists)
+	}
+	if providerRestored && configRestored && metadataRestored {
 		return nil
 	}
-	if !exists || contentHash(current) != payload.AppliedHash {
+	if !providerRestored && (!exists || contentHash(current) != payload.AppliedHash) {
 		return errors.New("Mihomo provider changed after apply; refusing to overwrite it during rollback")
 	}
-	if err := restoreOptionalFile(a.config.ProviderFile, payload.Previous, payload.PreviousExists); err != nil {
+	if !configRestored && (!configExists || contentHash(configCurrent) != payload.ConfigAppliedHash) {
+		return errors.New("Mihomo active config changed after apply; refusing to overwrite it during rollback")
+	}
+	if !metadataRestored && (!metadataExists || contentHash(metadataCurrent) != payload.MetadataAppliedHash) {
+		return errors.New("Mihomo managed metadata changed after apply; refusing to overwrite it during rollback")
+	}
+	if payload.ConfigAppliedHash != "" {
+		if err := restoreOptionalFile(configFile, payload.ConfigPrevious, payload.ConfigPreviousExists); err != nil {
+			return err
+		}
+	}
+	if payload.MetadataAppliedHash != "" {
+		if err := restoreOptionalFile(metadataFile, payload.MetadataPrevious, payload.MetadataPreviousExists); err != nil {
+			return err
+		}
+	}
+	if err := restoreOptionalFile(providerFile, payload.Previous, payload.PreviousExists); err != nil {
 		return err
 	}
-	return a.reload(ctx)
+	return a.reloadConfig(ctx, configFile)
 }
 
 func (a *Adapter) reload(ctx context.Context) error {
-	if a.config.ReloadConfig == "" {
+	return a.reloadConfig(ctx, a.config.ReloadConfig)
+}
+
+// reloadConfig 通过控制 API 热加载指定活动配置，并拒绝无路径时伪造成功。
+func (a *Adapter) reloadConfig(ctx context.Context, configPath string) error {
+	if configPath == "" {
 		return nil
 	}
-	body, err := json.Marshal(map[string]string{"path": a.config.ReloadConfig})
+	body, err := json.Marshal(map[string]string{"path": configPath})
 	if err != nil {
 		return err
 	}
@@ -246,16 +412,28 @@ func (a *Adapter) verifyOnce(ctx context.Context, expected []string) error {
 	active := map[string]bool{}
 	for _, rule := range response.Rules {
 		if strings.EqualFold(rule.Proxy, "DIRECT") {
-			active[rule.Type+","+rule.Payload] = true
+			active[normalizeMihomoRuleType(rule.Type)+","+rule.Payload] = true
 		}
 	}
 	for _, rule := range expected {
 		parts := strings.Split(rule, ",")
-		if len(parts) < 3 || !active[parts[0]+","+parts[1]] {
+		if len(parts) < 3 || !active[normalizeMihomoRuleType(parts[0])+","+parts[1]] {
 			return fmt.Errorf("managed rule %q is not active as DIRECT", rule)
 		}
 	}
 	return nil
+}
+
+// normalizeMihomoRuleType 统一控制 API 与配置文件对同类规则的不同拼写。
+func normalizeMihomoRuleType(ruleType string) string {
+	normalized := strings.NewReplacer("-", "", "_", "").Replace(strings.ToUpper(strings.TrimSpace(ruleType)))
+	if normalized == "IPCIDR6" {
+		return "IPCIDR"
+	}
+	if normalized == "PROCESSNAME" {
+		return "PROCESS"
+	}
+	return normalized
 }
 
 func (a *Adapter) request(ctx context.Context, method, endpoint string, body []byte) ([]byte, int, error) {
@@ -307,6 +485,7 @@ func rulesForPolicy(policy proxy.DirectPolicy) []string {
 	return rules
 }
 
+// readOptionalFile 区分不存在的受管文件与实际读取失败。
 func readOptionalFile(path string) ([]byte, bool, error) {
 	content, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -318,6 +497,7 @@ func readOptionalFile(path string) ([]byte, bool, error) {
 	return content, true, nil
 }
 
+// restoreOptionalFile 按收据恢复旧内容，或移除本次新建的受管文件。
 func restoreOptionalFile(path string, content []byte, existed bool) error {
 	if existed {
 		return fsutil.WriteFileAtomic(path, content, 0o640)
@@ -331,4 +511,20 @@ func restoreOptionalFile(path string, content []byte, existed bool) error {
 func contentHash(content []byte) string {
 	digest := sha256.Sum256(content)
 	return hex.EncodeToString(digest[:])
+}
+
+// optionalAppliedHash 只为实际参与事务的可选文件生成并发校验摘要。
+func optionalAppliedHash(content []byte) string {
+	if len(content) == 0 {
+		return ""
+	}
+	return contentHash(content)
+}
+
+// optionalFileEquals 同时比较可选文件的存在状态和内容。
+func optionalFileEquals(current []byte, currentExists bool, previous []byte, previousExists bool) bool {
+	if currentExists != previousExists {
+		return false
+	}
+	return !currentExists || bytes.Equal(current, previous)
 }

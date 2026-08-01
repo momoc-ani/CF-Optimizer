@@ -11,7 +11,7 @@ import (
 
 // New 创建只写独立 JSON 配置片段的 Xray/V2Ray 适配器。
 func New(cfg config.ManagedProxyConfig) (*managedfile.Adapter, error) {
-	capabilities := proxy.Capabilities{IPv4: true, IPv6: true, Domains: true, HotReload: len(cfg.ReloadArgs) > 0, Rollback: true}
+	capabilities := proxy.Capabilities{IPv4: true, IPv6: true, Domains: true, DomainMappings: true, HotReload: len(cfg.ReloadArgs) > 0, Rollback: true}
 	return managedfile.New("xray", cfg, format, capabilities)
 }
 
@@ -38,11 +38,20 @@ func format(policy proxy.DirectPolicy, directOutbound string) ([]byte, int, erro
 		rules = append(rules, rule{Type: "field", Domain: domains, OutboundTag: directOutbound})
 	}
 	document := struct {
+		DNS struct {
+			Hosts map[string][]string `json:"hosts,omitempty"`
+		} `json:"dns,omitempty"`
 		Routing struct {
 			Rules []rule `json:"rules"`
 		} `json:"routing"`
 	}{}
+	if len(policy.DomainMappings) > 0 {
+		document.DNS.Hosts = make(map[string][]string, len(policy.DomainMappings))
+		for _, mapping := range policy.DomainMappings {
+			document.DNS.Hosts[mapping.Domain] = append([]string(nil), mapping.Addresses...)
+		}
+	}
 	document.Routing.Rules = rules
 	content, err := json.MarshalIndent(document, "", "  ")
-	return append(content, '\n'), len(rules), err
+	return append(content, '\n'), len(rules) + len(policy.DomainMappings), err
 }

@@ -9,6 +9,7 @@ const effectLabels: Record<string, string> = {
   xray_policy: 'Xray 直连策略',
   external_policy: '外部适配器策略',
   windows_hosts: 'Windows Hosts 受管区块',
+  system_hosts: '系统 Hosts 域名映射',
 };
 
 interface QuickStartDialogProps {
