@@ -4,7 +4,7 @@ import { useMemo, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
 import { Activity, Cable, Clock3, Network, Play, Route, ShieldCheck } from 'lucide-react';
 import { request } from '../api/client';
-import { useHistory, useProxies, useRanges, useRoutes, useStatus } from '../api/hooks';
+import { useHistory, useProxies, useRanges, useStatus } from '../api/hooks';
 import type { QuickStartMode, QuickStartPlan, Selection } from '../api/types';
 import { formatDate, formatScore } from '../lib/format';
 import { EmptyState, LoadingState, Metric, PageHeader, Section } from '../components/Page';
@@ -12,6 +12,7 @@ import { StatusBadge } from '../components/StatusBadge';
 import { useRun } from '../hooks/useRun';
 import { QuickStartDialog } from '../components/QuickStartDialog';
 import { useUIStore } from '../state/ui';
+import { countCurrentVerifiedRoutes } from '../lib/routeSummary';
 
 function SelectionRow({ title, selection, interfaceName }: { title: string; selection?: Selection; interfaceName?: string }) {
   if (!selection) return <div className="selection-row"><Text fw={650}>{title}</Text><Text c="dimmed" size="sm">尚未选择节点</Text><StatusBadge label="未验证" /></div>;
@@ -28,7 +29,6 @@ function SelectionRow({ title, selection, interfaceName }: { title: string; sele
 
 export function OverviewPage() {
   const status = useStatus();
-  const routes = useRoutes();
   const proxies = useProxies();
   const ranges = useRanges();
   const history = useHistory();
@@ -103,7 +103,7 @@ export function OverviewPage() {
   const state = status.data?.state;
   const path = status.data?.physical_path;
   const detected = Object.values(proxies.data ?? {}).filter((item) => item.present).length;
-  const verifiedRoutes = (routes.data ?? []).filter((item) => item.state === 'verified').length;
+  const verifiedRoutes = countCurrentVerifiedRoutes(state);
   return (
     <Stack gap="lg">
       <PageHeader title="总览" description="后台服务、当前节点与已验证直连策略" actions={<Button leftSection={<Play size={16} />} loading={planMutation.isPending || run.running} onClick={() => void prepareQuickStart()}>一键优选</Button>} />

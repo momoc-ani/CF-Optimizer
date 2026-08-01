@@ -80,16 +80,15 @@ func (b *windowsRouteBackend) Get(ctx context.Context, prefix string) (RouteSpec
 }
 
 func (b *windowsRouteBackend) Resolve(ctx context.Context, target netip.Addr) (ResolvedRoute, error) {
-	command := fmt.Sprintf("$route=Find-NetRoute -RemoteIPAddress '%s' -ErrorAction Stop|Select-Object -First 1 DestinationPrefix,NextHop,InterfaceAlias,InterfaceIndex,RouteMetric,IPAddress; $route|ConvertTo-Json -Compress", target)
+	command := fmt.Sprintf("[array]$records=Find-NetRoute -RemoteIPAddress '%s' -ErrorAction Stop|Select-Object DestinationPrefix,NextHop,InterfaceAlias,InterfaceIndex,RouteMetric,IPAddress; if(-not $records){exit 44}; ConvertTo-Json -InputObject $records -Compress", target)
 	output, err := b.runPowerShell(ctx, command)
+	if isPowerShellExit(err, 44) {
+		return ResolvedRoute{}, ErrRouteNotFound
+	}
 	if err != nil {
 		return ResolvedRoute{}, err
 	}
-	record, err := decodeWindowsRoute(output)
-	if err != nil {
-		return ResolvedRoute{}, err
-	}
-	return ResolvedRoute{RouteSpec: record.RouteSpec(), SourceAddress: record.IPAddress}, nil
+	return decodeWindowsResolvedRoute(output)
 }
 
 func (b *windowsRouteBackend) runPowerShell(ctx context.Context, script string) ([]byte, error) {
@@ -126,6 +125,32 @@ func decodeWindowsRoute(output []byte) (windowsRouteRecord, error) {
 		return record, fmt.Errorf("decode PowerShell route output: %w", err)
 	}
 	return record, nil
+}
+
+// decodeWindowsResolvedRoute 从 Find-NetRoute 的异构结果中分别提取路由和源地址。
+func decodeWindowsResolvedRoute(output []byte) (ResolvedRoute, error) {
+	if len(strings.TrimSpace(string(output))) == 0 {
+		return ResolvedRoute{}, ErrRouteNotFound
+	}
+	var records []windowsRouteRecord
+	if err := json.Unmarshal(output, &records); err != nil {
+		return ResolvedRoute{}, fmt.Errorf("decode PowerShell resolved route output: %w", err)
+	}
+	var route *windowsRouteRecord
+	sourceAddress := ""
+	for index := range records {
+		record := &records[index]
+		if route == nil && record.DestinationPrefix != "" {
+			route = record
+		}
+		if sourceAddress == "" && record.IPAddress != "" {
+			sourceAddress = record.IPAddress
+		}
+	}
+	if route == nil {
+		return ResolvedRoute{}, ErrRouteNotFound
+	}
+	return ResolvedRoute{RouteSpec: route.RouteSpec(), SourceAddress: sourceAddress}, nil
 }
 
 func (r windowsRouteRecord) RouteSpec() RouteSpec {

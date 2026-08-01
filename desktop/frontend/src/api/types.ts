@@ -183,6 +183,7 @@ export interface RouteTransaction {
 export interface ProxyDetection {
   present: boolean;
   version?: string;
+  endpoint?: string;
   message?: string;
 }
 

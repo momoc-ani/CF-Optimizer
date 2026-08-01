@@ -40,3 +40,19 @@ func TestConfigForStoredReceiptsRejectsUnknownAdapter(t *testing.T) {
 		t.Fatal("expected unsupported stored adapter to be rejected")
 	}
 }
+
+func TestConfigForDetectedAdaptersUsesDiscoveredMihomoEndpointOnlyWhenEnabled(t *testing.T) {
+	detections := map[string]proxy.Detection{
+		cleanupAdapterMihomo: {Present: true, Endpoint: "http://127.0.0.1:19097"},
+	}
+	cfg := config.Default()
+	disabled := configForDetectedAdapters(cfg, detections)
+	if disabled.Proxy.Mihomo.Enabled || disabled.Proxy.Mihomo.Controller != cfg.Proxy.Mihomo.Controller {
+		t.Fatalf("只读发现不应启用 Mihomo 写入：%#v", disabled.Proxy.Mihomo)
+	}
+	cfg.Proxy.Mihomo.Enabled = true
+	enabled := configForDetectedAdapters(cfg, detections)
+	if !enabled.Proxy.Mihomo.Enabled || enabled.Proxy.Mihomo.Controller != detections[cleanupAdapterMihomo].Endpoint {
+		t.Fatalf("已启用 Mihomo 未使用自动发现端点：%#v", enabled.Proxy.Mihomo)
+	}
+}

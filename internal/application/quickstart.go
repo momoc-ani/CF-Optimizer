@@ -100,7 +100,7 @@ func (a *API) planQuickStart(ctx context.Context, raw json.RawMessage) (QuickSta
 			plan.Warnings = append(plan.Warnings, "适配器预检失败："+detectErr.Error())
 		} else {
 			plan.Detections = detections
-			plan.Effects = quickStartEffects(detections)
+			plan.Effects = quickStartEffects(view.Config, detections)
 			plan.Warnings = append(plan.Warnings, unavailableAdapterWarnings(view.Config, detections)...)
 		}
 	}
@@ -275,15 +275,20 @@ func presentAdapterNames(detections map[string]proxy.Detection) []string {
 }
 
 // quickStartEffects 将已检测适配器转换为前端可稳定映射的影响类型。
-func quickStartEffects(detections map[string]proxy.Detection) []string {
+func quickStartEffects(cfg config.Config, detections map[string]proxy.Detection) []string {
 	effectByAdapter := map[string]string{
 		cleanupAdapterGeneric: "system_routes", cleanupAdapterMihomo: "mihomo_policy",
 		cleanupAdapterSingBox: "sing_box_policy", cleanupAdapterXray: "xray_policy",
 		cleanupAdapterExternal: "external_policy", cleanupAdapterHosts: "windows_hosts",
 	}
+	configured := map[string]bool{
+		cleanupAdapterGeneric: true, cleanupAdapterMihomo: cfg.Proxy.Mihomo.Enabled,
+		cleanupAdapterSingBox: cfg.Proxy.SingBox.Enabled, cleanupAdapterXray: cfg.Proxy.Xray.Enabled,
+		cleanupAdapterExternal: cfg.Proxy.External.Enabled, cleanupAdapterHosts: cfg.Hosts.Enabled,
+	}
 	var effects []string
 	for _, name := range presentAdapterNames(detections) {
-		if effect := effectByAdapter[name]; effect != "" {
+		if effect := effectByAdapter[name]; effect != "" && configured[name] {
 			effects = append(effects, effect)
 		}
 	}

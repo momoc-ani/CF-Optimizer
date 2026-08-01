@@ -16,7 +16,7 @@ interface AdapterRow extends ProxyDetection {
 }
 
 const adapterMetadata: Record<string, Omit<AdapterRow, keyof ProxyDetection | 'id'>> = {
-  generic: { label: 'Generic Route', mode: 'Host route', verification: '路由查询与源地址' },
+  'generic-route': { label: 'Generic Route', mode: 'Host route', verification: '路由查询与源地址' },
   mihomo: { label: 'Mihomo / Clash', mode: 'Provider + API', verification: 'Controller rules' },
   'sing-box': { label: 'sing-box', mode: 'Managed fragment', verification: '配置校验与重载' },
   xray: { label: 'Xray / V2Ray', mode: 'Managed fragment', verification: '配置校验与重载' },
@@ -43,6 +43,7 @@ export function ProxyPage() {
   const columns = useMemo<ColumnDef<AdapterRow>[]>(() => [
     { accessorKey: 'label', header: '适配器', size: 180, cell: ({ row }) => <div><Text fw={650}>{row.original.label}</Text><Text size="xs" c="dimmed">{row.original.version ?? '版本未知'}</Text></div> },
     { accessorKey: 'present', header: '检测', size: 100, cell: ({ getValue }) => <StatusBadge label={getValue<boolean>() ? '已检测' : '未检测'} tone={getValue<boolean>() ? 'verified' : 'neutral'} /> },
+    { accessorKey: 'endpoint', header: '控制端', size: 190, cell: ({ getValue }) => <Text size="sm" ff="monospace">{String(getValue() ?? '—')}</Text> },
     { accessorKey: 'mode', header: '应用方式', size: 170 },
     { accessorKey: 'verification', header: '验证依据', size: 180 },
     { accessorKey: 'message', header: '后台结果', size: 300, cell: ({ getValue }) => <Text size="sm" c="dimmed">{String(getValue() ?? '无附加信息')}</Text> },
@@ -69,7 +70,7 @@ export function ProxyPage() {
 
       <div className="split-layout proxy-layout">
         <Section title="适配器状态">
-          <DataTable columns={columns} data={rows} minWidth={820} rowKey={(row) => row.id} onRowClick={(row) => setSelectedID(row.id)} emptyTitle="没有适配器" emptyDetail="后台未返回已注册的代理适配器。" />
+          <DataTable columns={columns} data={rows} minWidth={1120} rowKey={(row) => row.id} onRowClick={(row) => setSelectedID(row.id)} emptyTitle="没有适配器" emptyDetail="后台未返回已注册的代理适配器。" />
         </Section>
         <Section title="验证详情" className="inspector-section">
           {selected ? (
@@ -80,6 +81,7 @@ export function ProxyPage() {
               </Group>
               <div className="property-grid">
                 <Text c="dimmed">版本</Text><Text ff="monospace">{selected.version ?? '—'}</Text>
+                <Text c="dimmed">控制端</Text><Text ff="monospace">{selected.endpoint ?? '—'}</Text>
                 <Text c="dimmed">应用方式</Text><Text>{selected.mode}</Text>
                 <Text c="dimmed">验证依据</Text><Text>{selected.verification}</Text>
                 <Text c="dimmed">后台信息</Text><Text>{selected.message ?? '—'}</Text>

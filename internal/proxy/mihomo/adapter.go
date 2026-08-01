@@ -82,7 +82,10 @@ func (a *Adapter) Detect(ctx context.Context) (proxy.Detection, error) {
 	if err := json.Unmarshal(body, &version); err != nil {
 		return proxy.Detection{Present: true}, fmt.Errorf("decode Mihomo version: %w", err)
 	}
-	return proxy.Detection{Present: true, Version: version.Version, Message: "controller API is reachable"}, nil
+	if strings.TrimSpace(version.Version) == "" {
+		return proxy.Detection{Present: false}, errors.New("Mihomo version endpoint returned an empty version")
+	}
+	return proxy.Detection{Present: true, Version: version.Version, Endpoint: a.controller.String(), Message: "控制 API 可访问"}, nil
 }
 
 // Plan 生成完整受管 provider 内容，并记录当前文件哈希用于并发修改检查。

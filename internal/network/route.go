@@ -249,7 +249,7 @@ func (c *RouteController) Recover(ctx context.Context) error {
 	var recoveredErrors []error
 	for index := range c.journal.Transactions {
 		transaction := &c.journal.Transactions[index]
-		needsRecovery := transaction.State == "planned" || transaction.State == "applied" || (transaction.Temporary && transaction.State == "verified")
+		needsRecovery := transaction.State == "planned" || transaction.State == "applied" || transaction.State == "rollback_failed" || transaction.State == "recovery_failed" || (transaction.Temporary && transaction.State == "verified")
 		if !needsRecovery {
 			continue
 		}

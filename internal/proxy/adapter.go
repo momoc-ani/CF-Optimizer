@@ -21,9 +21,10 @@ type Capabilities struct {
 
 // Detection 表示代理内核是否存在以及可展示的非敏感版本信息。
 type Detection struct {
-	Present bool   `json:"present"`
-	Version string `json:"version,omitempty"`
-	Message string `json:"message,omitempty"`
+	Present  bool   `json:"present"`
+	Version  string `json:"version,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
+	Message  string `json:"message,omitempty"`
 }
 
 // Plan 是可审计、可序列化但尚未应用的适配器变更。

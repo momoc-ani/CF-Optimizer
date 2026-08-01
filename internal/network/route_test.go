@@ -14,6 +14,7 @@ import (
 type memoryRouteBackend struct {
 	routes      map[string]RouteSpec
 	resolveFail bool
+	deleteFail  bool
 }
 
 func newMemoryRouteBackend() *memoryRouteBackend {
@@ -26,6 +27,9 @@ func (b *memoryRouteBackend) Replace(_ context.Context, route RouteSpec) error {
 }
 
 func (b *memoryRouteBackend) Delete(_ context.Context, route RouteSpec) error {
+	if b.deleteFail {
+		return errors.New("forced delete failure")
+	}
 	if _, exists := b.routes[route.Prefix]; !exists {
 		return ErrRouteNotFound
 	}
@@ -110,6 +114,31 @@ func TestRecoverRemovesVerifiedTemporaryRoute(t *testing.T) {
 	}
 	if _, err := backend.Get(context.Background(), testRoute().Prefix); !errors.Is(err, ErrRouteNotFound) {
 		t.Fatalf("temporary route remains: %v", err)
+	}
+}
+
+func TestRecoverRetriesRollbackFailedTemporaryRoute(t *testing.T) {
+	backend := newMemoryRouteBackend()
+	controller := newTestRouteController(t, backend)
+	plan, _ := controller.Plan(context.Background(), testRoute(), true)
+	transaction, err := controller.Apply(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend.deleteFail = true
+	if err := controller.Rollback(context.Background(), transaction.ID); err == nil {
+		t.Fatal("expected the first rollback to fail")
+	}
+	backend.deleteFail = false
+	reopened, err := NewRouteController(controller.pathDir(), backend, true, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Get(context.Background(), testRoute().Prefix); !errors.Is(err, ErrRouteNotFound) {
+		t.Fatalf("rollback_failed temporary route remains: %v", err)
 	}
 }
 

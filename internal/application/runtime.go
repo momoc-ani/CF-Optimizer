@@ -140,9 +140,32 @@ func (r *Runtime) DetectManagedAdapters(ctx context.Context, physicalPath cfnetw
 		return nil, err
 	}
 	if coordinator == nil {
-		return map[string]proxy.Detection{}, nil
+		return detectAutoProxyAdapters(ctx, managedConfig, map[string]proxy.Detection{}), nil
 	}
-	return coordinator.Detect(ctx), nil
+	return detectAutoProxyAdapters(ctx, managedConfig, coordinator.Detect(ctx)), nil
+}
+
+// DetectProxyAdapters 只读检测当前运行时及自动发现的本机代理内核。
+func (r *Runtime) DetectProxyAdapters(ctx context.Context) map[string]proxy.Detection {
+	view := r.View()
+	detections := map[string]proxy.Detection{}
+	if view.ProxyCoordinator != nil {
+		detections = view.ProxyCoordinator.Detect(ctx)
+	}
+	return detectAutoProxyAdapters(ctx, view.Config, detections)
+}
+
+// detectAutoProxyAdapters 在不改变代理配置的前提下补充 Mihomo 自动发现证据。
+func detectAutoProxyAdapters(ctx context.Context, cfg config.Config, detections map[string]proxy.Detection) map[string]proxy.Detection {
+	if !cfg.Proxy.AutoDetect || detections[cleanupAdapterMihomo].Present {
+		return detections
+	}
+	detection, err := mihomo.AutoDetect(ctx, cfg.Proxy.Mihomo)
+	if err != nil && detection.Message == "" {
+		detection.Message = err.Error()
+	}
+	detections[cleanupAdapterMihomo] = detection
+	return detections
 }
 
 // BuildManagedSession 使用已确认的物理出口和已检测适配器构建可应用系统策略的会话。
@@ -210,6 +233,9 @@ func configForDetectedAdapters(cfg config.Config, detections map[string]proxy.De
 	isPresent := func(name string) bool { return detections[name].Present }
 	cfg.Proxy.Generic.Enabled = isPresent(cleanupAdapterGeneric)
 	cfg.Proxy.Mihomo.Enabled = cfg.Proxy.Mihomo.Enabled && isPresent(cleanupAdapterMihomo)
+	if cfg.Proxy.Mihomo.Enabled && detections[cleanupAdapterMihomo].Endpoint != "" {
+		cfg.Proxy.Mihomo.Controller = detections[cleanupAdapterMihomo].Endpoint
+	}
 	cfg.Proxy.SingBox.Enabled = cfg.Proxy.SingBox.Enabled && isPresent(cleanupAdapterSingBox)
 	cfg.Proxy.Xray.Enabled = cfg.Proxy.Xray.Enabled && isPresent(cleanupAdapterXray)
 	cfg.Proxy.External.Enabled = cfg.Proxy.External.Enabled && isPresent(cleanupAdapterExternal)

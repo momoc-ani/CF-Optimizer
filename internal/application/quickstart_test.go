@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -199,6 +200,23 @@ func TestQuickStartVerificationFailureReportsRollback(t *testing.T) {
 	}
 	if result.Status != "rolled_back" || result.Error == "" || len(backend.routes) != 0 {
 		t.Fatalf("verification failure was not reported as rolled back: result=%#v routes=%#v", result, backend.routes)
+	}
+}
+
+func TestQuickStartEffectsExcludeReadOnlyMihomoDetection(t *testing.T) {
+	cfg := config.Default()
+	detections := map[string]proxy.Detection{
+		cleanupAdapterGeneric: {Present: true},
+		cleanupAdapterMihomo:  {Present: true, Endpoint: "http://127.0.0.1:19097"},
+	}
+	effects := quickStartEffects(cfg, detections)
+	if strings.Join(effects, ",") != "system_routes" {
+		t.Fatalf("只读 Mihomo 发现不应进入写入影响清单：%#v", effects)
+	}
+	cfg.Proxy.Mihomo.Enabled = true
+	effects = quickStartEffects(cfg, detections)
+	if strings.Join(effects, ",") != "system_routes,mihomo_policy" {
+		t.Fatalf("已启用 Mihomo 应进入写入影响清单：%#v", effects)
 	}
 }
 

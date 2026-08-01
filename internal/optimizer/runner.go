@@ -147,9 +147,7 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 		return report, err
 	}
 	defer func() {
-		cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.config.Network.CommandTimeout.Duration())
-		defer cancel()
-		if cleanupErr := r.rollbackRoutes(cleanupContext, temporaryTransactions); cleanupErr != nil {
+		if cleanupErr := r.rollbackRoutes(ctx, temporaryTransactions); cleanupErr != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("clean temporary routes: %w", cleanupErr))
 		}
 	}()
@@ -303,13 +301,18 @@ func (r *Runner) applyTemporaryRoutes(ctx context.Context, snapshot ranges.Snaps
 	return transactionIDs, nil
 }
 
+// rollbackRoutes 为每条路由提供独立清理时限，并忽略已取消的任务上下文以防残留。
 func (r *Runner) rollbackRoutes(ctx context.Context, transactionIDs []string) error {
 	if r.routes == nil {
 		return nil
 	}
+	cleanupContext := context.WithoutCancel(ctx)
 	var rollbackErrors []error
 	for index := len(transactionIDs) - 1; index >= 0; index-- {
-		if err := r.routes.Rollback(ctx, transactionIDs[index]); err != nil {
+		transactionContext, cancel := context.WithTimeout(cleanupContext, r.config.Network.CommandTimeout.Duration())
+		err := r.routes.Rollback(transactionContext, transactionIDs[index])
+		cancel()
+		if err != nil {
 			rollbackErrors = append(rollbackErrors, err)
 		}
 	}

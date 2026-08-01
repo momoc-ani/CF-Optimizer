@@ -10,6 +10,7 @@ import { DataTable } from '../components/DataTable';
 import { ErrorState, LoadingState, Metric, PageHeader, Section } from '../components/Page';
 import { StatusBadge } from '../components/StatusBadge';
 import { formatDate } from '../lib/format';
+import { countCurrentVerifiedRoutes, countTemporaryRoutesRequiringCleanup } from '../lib/routeSummary';
 import { useUIStore } from '../state/ui';
 
 /** routeTone 将事务状态转换为只表达已有证据的视觉状态。 */
@@ -47,8 +48,9 @@ export function RoutesPage() {
 
   if (routes.isLoading || status.isLoading) return <LoadingState rows={7} />;
   if (routes.isError) return <ErrorState message={routes.error.message} onRetry={() => routes.refetch()} />;
-  const verified = rows.filter((item) => item.state === 'verified').length;
-  const temporary = rows.filter((item) => item.temporary && item.state !== 'rolled_back').length;
+  const historicalVerified = rows.filter((item) => item.state === 'verified').length;
+  const currentVerified = countCurrentVerifiedRoutes(status.data?.state);
+  const temporary = countTemporaryRoutesRequiringCleanup(rows);
   const path = status.data?.physical_path;
   const report = diagnostic.data;
   return (
@@ -58,12 +60,12 @@ export function RoutesPage() {
       <SimpleGrid cols={{ base: 2, md: 4 }} spacing="sm">
         <Metric label="物理接口" value={path?.interface ?? '未发现'} detail={path?.interface_index ? `Index ${path.interface_index}` : '没有接口索引'} accent="#1677a6" />
         <Metric label="IPv4 网关" value={<Text ff="monospace" inherit>{path?.gateway_ipv4 ?? '—'}</Text>} detail={path?.source_ipv4?.[0] ?? '无源地址'} />
-        <Metric label="已验证事务" value={verified} detail={`共 ${rows.length} 条事务`} accent="#2b8a5a" />
+        <Metric label="当前已验证路由" value={currentVerified} detail={`${historicalVerified} 条历史验证记录`} accent="#2b8a5a" />
         <Metric label="活动临时路由" value={temporary} detail={temporary ? '任务结束后应清理' : '无候选网段残留'} accent={temporary ? '#c47a12' : '#75808a'} />
       </SimpleGrid>
 
       <div className="split-layout routes-layout">
-        <Section title="路由事务" aside={<StatusBadge label={verified ? `${verified} 条有验证证据` : '无验证证据'} tone={verified ? 'verified' : 'warning'} />}>
+        <Section title="路由事务" aside={<StatusBadge label={historicalVerified ? `${historicalVerified} 条历史验证记录` : '无验证记录'} tone={historicalVerified ? 'verified' : 'warning'} />}>
           <DataTable columns={columns} data={rows} minWidth={980} rowKey={(row) => row.id} onRowClick={(row) => { setSelectedID(row.id); diagnostic.reset(); }} emptyTitle="暂无路由事务" emptyDetail="系统路由管理关闭或尚未运行应用策略的优选任务。" />
         </Section>
         <Section title="路由诊断" className="inspector-section">

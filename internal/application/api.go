@@ -76,11 +76,7 @@ func (a *API) Handle(ctx context.Context, request ipc.Request, emit func(any) er
 	case "routes.list":
 		return a.runtime.Routes.Transactions(), nil
 	case "proxy.detect":
-		coordinator := a.runtime.View().ProxyCoordinator
-		if coordinator == nil {
-			return map[string]any{}, nil
-		}
-		return coordinator.Detect(ctx), nil
+		return a.runtime.DetectProxyAdapters(ctx), nil
 	case "diagnostics.route":
 		return a.routeDiagnostics(ctx, request.Params)
 	case "config.get":

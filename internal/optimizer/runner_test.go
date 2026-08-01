@@ -3,6 +3,7 @@ package optimizer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/netip"
@@ -42,6 +43,46 @@ func (staticBenchmark) Run(_ context.Context, addresses []netip.Addr, progress f
 type recordingPolicy struct {
 	policies  []proxy.DirectPolicy
 	rollbacks []proxy.ApplyResult
+}
+
+type delayedRouteBackend struct {
+	routes map[string]cfnetwork.RouteSpec
+	delay  time.Duration
+}
+
+func (b *delayedRouteBackend) Replace(_ context.Context, route cfnetwork.RouteSpec) error {
+	b.routes[route.Prefix] = route
+	return nil
+}
+
+func (b *delayedRouteBackend) Delete(ctx context.Context, route cfnetwork.RouteSpec) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(b.delay):
+	}
+	if _, exists := b.routes[route.Prefix]; !exists {
+		return cfnetwork.ErrRouteNotFound
+	}
+	delete(b.routes, route.Prefix)
+	return nil
+}
+
+func (b *delayedRouteBackend) Get(_ context.Context, prefix string) (cfnetwork.RouteSpec, error) {
+	route, exists := b.routes[prefix]
+	if !exists {
+		return cfnetwork.RouteSpec{}, cfnetwork.ErrRouteNotFound
+	}
+	return route, nil
+}
+
+func (b *delayedRouteBackend) Resolve(_ context.Context, target netip.Addr) (cfnetwork.ResolvedRoute, error) {
+	for _, route := range b.routes {
+		if netip.MustParsePrefix(route.Prefix).Contains(target) {
+			return cfnetwork.ResolvedRoute{RouteSpec: route, SourceAddress: "192.0.2.10"}, nil
+		}
+	}
+	return cfnetwork.ResolvedRoute{}, cfnetwork.ErrRouteNotFound
 }
 
 func (*recordingPolicy) Capabilities() proxy.Capabilities {
@@ -117,6 +158,46 @@ func TestRunnerAccumulatesReceiptsAndCleansManagedPolicy(t *testing.T) {
 	}
 	if err := runner.CleanupManagedPolicy(context.Background()); err != nil {
 		t.Fatalf("cleanup should be idempotent: %v", err)
+	}
+}
+
+func TestRollbackRoutesUsesIndependentCleanupTimeouts(t *testing.T) {
+	backend := &delayedRouteBackend{routes: map[string]cfnetwork.RouteSpec{}, delay: 5 * time.Millisecond}
+	controller, err := cfnetwork.NewRouteController(t.TempDir(), backend, true, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var transactionIDs []string
+	for _, prefix := range []string{"1.1.1.1/32", "1.1.1.2/32", "1.1.1.3/32", "1.1.1.4/32", "1.1.1.5/32"} {
+		route := cfnetwork.RouteSpec{Prefix: prefix, Gateway: "192.0.2.1", Interface: "eth0", InterfaceIndex: 2, Metric: 5}
+		plan, planErr := controller.Plan(context.Background(), route, true)
+		if planErr != nil {
+			t.Fatal(planErr)
+		}
+		transaction, applyErr := controller.Apply(context.Background(), plan)
+		if applyErr != nil {
+			t.Fatal(applyErr)
+		}
+		transactionIDs = append(transactionIDs, transaction.ID)
+	}
+	cfg := config.Default()
+	cfg.Network.CommandTimeout = config.Duration(20 * time.Millisecond)
+	runner := &Runner{config: cfg, routes: controller}
+	canceledContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := runner.rollbackRoutes(canceledContext, transactionIDs); err != nil {
+		t.Fatal(err)
+	}
+	if len(backend.routes) != 0 {
+		t.Fatalf("temporary routes remain after cleanup: %#v", backend.routes)
+	}
+	for _, transaction := range controller.Transactions() {
+		if transaction.State != "rolled_back" {
+			t.Fatalf("unexpected transaction state: %#v", transaction)
+		}
+	}
+	if !errors.Is(canceledContext.Err(), context.Canceled) {
+		t.Fatal("test context should remain canceled")
 	}
 }
 
