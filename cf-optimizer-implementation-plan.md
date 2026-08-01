@@ -642,7 +642,38 @@ SHA-256 手工校验、网卡与网关覆盖值、单独路由诊断和测速参
 - 自动识别失败时仍可仅测速，并能进入高级页面人工选择接口与网关。
 - Windows、Linux、macOS 的 amd64/arm64 编译边界通过；三平台真机分别验证系统权限提示、托盘恢复和物理出口证据。
 
-## 25. 执行状态
+## 25. 六目标发布资产精简计划
+
+### 25.1 目标产物
+
+GitHub Release 面向用户只公开 Windows、Linux、macOS 与 amd64、arm64 组合对应的六个安装包：
+
+| 目标 | 公开安装包 |
+|---|---|
+| Windows amd64 | `cf-optimizer-<version>-windows-amd64-setup.exe` |
+| Windows arm64 | `cf-optimizer-<version>-windows-arm64-setup.exe` |
+| Linux amd64 | `cf-optimizer-<version>-linux-amd64.tar.gz` |
+| Linux arm64 | `cf-optimizer-<version>-linux-arm64.tar.gz` |
+| macOS amd64 | `cf-optimizer-<version>-darwin-amd64.dmg` |
+| macOS arm64 | `cf-optimizer-<version>-darwin-arm64.dmg` |
+
+`SHA256SUMS` 作为独立校验文件保留，不计入六个安装包。macOS PKG 仅作为 DMG 内部安装器，不单独发布。Linux 每个架构归档同时包含 DEB、RPM 与统一 `install.sh`，由安装脚本自动选择 `apt-get`、`dnf` 或 `yum`，不缩减 Debian/Ubuntu、Fedora/RHEL 支持范围。
+
+### 25.2 工作流与文档
+
+- 普通 CI 与 tag Release 必须在生成校验和前严格验证六个文件名、版本、平台和架构，发现缺失、重复或额外安装包时立即失败。
+- Release 正文提供按 Windows、Linux、macOS 分组的下载表，链接到当前 tag 的六个安装包；重复运行发布工作流时保持下载说明可重建。
+- 根 `README.md`、三平台双语指南与 `packaging/README.md` 统一描述单一公开下载项；Linux 指南说明解压并运行统一安装脚本，同时保留手工 DEB/RPM 安装的高级路径。
+- 打包测试验证 Linux 双架构归档内容、包架构映射、安装脚本权限和公开输出数量；工作流静态检查验证六目标聚合与发布脚本。
+
+### 25.3 验收标准
+
+- 每个版本只发布六个安装包及一个 `SHA256SUMS`，文件名可直接辨认系统与架构。
+- Linux amd64/arm64 各只下载一个归档，并继续支持 Debian/Ubuntu 与 Fedora/RHEL 系发行版。
+- macOS 用户只看到 DMG，仍通过其内部 PKG 完成 LaunchDaemon 与命令行组件安装。
+- Release 页面按平台展示下载入口，校验和覆盖且只覆盖六个公开安装包。
+
+## 26. 执行状态
 
 | 阶段 | 状态 | 当前交付物 | 验收与提交 |
 |---|---|---|---|
@@ -656,3 +687,4 @@ SHA-256 手工校验、网卡与网关覆盖值、单独路由诊断和测速参
 | 阶段6B：Wails桌面界面 | 已完成 | Wails Bridge、React/Mantine 八页界面、TanStack Query/Table、Zustand、RHF/Zod、ECharts、实时任务条、深浅主题、响应式布局、完整状态、跨平台系统托盘与关闭隐藏行为 | 前端 lint/typecheck/build、6 个 Vitest、三窗口矩阵 6 个 Playwright、Go test/vet、生产资源嵌入与托盘图标测试通过；关闭或退出 UI 不取消后台任务，`0352962`，托盘补充纳入阶段7提交 |
 | 阶段7：发布与稳定性 | 已完成 | Windows Inno Setup/WebView2 与服务生命周期、Linux DEB/RPM、macOS PKG/DMG 及签名公证入口、六目标核心和原生桌面 CI、普通 CI 的 `installers` 安装包与 SHA-256 聚合产物、无特权 E2E、tag 发布与 SHA-256、系统托盘、累计策略收据安全卸载、中英双语 `README.md` 及 Windows/macOS/Linux 平台使用指南；托盘切换为 Wails 外部事件循环兼容的 `fyne.io/systray`，Linux 使用 D-Bus StatusNotifier 并移除 Ayatana 依赖；固定 Wails 2.10.2 要求的 `go-webview2 v1.0.19` 回调契约 | Go test/vet/race、前端 lint/typecheck/build、6 个 Vitest、三窗口 6 个 Playwright、六目标核心与 Windows 双架构桌面编译、Linux Wails 生产构建/隔离启动、DEB/RPM 实际生成及 actionlint 通过；本轮已确认 Linux bindings 在无显示服务环境完成生成，并静态确认 macOS 不再重复定义 `AppDelegate` 及 Windows WebView2 回调签名恢复兼容；普通 CI 安装包和汇总校验清单待六个平台 runner 复验；三平台真实安装、签名公证、托盘交互和真实路由仍需对应真机发布验收，见阶段7提交 |
 | 阶段8：三步使用体验 | 已完成（真机验收待发布） | `quickstart.plan/run` 短期确认计划、网络/配置/适配器一致性复核、共享单任务锁、验证后持续维护切换；总览一键确认、仅测速降级、高级接口/网关覆盖和四类结果；根 README 与三平台双语三步指南 | Go test/vet/race、9 个 Vitest、三窗口矩阵 12 个 Playwright 和 Vite 生产构建通过，`7d1014d`、`fc67e93`、`9a953c7`；未在 WSL 启动或构建桌面宿主，Windows/Linux/macOS 真机权限提示、真实路由/代理证据和安装后交互仍待发布验收 |
+| 阶段9：六目标发布资产 | 进行中（打包层已完成） | Linux 每架构单一归档内含 DEB、RPM 与自动安装脚本；macOS PKG 改为仅封装在 DMG 内部 | Linux 双架构归档结构、包架构映射和安装脚本权限测试通过；六目标聚合、Release 下载表、文档与原生 runner 复验待后续提交 |

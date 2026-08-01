@@ -10,6 +10,7 @@ CFOPT_VERSION="${1#v}"
 target_arch="$2"
 CFOPT_STAGE="$(cd "$3" && pwd)"
 output_dir="$4"
+bundle_name="cf-optimizer-${CFOPT_VERSION}-linux-${target_arch}"
 
 case "$target_arch" in
   amd64)
@@ -33,9 +34,16 @@ command -v nfpm >/dev/null 2>&1 || { echo "nfpm is required" >&2; exit 1; }
 
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd)"
+work_dir="$(mktemp -d)"
+trap 'rm -rf "$work_dir"' EXIT
+bundle_dir="$work_dir/$bundle_name"
+mkdir -p "$bundle_dir"
+install -m 0755 packaging/linux/install.sh "$bundle_dir/install.sh"
 export CFOPT_VERSION CFOPT_STAGE
 
 NFPM_ARCH="$deb_arch" nfpm package --config packaging/linux/nfpm.yaml --packager deb \
-  --target "$output_dir/cf-optimizer-${CFOPT_VERSION}-linux-${target_arch}.deb"
+  --target "$bundle_dir/${bundle_name}.deb"
 NFPM_ARCH="$rpm_arch" nfpm package --config packaging/linux/nfpm.yaml --packager rpm \
-  --target "$output_dir/cf-optimizer-${CFOPT_VERSION}-linux-${target_arch}.rpm"
+  --target "$bundle_dir/${bundle_name}.rpm"
+
+tar -C "$work_dir" -czf "$output_dir/${bundle_name}.tar.gz" "$bundle_name"

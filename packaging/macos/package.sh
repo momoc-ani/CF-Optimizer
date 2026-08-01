@@ -45,7 +45,7 @@ if [[ -n "${MACOS_APP_SIGN_IDENTITY:-}" ]]; then
     --sign "$MACOS_APP_SIGN_IDENTITY" "$root_dir/Applications/CF Optimizer.app"
 fi
 
-package_path="$output_dir/cf-optimizer-${version}-darwin-${arch}.pkg"
+package_path="$work_dir/cf-optimizer-${version}-darwin-${arch}.pkg"
 pkgbuild_args=(--root "$root_dir" --scripts "$scripts_dir" --identifier com.cfoptimizer.package --version "$version")
 if [[ -n "${MACOS_INSTALLER_SIGN_IDENTITY:-}" ]]; then
   pkgbuild_args+=(--sign "$MACOS_INSTALLER_SIGN_IDENTITY")
