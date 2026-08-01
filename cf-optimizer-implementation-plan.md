@@ -588,7 +588,7 @@ hosts:
 
 | 阶段 | 状态 | 当前交付物 | 验收与提交 |
 |---|---|---|---|
-| 阶段8：三步使用体验 | 待实施 | 自动出口预检、一次确认的一键优选、按次应用或持续维护、高级设置降级入口 | 不降低路由验证与回滚要求；需完成 IPC、运行时并发、配置持久化、Go/Vitest/Playwright 和三平台真机交互验收 |
+| 阶段8：三步使用体验 | 已完成（真机验收待发布） | 自动出口预检、一次确认的一键优选、按次应用或持续维护、高级设置降级入口 | IPC、运行时并发切换、原子配置持久化、Go/Vitest/Playwright 已完成；三平台真实权限、路由与代理组合仍待发布验收 |
 
 ### 24.1 用户主流程
 
@@ -617,7 +617,7 @@ SHA-256 手工校验、网卡与网关覆盖值、单独路由诊断和测速参
 - `BenchmarkPage` 保留候选比较和仅测速入口；`RoutesPage`、`SettingsPage` 作为高级诊断和人工覆盖入口，只有自动预检失败时才从主流程跳转。
 - 所有加载、取消、计划过期、网络变化、权限不足、验证失败、部分成功和回滚失败状态都必须可恢复，运行时错误不得导致白屏。
 
-### 24.4 预计修改模块
+### 24.4 实现模块
 
 | 模块 | 修改内容 |
 |---|---|
@@ -655,3 +655,4 @@ SHA-256 手工校验、网卡与网关覆盖值、单独路由诊断和测速参
 | 阶段6A：Stitch UI设计 | 已完成 | `docs/ui/STITCH_UI_PROMPT.md`、[Stitch 项目](https://stitch.withgoogle.com/projects/4530156739579505362)、Design System、8 页面 × 3 宽度 × 双主题共 48 个核心画板及 9 个补充状态画板 | 57 个画板已生成；设计令牌、导航密度、危险操作、长文本和 WebView 可实现性复核记录于 `docs/ui/STITCH_DESIGN_REVIEW.md`，`a5eb795` |
 | 阶段6B：Wails桌面界面 | 已完成 | Wails Bridge、React/Mantine 八页界面、TanStack Query/Table、Zustand、RHF/Zod、ECharts、实时任务条、深浅主题、响应式布局、完整状态、跨平台系统托盘与关闭隐藏行为 | 前端 lint/typecheck/build、6 个 Vitest、三窗口矩阵 6 个 Playwright、Go test/vet、生产资源嵌入与托盘图标测试通过；关闭或退出 UI 不取消后台任务，`0352962`，托盘补充纳入阶段7提交 |
 | 阶段7：发布与稳定性 | 已完成 | Windows Inno Setup/WebView2 与服务生命周期、Linux DEB/RPM、macOS PKG/DMG 及签名公证入口、六目标核心和原生桌面 CI、普通 CI 的 `installers` 安装包与 SHA-256 聚合产物、无特权 E2E、tag 发布与 SHA-256、系统托盘、累计策略收据安全卸载、中英双语 `README.md` 及 Windows/macOS/Linux 平台使用指南；托盘切换为 Wails 外部事件循环兼容的 `fyne.io/systray`，Linux 使用 D-Bus StatusNotifier 并移除 Ayatana 依赖；固定 Wails 2.10.2 要求的 `go-webview2 v1.0.19` 回调契约 | Go test/vet/race、前端 lint/typecheck/build、6 个 Vitest、三窗口 6 个 Playwright、六目标核心与 Windows 双架构桌面编译、Linux Wails 生产构建/隔离启动、DEB/RPM 实际生成及 actionlint 通过；本轮已确认 Linux bindings 在无显示服务环境完成生成，并静态确认 macOS 不再重复定义 `AppDelegate` 及 Windows WebView2 回调签名恢复兼容；普通 CI 安装包和汇总校验清单待六个平台 runner 复验；三平台真实安装、签名公证、托盘交互和真实路由仍需对应真机发布验收，见阶段7提交 |
+| 阶段8：三步使用体验 | 已完成（真机验收待发布） | `quickstart.plan/run` 短期确认计划、网络/配置/适配器一致性复核、共享单任务锁、验证后持续维护切换；总览一键确认、仅测速降级、高级接口/网关覆盖和四类结果；根 README 与三平台双语三步指南 | Go test/vet、9 个 Vitest、三窗口矩阵 12 个 Playwright 和 Vite 生产构建通过，`7d1014d`、`fc67e93`；未在 WSL 启动或构建桌面宿主，Windows/Linux/macOS 真机权限提示、真实路由/代理证据和安装后交互仍待发布验收 |

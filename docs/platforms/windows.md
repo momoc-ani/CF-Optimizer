@@ -63,51 +63,19 @@ $cfopt = Join-Path $env:ProgramFiles "CF Optimizer\cf-optimizer.exe"
 
 查看状态和运行普通诊断通常不需要提升 UI 权限。编辑配置、控制服务或手动清理系统目录时，请使用管理员 PowerShell。
 
-### 5. 首次安全使用
+### 5. 三步开始使用
 
-安装后先确认系统服务和 IPC 状态：
+普通用户只需完成三步：
 
-```powershell
-$cfopt = Join-Path $env:ProgramFiles "CF Optimizer\cf-optimizer.exe"
-& $cfopt service-status
-& $cfopt status
-```
+1. 下载并运行对应架构的 Windows 安装包。
+2. 从开始菜单打开 CF Optimizer，等待总览显示后台已连接；程序会自动执行只读物理出口预检。
+3. 点击“一键优选”，在一个确认框中核对接口、网关和影响范围，然后选择“仅本次应用”或“以后自动维护”并开始。
 
-默认 `network.manage_routes: false`，以下基准测试不会应用路由或代理策略：
+确认前不会修改路由、Hosts、代理策略或持续维护配置。后台会依次更新网段、测速、应用并验证策略；验证失败时回滚。界面只会显示“已验证”“仅测速完成”“部分完成”或“已回滚”，不会把配置写入当作直连证据。
 
-```powershell
-& $cfopt benchmark
-```
+如果自动预检无法确定可信接口或网关，确认框只提供“仅测速”和“高级设置”。此时再到设置页填写物理接口/网关，并在网络路由页运行诊断；CLI、手工 SHA-256 校验和 YAML 编辑均属于高级路径。
 
-编辑配置前先备份，然后验证 YAML：
-
-```powershell
-$config = Join-Path $env:ProgramData "CF Optimizer\config.yaml"
-Copy-Item $config "$config.bak"
-notepad.exe $config
-& $cfopt config validate
-```
-
-建议按以下顺序启用能力：
-
-1. 保持 `network.manage_routes: false`，完成基准测试并确认 TLS、IPv4/IPv6 和下载测试配置符合预期。
-2. 在设置页或 YAML 中填写真实物理接口及 IPv4/IPv6 网关。
-3. 对一个测试 IP 收集实际出口证据：
-
-   ```powershell
-   & $cfopt test-route 1.1.1.1
-   ```
-
-4. 仅当接口、网关和连接证据符合预期时，才启用 `network.manage_routes` 或代理适配器。
-5. 通过后台服务执行完整优选：
-
-   ```powershell
-   & $cfopt optimize
-   & $cfopt history
-   & $cfopt logs --lines 100
-   ```
-
-配置写入或命令成功不等于流量已经直连。VPN Kill Switch、企业策略或代理内核可能继续拦截物理出口，应以诊断证据为准。
+VPN Kill Switch、企业策略或代理内核仍可能阻止物理出口。没有实际接口、网关和连接证据时，不应声称流量已经直连。
 
 ### 6. 桌面界面与托盘
 
@@ -247,51 +215,19 @@ $cfopt = Join-Path $env:ProgramFiles "CF Optimizer\cf-optimizer.exe"
 
 Reading status and normal diagnostics usually does not require an elevated UI. Use an Administrator PowerShell when editing configuration, controlling the service, or manually removing system data.
 
-### 5. Safe first use
+### 5. Start in three steps
 
-Verify the service manager and IPC state after installation:
+The normal workflow has three steps:
 
-```powershell
-$cfopt = Join-Path $env:ProgramFiles "CF Optimizer\cf-optimizer.exe"
-& $cfopt service-status
-& $cfopt status
-```
+1. Download and run the Windows installer for the host architecture.
+2. Open CF Optimizer from the Start menu and wait for the Overview to show a connected service. The application performs a read-only physical-egress preflight automatically.
+3. Select One-click Optimize, review the interface, gateway, and effects in one confirmation dialog, then choose Apply once or Maintain automatically and start.
 
-`network.manage_routes` defaults to `false`, so this benchmark does not apply route or proxy policy:
+Before confirmation, the application does not change routes, Hosts, proxy policy, or persistent maintenance settings. The service refreshes ranges, benchmarks candidates, applies policy, and verifies it in sequence, rolling back when verification fails. The UI reports only Verified, Benchmark only, Partially completed, or Rolled back; a successful write is never treated as direct-traffic proof.
 
-```powershell
-& $cfopt benchmark
-```
+If preflight cannot identify a trusted interface or gateway, the dialog offers only Benchmark and Advanced settings. Enter manual interface/gateway overrides in Settings and use Routes diagnostics only in that fallback path. CLI use, manual SHA-256 verification, and YAML editing are advanced operations.
 
-Back up the configuration before editing it, then validate the YAML:
-
-```powershell
-$config = Join-Path $env:ProgramData "CF Optimizer\config.yaml"
-Copy-Item $config "$config.bak"
-notepad.exe $config
-& $cfopt config validate
-```
-
-Enable capabilities in this order:
-
-1. Keep `network.manage_routes: false`, run a benchmark, and verify that TLS, IPv4/IPv6, and download settings match your intent.
-2. Enter the real physical interface and IPv4/IPv6 gateways in Settings or YAML.
-3. Collect effective egress evidence for a test address:
-
-   ```powershell
-   & $cfopt test-route 1.1.1.1
-   ```
-
-4. Enable `network.manage_routes` or proxy adapters only when the interface, gateway, and connection evidence are correct.
-5. Run a full optimization through the service:
-
-   ```powershell
-   & $cfopt optimize
-   & $cfopt history
-   & $cfopt logs --lines 100
-   ```
-
-A successful command or configuration write is not proof of direct traffic. A VPN Kill Switch, enterprise policy, or proxy core may still block physical egress. Use diagnostic evidence.
+A VPN Kill Switch, enterprise policy, or proxy core may still block physical egress. Do not claim direct traffic without effective interface, gateway, and connection evidence.
 
 ### 6. Desktop and tray
 

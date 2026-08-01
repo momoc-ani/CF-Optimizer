@@ -44,6 +44,16 @@ Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix
 
 在 WSL 中不要安装 Linux 后台服务来管理 Windows 主机网络，应在 Windows 主机中使用 Windows 安装包。
 
+### 三步开始使用
+
+1. 下载并安装与平台、架构匹配的安装包。
+2. 打开 CF Optimizer，等待总览连接后台并自动完成只读物理出口预检。
+3. 点击“一键优选”，在一个确认框内核对接口、网关和影响范围，选择“仅本次应用”或“以后自动维护”，然后开始。
+
+确认前不会修改路由、Hosts、代理策略或持续维护配置。后台负责网段更新、测速、策略应用、实际选路验证和失败回滚；界面只显示“已验证”“仅测速完成”“部分完成”或“已回滚”，不会把配置写入描述为直连成功。
+
+自动预检失败时仍可选择“仅测速”。只有此时才需要进入高级设置手工填写物理接口/网关，或使用网络路由页和 CLI 收集更多诊断证据。
+
 ### 安全默认值
 
 完整配置字段见 [config.example.yaml](config.example.yaml)。重要默认值如下：
@@ -54,7 +64,7 @@ Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix
 - `ranges.max_change_percent` 限制远程网段异常变化。
 - 代理密钥不会写入诊断导出；日志和导出还会再次脱敏。
 
-启用路由前，应明确填写物理接口和网关，先运行路由诊断并检查实际证据。不要尝试绕过 VPN Kill Switch；无法验证物理出口时应保持路由管理关闭。
+一键优选会先自动发现物理接口和网关，并在确认框中显示影响范围；自动发现失败时才需要手工覆盖。不要尝试绕过 VPN Kill Switch；无法验证物理出口时应保持路由管理关闭。
 
 ### 从源码开发
 
@@ -146,6 +156,16 @@ For a formal release, download the installer for the target architecture and `SH
 
 Do not install the Linux service under WSL to manage Windows host networking. Install the Windows package on the Windows host instead.
 
+### Start in three steps
+
+1. Download and install the package matching the operating system and architecture.
+2. Open CF Optimizer and wait for the Overview to connect to the service and finish its read-only physical-egress preflight.
+3. Select One-click Optimize, review the interface, gateway, and effects in one confirmation dialog, choose Apply once or Maintain automatically, and start.
+
+Before confirmation, the application does not change routes, Hosts, proxy policy, or persistent maintenance settings. The service owns range refresh, benchmarking, policy application, effective-route verification, and rollback. The UI reports only Verified, Benchmark only, Partially completed, or Rolled back; a configuration write is never presented as proof of direct traffic.
+
+When automatic preflight fails, Benchmark remains available. Only then is it necessary to enter manual interface/gateway overrides in Advanced settings or collect more evidence from Routes diagnostics and the CLI.
+
 ### Secure defaults
 
 See [config.example.yaml](config.example.yaml) for every field. Important defaults are:
@@ -156,7 +176,7 @@ See [config.example.yaml](config.example.yaml) for every field. Important defaul
 - `ranges.max_change_percent` limits abnormal remote range changes.
 - Proxy secrets are excluded from diagnostics, and exported logs are redacted again.
 
-Before enabling route management, specify the physical interface and gateway, run route diagnostics, and inspect the resulting evidence. Do not try to bypass a VPN Kill Switch; keep route management disabled when physical egress cannot be verified.
+One-click Optimize discovers the physical interface and gateway first and shows the effects for confirmation. Manual overrides are needed only when automatic discovery fails. Do not try to bypass a VPN Kill Switch; keep route management disabled when physical egress cannot be verified.
 
 ### Development from source
 

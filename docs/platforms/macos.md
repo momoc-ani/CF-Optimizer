@@ -57,50 +57,19 @@ grep "  $asset\$" SHA256SUMS
 
 配置文件权限在首次安装时设置为 `0600`。编辑配置、控制 LaunchDaemon 或运行卸载脚本时使用 `sudo`；不要以 root 身份长期启动桌面 UI。
 
-### 5. 首次安全使用
+### 5. 三步开始使用
 
-安装后检查 LaunchDaemon 和 IPC：
+普通用户只需完成三步：
 
-```bash
-sudo /usr/local/bin/cf-optimizer service-status
-sudo /usr/local/bin/cf-optimizer status
-```
+1. 下载对应架构的 DMG，并运行其中的 PKG 完成安装。
+2. 从“应用程序”打开 CF Optimizer，等待总览显示后台已连接；程序会自动执行只读物理出口预检。
+3. 点击“一键优选”，在一个确认框中核对接口、网关和影响范围，然后选择“仅本次应用”或“以后自动维护”并开始。
 
-默认 `network.manage_routes: false`，先执行不应用策略的基准测试：
+确认前不会修改路由、代理策略或持续维护配置。后台会依次更新网段、测速、应用并验证策略；验证失败时回滚。界面只会显示“已验证”“仅测速完成”“部分完成”或“已回滚”，不会把配置写入当作直连证据。
 
-```bash
-sudo /usr/local/bin/cf-optimizer benchmark
-```
+如果自动预检无法确定可信接口或网关，确认框只提供“仅测速”和“高级设置”。此时再到设置页填写物理接口/网关，并在网络路由页运行诊断；CLI、手工 SHA-256 校验和配置编辑均属于高级路径。
 
-编辑配置前创建备份并验证：
-
-```bash
-config='/Library/Application Support/CF Optimizer/config.yaml'
-sudo cp "$config" "$config.bak"
-sudo nano "$config"
-sudo /usr/local/bin/cf-optimizer config validate
-```
-
-建议按以下顺序启用能力：
-
-1. 保持路由管理关闭，确认 TCP、TLS、IPv4/IPv6 和可选下载测试结果正常。
-2. 填写真实物理接口与 IPv4/IPv6 网关。
-3. 收集一个测试 IP 的实际出口证据：
-
-   ```bash
-   sudo /usr/local/bin/cf-optimizer test-route 1.1.1.1
-   ```
-
-4. 只有证据显示目标使用预期物理接口与网关时，才启用 `network.manage_routes` 或代理适配器。
-5. 通过后台服务运行完整优选：
-
-   ```bash
-   sudo /usr/local/bin/cf-optimizer optimize
-   sudo /usr/local/bin/cf-optimizer history
-   sudo /usr/local/bin/cf-optimizer logs --lines 100
-   ```
-
-VPN Network Extension、Kill Switch 或企业配置描述文件可能阻止物理出口。命令成功只表示操作完成，不代表实际流量已经直连。
+VPN Network Extension、Kill Switch 或企业配置描述文件可能阻止物理出口。没有实际接口、网关和连接证据时，不应声称流量已经直连。
 
 ### 6. 桌面界面与托盘
 
@@ -237,50 +206,19 @@ If Gatekeeper blocks a trusted but unsigned CI package, verify its source and us
 
 The initial configuration is created with mode `0600`. Use `sudo` to edit it, control the LaunchDaemon, or run the uninstaller. Do not run the desktop UI as root.
 
-### 5. Safe first use
+### 5. Start in three steps
 
-Check the LaunchDaemon and IPC state after installation:
+The normal workflow has three steps:
 
-```bash
-sudo /usr/local/bin/cf-optimizer service-status
-sudo /usr/local/bin/cf-optimizer status
-```
+1. Download the DMG for the Mac architecture and run its PKG installer.
+2. Open CF Optimizer from Applications and wait for the Overview to show a connected service. The application performs a read-only physical-egress preflight automatically.
+3. Select One-click Optimize, review the interface, gateway, and effects in one confirmation dialog, then choose Apply once or Maintain automatically and start.
 
-`network.manage_routes` defaults to `false`. Start with a benchmark that does not apply policy:
+Before confirmation, the application does not change routes, proxy policy, or persistent maintenance settings. The service refreshes ranges, benchmarks candidates, applies policy, and verifies it in sequence, rolling back when verification fails. The UI reports only Verified, Benchmark only, Partially completed, or Rolled back; a successful write is never treated as direct-traffic proof.
 
-```bash
-sudo /usr/local/bin/cf-optimizer benchmark
-```
+If preflight cannot identify a trusted interface or gateway, the dialog offers only Benchmark and Advanced settings. Enter manual interface/gateway overrides in Settings and use Routes diagnostics only in that fallback path. CLI use, manual SHA-256 verification, and configuration editing are advanced operations.
 
-Back up and validate the configuration before editing:
-
-```bash
-config='/Library/Application Support/CF Optimizer/config.yaml'
-sudo cp "$config" "$config.bak"
-sudo nano "$config"
-sudo /usr/local/bin/cf-optimizer config validate
-```
-
-Enable capabilities in this order:
-
-1. Keep route management disabled and confirm TCP, TLS, IPv4/IPv6, and optional download tests work as expected.
-2. Enter the real physical interface and IPv4/IPv6 gateways.
-3. Collect effective egress evidence for a test address:
-
-   ```bash
-   sudo /usr/local/bin/cf-optimizer test-route 1.1.1.1
-   ```
-
-4. Enable `network.manage_routes` or proxy adapters only when evidence shows the expected physical interface and gateway.
-5. Run a full optimization through the service:
-
-   ```bash
-   sudo /usr/local/bin/cf-optimizer optimize
-   sudo /usr/local/bin/cf-optimizer history
-   sudo /usr/local/bin/cf-optimizer logs --lines 100
-   ```
-
-A VPN Network Extension, Kill Switch, or managed configuration profile may block physical egress. Command success only indicates operation completion, not verified direct traffic.
+A VPN Network Extension, Kill Switch, or managed profile may still block physical egress. Do not claim direct traffic without effective interface, gateway, and connection evidence.
 
 ### 6. Desktop and tray
 
