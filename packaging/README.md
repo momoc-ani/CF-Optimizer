@@ -1,6 +1,6 @@
 # Packaging resources
 
-The release workflow builds all packages from native GitHub-hosted runners.
+The CI and release workflows build all packages from native GitHub-hosted runners. Regular CI runs aggregate unsigned commit-validation packages and `SHA256SUMS` in the `installers` artifact. Version tags publish the same package formats through the release workflow, with optional signing and notarization.
 
 - `windows/installer.iss` creates per-architecture installers, checks WebView2, and manages the Windows Service.
 - `linux/nfpm.yaml` and `linux/package.sh` create DEB and RPM packages with GTK 3 and WebKitGTK 4.1 runtime dependencies.

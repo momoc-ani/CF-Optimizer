@@ -17,6 +17,8 @@ env:
   GO_VERSION: 1.23.0
   NODE_VERSION: 22
   WAILS_VERSION: v2.10.2
+  NFPM_VERSION: v2.41.3
+  CI_PACKAGE_VERSION: 0.0.${{ github.run_number }}
 
 jobs:
   quality:
@@ -93,7 +95,8 @@ jobs:
           if [[ "$GOOS" == windows ]]; then suffix=".exe"; fi
           output="dist/core-${GOOS}-${GOARCH}"
           mkdir -p "$output"
-          ldflags="-s -w -X github.com/cf-optimizer/cf-optimizer/internal/version.Version=ci -X github.com/cf-optimizer/cf-optimizer/internal/version.Commit=${GITHUB_SHA}"
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ldflags="-s -w -X github.com/cf-optimizer/cf-optimizer/internal/version.Version=${CI_PACKAGE_VERSION} -X github.com/cf-optimizer/cf-optimizer/internal/version.Commit=${GITHUB_SHA} -X github.com/cf-optimizer/cf-optimizer/internal/version.Date=${build_date}"
           go build -trimpath -ldflags "$ldflags" -o "$output/cf-optimizer$suffix" ./cmd/cli
           go build -trimpath -ldflags "$ldflags" -o "$output/cf-optimizerd$suffix" ./cmd/daemon
       - uses: actions/upload-artifact@v4
@@ -104,30 +107,36 @@ jobs:
 
   build-desktop:
     name: Desktop ${{ matrix.target }}
-    needs: quality
+    needs: [quality, build-core]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: windows/amd64
+            os: windows
+            arch: amd64
             runner: windows-latest
-            artifact: desktop-windows-amd64
           - target: windows/arm64
+            os: windows
+            arch: arm64
             runner: windows-11-arm
-            artifact: desktop-windows-arm64
           - target: linux/amd64
+            os: linux
+            arch: amd64
             runner: ubuntu-24.04
-            artifact: desktop-linux-amd64
           - target: linux/arm64
+            os: linux
+            arch: arm64
             runner: ubuntu-24.04-arm
-            artifact: desktop-linux-arm64
           - target: darwin/amd64
+            os: darwin
+            arch: amd64
             runner: macos-15-intel
-            artifact: desktop-darwin-amd64
           - target: darwin/arm64
+            os: darwin
+            arch: arm64
             runner: macos-15
-            artifact: desktop-darwin-arm64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -141,25 +150,95 @@ jobs:
           cache-dependency-path: desktop/frontend/package-lock.json
       - name: Install Linux desktop build dependencies
         if: runner.os == 'Linux'
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@${NFPM_VERSION}
       - name: Install Wails CLI
         shell: bash
         run: go install github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}
+      - uses: actions/download-artifact@v4
+        with:
+          name: core-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/stage-${{ matrix.os }}-${{ matrix.arch }}
       - name: Build native desktop application
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
+          TARGET_OS: ${{ matrix.os }}
+          TARGET_ARCH: ${{ matrix.arch }}
         run: |
-          ldflags="-s -w -X github.com/cf-optimizer/cf-optimizer/internal/version.Version=ci -X github.com/cf-optimizer/cf-optimizer/internal/version.Commit=${GITHUB_SHA}"
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ldflags="-s -w -X github.com/cf-optimizer/cf-optimizer/internal/version.Version=${CI_PACKAGE_VERSION} -X github.com/cf-optimizer/cf-optimizer/internal/version.Commit=${GITHUB_SHA} -X github.com/cf-optimizer/cf-optimizer/internal/version.Date=${build_date}"
           args=(build -clean -trimpath -platform "$TARGET" -ldflags "$ldflags" -o cf-optimizer-ui)
-          if [[ "$TARGET" == linux/* ]]; then args+=(-tags webkit2_41); fi
+          if [[ "$TARGET_OS" == linux ]]; then args+=(-tags webkit2_41); fi
           (cd cmd/desktop && wails "${args[@]}")
+
+          stage="dist/stage-${TARGET_OS}-${TARGET_ARCH}"
+          mkdir -p "$stage" dist/packages
+          suffix=""
+          if [[ "$TARGET_OS" == windows ]]; then suffix=".exe"; fi
+          if [[ "$TARGET_OS" != darwin ]]; then
+            cp "packaging/wails/bin/cf-optimizer-ui$suffix" "$stage/cf-optimizer-ui$suffix"
+          fi
+          if [[ "$TARGET_OS" != windows ]]; then
+            chmod +x "$stage/cf-optimizer" "$stage/cf-optimizerd"
+            if [[ "$TARGET_OS" == linux ]]; then chmod +x "$stage/cf-optimizer-ui"; fi
+          fi
+      - name: Create Windows installer
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          stage="$(cygpath -w "$PWD/dist/stage-windows-${TARGET_ARCH}")"
+          output="$(cygpath -w "$PWD/dist/packages")"
+          curl.exe -fsSL "https://go.microsoft.com/fwlink/p/?LinkId=2124703" \
+            -o "dist/stage-windows-${TARGET_ARCH}/MicrosoftEdgeWebview2Setup.exe"
+          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" \
+            "/DMyVersion=${CI_PACKAGE_VERSION}" "/DMyArch=${TARGET_ARCH}" "/DSourceDir=${stage}" "/DOutputDir=${output}" \
+            "packaging/windows/installer.iss"
+      - name: Create Linux DEB and RPM
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: packaging/linux/package.sh "$CI_PACKAGE_VERSION" "$TARGET_ARCH" "dist/stage-linux-${TARGET_ARCH}" dist/packages
+      - name: Create macOS PKG and DMG
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          packaging/macos/package.sh "$CI_PACKAGE_VERSION" "$TARGET_ARCH" \
+            "dist/stage-darwin-${TARGET_ARCH}" "packaging/wails/bin/CF Optimizer.app" dist/packages
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: packaging/wails/bin/*
+          name: package-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/packages/*
+          if-no-files-found: error
+
+  package-manifest:
+    name: Installers and checksums
+    needs: build-desktop
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          merge-multiple: true
+          path: dist/installers
+      - name: Generate and verify SHA-256 checksums
+        shell: bash
+        run: |
+          cd dist/installers
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers
+          path: dist/installers/*
           if-no-files-found: error
 
   e2e:

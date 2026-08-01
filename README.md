@@ -34,7 +34,7 @@ Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix
 
 ### 平台使用指南
 
-从版本发布页下载对应架构的安装包和 `SHA256SUMS`，然后按目标系统指南操作。CI 产物在未配置证书时可能未签名。
+正式版本从发布页下载对应架构的安装包和 `SHA256SUMS`。普通 CI 成功后也会提供 `installers` artifact，文件版本为 `0.0.<run_number>`，用于提交验证且未签名。下载后按目标系统指南操作。
 
 | 平台 | 发布产物 | 最低运行要求 | 完整指南 |
 |---|---|---|---|
@@ -92,7 +92,8 @@ Linux 使用 WebKitGTK 4.1 时增加 `-tags webkit2_41`。打包资源见 [packa
 
 - `quality`：gofmt、go vet、Go test/race、ESLint、TypeScript 和 Vitest。
 - `build-core`：Windows/Linux/macOS × amd64/arm64 的 CLI 与后台服务。
-- `build-desktop`：六个目标在对应原生 runner 上构建 Wails 应用。
+- `build-desktop`：六个目标在对应原生 runner 上构建 Wails 应用，并生成 Windows EXE、Linux DEB/RPM、macOS PKG/DMG。
+- `package-manifest`：聚合六个平台安装包，生成并验证 `SHA256SUMS`，上传 `installers` artifact。
 - `e2e`：Linux 普通用户环境中的三窗口 Playwright 测试，不修改路由、Hosts、代理或系统服务。
 
 推送 `v<major>.<minor>.<patch>` 标签会运行发布工作流，生成 Windows 安装器、Linux DEB/RPM、macOS PKG/DMG 和经验证的 `SHA256SUMS`。签名、公证需要在发布环境中单独配置证书和 Secrets。
@@ -135,7 +136,7 @@ Windows uses an ACL-protected Named Pipe; Linux and macOS use a permission-prote
 
 ### Platform guides
 
-Download the installer for the target architecture and `SHA256SUMS` from the release page, then follow the corresponding guide. CI artifacts may be unsigned when signing credentials are not configured.
+For a formal release, download the installer for the target architecture and `SHA256SUMS` from the release page. Every successful regular CI run also provides an unsigned `installers` artifact using version `0.0.<run_number>` for commit validation. Then follow the corresponding platform guide.
 
 | Platform | Release asset | Minimum runtime | Full guide |
 |---|---|---|---|
@@ -193,7 +194,8 @@ Add `-tags webkit2_41` on Linux when using WebKitGTK 4.1. See [packaging/README.
 
 - `quality`: gofmt, go vet, Go test/race, ESLint, TypeScript, and Vitest.
 - `build-core`: CLI and daemon builds for Windows/Linux/macOS on amd64/arm64.
-- `build-desktop`: native Wails builds for all six targets.
+- `build-desktop`: native Wails builds for all six targets, plus Windows EXE, Linux DEB/RPM, and macOS PKG/DMG packaging.
+- `package-manifest`: collects all six platform packages, generates and verifies `SHA256SUMS`, and uploads the `installers` artifact.
 - `e2e`: three-window Playwright tests with an unprivileged simulated backend that never edits routes, Hosts, proxy configuration, or services.
 
 Pushing a `v<major>.<minor>.<patch>` tag runs the release workflow. It produces Windows installers, Linux DEB/RPM packages, macOS PKG/DMG packages, and a verified `SHA256SUMS`. Signing and notarization require certificates and Secrets configured separately in the release environment.
