@@ -16,6 +16,11 @@
 /desktop/frontend/node_modules/
 /desktop/frontend/dist/
 /desktop/frontend/coverage/
+/desktop/frontend/test-results/
+/desktop/frontend/playwright-report/
+/desktop/frontend/*.tsbuildinfo
+/desktop/frontend/vite.config.js
+/desktop/frontend/vite.config.d.ts
 /test-results/
 /playwright-report/
 

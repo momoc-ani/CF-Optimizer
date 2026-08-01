@@ -1,0 +1,23 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "CF Optimizer",
+  "outputfilename": "cf-optimizer-ui",
+  "frontend:dir": "../../desktop/frontend",
+  "assetdir": "../../desktop/frontend/dist",
+  "frontend:install": "npm ci",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "wailsjsdir": "../../desktop/frontend/src/wailsjs",
+  "build:dir": "../../packaging/wails",
+  "author": {
+    "name": "CF Optimizer Contributors"
+  },
+  "info": {
+    "companyName": "CF Optimizer",
+    "productName": "CF Optimizer",
+    "productVersion": "0.1.0",
+    "copyright": "Copyright 2026 CF Optimizer Contributors",
+    "comments": "Cloudflare node optimization and verified direct-route manager"
+  }
+}

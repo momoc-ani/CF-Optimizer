@@ -1,0 +1,44 @@
+import { Alert, Button } from '@mantine/core';
+import { PlugZap } from 'lucide-react';
+import { lazy, Suspense } from 'react';
+import { useStatus } from './api/hooks';
+import { RunProvider } from './components/RunContext';
+import { Shell } from './components/Shell';
+import { TaskStrip } from './components/TaskStrip';
+import { LoadingState } from './components/Page';
+import { useUIStore } from './state/ui';
+import { useRun } from './hooks/useRun';
+
+const OverviewPage = lazy(() => import('./pages/OverviewPage').then((module) => ({ default: module.OverviewPage })));
+const BenchmarkPage = lazy(() => import('./pages/BenchmarkPage').then((module) => ({ default: module.BenchmarkPage })));
+const ProxyPage = lazy(() => import('./pages/ProxyPage').then((module) => ({ default: module.ProxyPage })));
+const RoutesPage = lazy(() => import('./pages/RoutesPage').then((module) => ({ default: module.RoutesPage })));
+const RangesPage = lazy(() => import('./pages/RangesPage').then((module) => ({ default: module.RangesPage })));
+const HistoryPage = lazy(() => import('./pages/HistoryPage').then((module) => ({ default: module.HistoryPage })));
+const LogsPage = lazy(() => import('./pages/LogsPage').then((module) => ({ default: module.LogsPage })));
+const SettingsPage = lazy(() => import('./pages/SettingsPage').then((module) => ({ default: module.SettingsPage })));
+
+const pages = { overview: OverviewPage, benchmark: BenchmarkPage, proxy: ProxyPage, routes: RoutesPage, ranges: RangesPage, history: HistoryPage, logs: LogsPage, settings: SettingsPage };
+
+function Workspace() {
+  const status = useStatus();
+  const page = useUIStore((state) => state.page);
+  const run = useRun();
+  const CurrentPage = pages[page];
+  const activeEvent = run.event ?? status.data?.active_event;
+  return (
+    <Shell status={status.data} disconnected={status.isError} taskStrip={<TaskStrip event={activeEvent} cancelling={run.cancelling} onCancel={run.cancel} />}>
+      {status.isError && (
+        <Alert mb="md" color="red" icon={<PlugZap size={18} />} title="无法连接后台服务">
+          <span>{status.error.message}</span>
+          <Button ml="md" size="compact-xs" variant="light" color="red" onClick={() => status.refetch()}>重试</Button>
+        </Alert>
+      )}
+      <Suspense fallback={<LoadingState rows={7} />}><CurrentPage /></Suspense>
+    </Shell>
+  );
+}
+
+export function App() {
+  return <RunProvider><Workspace /></RunProvider>;
+}
