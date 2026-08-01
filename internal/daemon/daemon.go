@@ -33,7 +33,8 @@ func New(runtime *application.Runtime, api *application.API) (*Service, error) {
 	if runtime == nil || api == nil {
 		return nil, errors.New("daemon runtime and API are required")
 	}
-	server, err := ipc.NewServer(runtime.Config.IPC.Endpoint, api, runtime.Logger)
+	view := runtime.View()
+	server, err := ipc.NewServer(view.Config.IPC.Endpoint, api, runtime.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -44,7 +45,7 @@ func New(runtime *application.Runtime, api *application.API) (*Service, error) {
 func (s *Service) Run(ctx context.Context) error {
 	serviceContext, cancel := context.WithCancel(ctx)
 	defer cancel()
-	s.logger.Info("后台服务启动", "platform", runtime.GOOS, "endpoint", s.runtime.Config.IPC.Endpoint)
+	s.logger.Info("后台服务启动", "platform", runtime.GOOS, "endpoint", s.runtime.View().Config.IPC.Endpoint)
 	if err := s.runtime.Routes.Recover(serviceContext); err != nil {
 		return fmt.Errorf("recover route transactions: %w", err)
 	}
@@ -66,15 +67,16 @@ func (s *Service) Run(ctx context.Context) error {
 }
 
 func (s *Service) schedule(ctx context.Context) error {
-	if !s.runtime.Config.Schedule.Enabled {
+	initialConfig := s.runtime.View().Config
+	if !initialConfig.Schedule.Enabled {
 		<-ctx.Done()
 		return nil
 	}
 	optimizationTimer := time.NewTimer(initialRunDelay)
 	defer optimizationTimer.Stop()
-	networkTicker := time.NewTicker(s.runtime.Config.Schedule.NetworkPoll.Duration())
+	networkTicker := time.NewTicker(initialConfig.Schedule.NetworkPoll.Duration())
 	defer networkTicker.Stop()
-	fingerprint, _ := cfnetwork.NetworkFingerprint(ctx, s.runtime.Config.Network.CommandTimeout.Duration())
+	fingerprint, _ := cfnetwork.NetworkFingerprint(ctx, initialConfig.Network.CommandTimeout.Duration())
 	failureCount := 0
 	for {
 		select {
@@ -82,22 +84,24 @@ func (s *Service) schedule(ctx context.Context) error {
 			return nil
 		case <-optimizationTimer.C:
 			err := s.runScheduled(ctx)
-			delay := s.runtime.Config.Schedule.Interval.Duration()
+			currentConfig := s.runtime.View().Config
+			delay := currentConfig.Schedule.Interval.Duration()
 			if errors.Is(err, optimizer.ErrAlreadyRunning) {
 				delay = minimumRetryDelay
 			} else if err != nil {
 				failureCount++
-				delay = exponentialDelay(failureCount, s.runtime.Config.Schedule.Interval.Duration())
+				delay = exponentialDelay(failureCount, currentConfig.Schedule.Interval.Duration())
 				s.logger.Warn("计划优选失败，将按退避重试", "error", err, "retry_in", delay)
 			} else {
 				failureCount = 0
 			}
 			optimizationTimer.Reset(delay)
 		case <-networkTicker.C:
-			if !s.runtime.Config.Schedule.RunOnNetworkChange {
+			currentConfig := s.runtime.View().Config
+			if !currentConfig.Schedule.RunOnNetworkChange {
 				continue
 			}
-			current, err := cfnetwork.NetworkFingerprint(ctx, s.runtime.Config.Network.CommandTimeout.Duration())
+			current, err := cfnetwork.NetworkFingerprint(ctx, currentConfig.Network.CommandTimeout.Duration())
 			if err != nil {
 				s.logger.Warn("网络变化检测失败", "error", err)
 				continue
@@ -118,7 +122,7 @@ func (s *Service) schedule(ctx context.Context) error {
 }
 
 func (s *Service) runScheduled(ctx context.Context) error {
-	applyPolicy := s.runtime.ProxyCoordinator != nil
+	applyPolicy := s.runtime.View().ProxyCoordinator != nil
 	_, err := s.api.RunOptimization(ctx, optimizer.RunOptions{ApplyPolicy: applyPolicy}, nil)
 	return err
 }

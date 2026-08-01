@@ -18,6 +18,8 @@ var allowedMethods = map[string]struct{}{
 	"system.status":     {},
 	"optimizer.run":     {},
 	"optimizer.cancel":  {},
+	"quickstart.plan":   {},
+	"quickstart.run":    {},
 	"ranges.get":        {},
 	"ranges.update":     {},
 	"history.list":      {},
@@ -62,7 +64,7 @@ func (b *Bridge) Request(method string, parameters map[string]any) (string, erro
 	}
 	requestContext := b.context()
 	cancel := func() {}
-	if method != "optimizer.run" {
+	if method != "optimizer.run" && method != "quickstart.run" {
 		requestContext, cancel = context.WithTimeout(requestContext, requestTimeout)
 	}
 	defer cancel()
