@@ -21,6 +21,7 @@
 /desktop/frontend/coverage/
 /desktop/frontend/test-results/
 /desktop/frontend/playwright-report/
+/desktop/frontend/.tmp/
 /desktop/frontend/*.tsbuildinfo
 /desktop/frontend/vite.config.js
 /desktop/frontend/vite.config.d.ts
