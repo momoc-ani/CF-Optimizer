@@ -594,6 +594,6 @@ hosts:
 | 阶段3：跨平台直连层 | 已完成 | 三平台 Socket 绑定与物理出口发现、平台隔离路由后端、事务日志、验证/回滚/启动恢复、诊断证据 | 单元/race 测试及六目标交叉编译通过；三平台真机路由验证待发布验收，`fc87d53` |
 | 阶段4：代理适配器 | 已完成 | 统一生命周期与策略协调器、Generic Route、Mihomo provider/API、sing-box/Xray 受管片段、External JSON-RPC | 幂等、验证失败回滚和文件恢复测试通过，`97844e5` |
 | 阶段5：后台服务与IPC | 已完成 | 完整优选运行器、版本化 JSON Lines IPC 与事件流、单任务取消、周期/网络变化调度、Windows Service/systemd/LaunchDaemon 控制器、CLI 与可选 Windows Hosts | Go test/vet/race、IPC/CLI/服务单元测试及六目标交叉编译通过；服务安装和路由修改真机验证留待阶段7发布验收，见阶段5提交 |
-| 阶段6A：Stitch UI设计 | 未开始 | - | 待提示词与设计评审清单 |
+| 阶段6A：Stitch UI设计 | 已完成 | `docs/ui/STITCH_UI_PROMPT.md`：Stitch 主提示词、三类窗口/双主题、八个页面、完整状态矩阵要求与评审清单 | 提示词已完成内部约束审查；Stitch 生成稿链接与视觉复核由用户生成后补录，见阶段6A提交 |
 | 阶段6B：Wails桌面界面 | 未开始 | - | 待前端测试与 Playwright |
 | 阶段7：发布与稳定性 | 未开始 | - | 待六平台 CI、打包与中英双语 README |
