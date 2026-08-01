@@ -40,7 +40,7 @@ Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix
 |---|---|---|---|
 | Windows amd64/arm64 | `*-windows-*-setup.exe` | Windows 10/11、WebView2 Runtime | [Windows 安装与使用](docs/platforms/windows.md#中文) |
 | macOS amd64/arm64 | `*-darwin-*.dmg`，内含 PKG | macOS 11+ | [macOS 安装与使用](docs/platforms/macos.md#中文) |
-| Linux amd64/arm64 | `*-linux-*.deb` 或 `*.rpm` | systemd、GTK 3、WebKitGTK 4.1、Ayatana AppIndicator | [Linux 安装与使用](docs/platforms/linux.md#中文) |
+| Linux amd64/arm64 | `*-linux-*.deb` 或 `*.rpm` | systemd、GTK 3、WebKitGTK 4.1、支持 StatusNotifier 的桌面环境 | [Linux 安装与使用](docs/platforms/linux.md#中文) |
 
 在 WSL 中不要安装 Linux 后台服务来管理 Windows 主机网络，应在 Windows 主机中使用 Windows 安装包。
 
@@ -58,7 +58,7 @@ Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix
 
 ### 从源码开发
 
-需要 Go 1.23+、Node.js 22+。桌面构建还需要 Wails CLI；Linux 额外需要 `libgtk-3-dev`、`libwebkit2gtk-4.1-dev` 和 `libayatana-appindicator3-dev`。
+需要 Go 1.23+、Node.js 22+。桌面构建还需要 Wails CLI；Linux 额外需要 `libgtk-3-dev` 和 `libwebkit2gtk-4.1-dev`。
 
 ```bash
 go mod download
@@ -141,7 +141,7 @@ Download the installer for the target architecture and `SHA256SUMS` from the rel
 |---|---|---|---|
 | Windows amd64/arm64 | `*-windows-*-setup.exe` | Windows 10/11 and WebView2 Runtime | [Install and use on Windows](docs/platforms/windows.md#english) |
 | macOS amd64/arm64 | `*-darwin-*.dmg` containing a PKG | macOS 11+ | [Install and use on macOS](docs/platforms/macos.md#english) |
-| Linux amd64/arm64 | `*-linux-*.deb` or `*.rpm` | systemd, GTK 3, WebKitGTK 4.1, and Ayatana AppIndicator | [Install and use on Linux](docs/platforms/linux.md#english) |
+| Linux amd64/arm64 | `*-linux-*.deb` or `*.rpm` | systemd, GTK 3, WebKitGTK 4.1, and a StatusNotifier-capable desktop | [Install and use on Linux](docs/platforms/linux.md#english) |
 
 Do not install the Linux service under WSL to manage Windows host networking. Install the Windows package on the Windows host instead.
 
@@ -159,7 +159,7 @@ Before enabling route management, specify the physical interface and gateway, ru
 
 ### Development from source
 
-Development requires Go 1.23+ and Node.js 22+. Desktop builds also require the Wails CLI. Linux additionally requires `libgtk-3-dev`, `libwebkit2gtk-4.1-dev`, and `libayatana-appindicator3-dev`.
+Development requires Go 1.23+ and Node.js 22+. Desktop builds also require the Wails CLI. Linux additionally requires `libgtk-3-dev` and `libwebkit2gtk-4.1-dev`.
 
 ```bash
 go mod download

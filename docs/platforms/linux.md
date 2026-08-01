@@ -6,7 +6,7 @@
 
 ### 1. 适用范围
 
-本指南适用于使用 systemd 的 amd64 或 arm64 桌面 Linux。发布包提供 Debian/Ubuntu 的 DEB，以及 Fedora/RHEL 系的 RPM。桌面程序依赖 GTK 3、WebKitGTK 4.1 和 Ayatana AppIndicator，包管理器会安装对应运行库。
+本指南适用于使用 systemd 的 amd64 或 arm64 桌面 Linux。发布包提供 Debian/Ubuntu 的 DEB，以及 Fedora/RHEL 系的 RPM。桌面程序依赖 GTK 3 和 WebKitGTK 4.1；托盘通过桌面会话的 D-Bus StatusNotifier 协议注册。
 
 WSL 不应作为 Windows 主机网络的服务部署环境。要管理 Windows 的物理网卡和路由，请在 Windows 主机安装 Windows 版本。无 systemd 的 Linux 环境不会由安装脚本自动注册服务。
 
@@ -215,9 +215,9 @@ sudo cf-optimizer logs --lines 200
 
 - `systemd` 未运行：目标环境不满足正式服务要求。在 WSL 中应改用 Windows 主机版本；其他环境需使用支持 systemd 的桌面发行版。
 - 服务未安装：重新安装 DEB/RPM，确认安装脚本没有因权限或缺少 systemd 中断。
-- UI 无法启动：确认 GTK 3、WebKitGTK 4.1 和 Ayatana AppIndicator 运行库已安装，并从终端查看错误。
+- UI 无法启动：确认 GTK 3 和 WebKitGTK 4.1 运行库已安装，并从终端查看错误。
 - UI 无法连接：确认 `/var/lib/cf-optimizer/daemon.sock` 存在、服务运行正常且目录权限未被手动修改。
-- 托盘不可见：检查桌面环境 AppIndicator 支持；不要因此用 root 启动 UI。
+- 托盘不可见：检查桌面环境是否支持 D-Bus StatusNotifier；不要因此用 root 启动 UI。
 - 配置无效：恢复 `.bak`，或根据 `config validate` 输出修正 YAML。
 - 路由证据错误：关闭路由管理，停止服务并运行 `cleanup`，检查物理网卡、网关、策略路由、VPN 和 TUN。
 
@@ -227,7 +227,7 @@ sudo cf-optimizer logs --lines 200
 
 ### 1. Scope
 
-This guide covers amd64 and arm64 desktop Linux systems using systemd. Releases provide DEB packages for Debian/Ubuntu and RPM packages for Fedora/RHEL families. The desktop application depends on GTK 3, WebKitGTK 4.1, and Ayatana AppIndicator; the package manager installs the corresponding runtime libraries.
+This guide covers amd64 and arm64 desktop Linux systems using systemd. Releases provide DEB packages for Debian/Ubuntu and RPM packages for Fedora/RHEL families. The desktop application depends on GTK 3 and WebKitGTK 4.1; its tray registers through the desktop session's D-Bus StatusNotifier protocol.
 
 WSL is not a deployment environment for managing Windows host networking. Install the Windows version on the Windows host to manage its physical adapters and routes. Linux environments without systemd do not receive automatic service registration from the package scripts.
 
@@ -436,8 +436,8 @@ sudo cf-optimizer logs --lines 200
 
 - systemd unavailable: the environment does not meet the supported service requirements. Use the Windows host build for WSL, or a desktop distribution with systemd for Linux.
 - Service missing: reinstall the DEB/RPM and confirm package scripts were not interrupted by permissions or missing systemd.
-- UI startup failure: confirm GTK 3, WebKitGTK 4.1, and Ayatana AppIndicator runtime libraries are installed, then launch from a terminal to inspect errors.
+- UI startup failure: confirm GTK 3 and WebKitGTK 4.1 runtime libraries are installed, then launch from a terminal to inspect errors.
 - UI cannot connect: confirm `/var/lib/cf-optimizer/daemon.sock` exists, the service is healthy, and directory permissions were not changed manually.
-- Tray missing: inspect desktop AppIndicator support. Do not run the UI as root as a workaround.
+- Tray missing: inspect the desktop environment's D-Bus StatusNotifier support. Do not run the UI as root as a workaround.
 - Invalid configuration: restore the `.bak` file or correct the YAML field reported by `config validate`.
 - Unexpected route evidence: disable route management, stop the service, run `cleanup`, and inspect the physical adapter, gateway, policy routing, VPN, and TUN.

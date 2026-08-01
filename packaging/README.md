@@ -3,13 +3,13 @@
 The release workflow builds all packages from native GitHub-hosted runners.
 
 - `windows/installer.iss` creates per-architecture installers, checks WebView2, and manages the Windows Service.
-- `linux/nfpm.yaml` and `linux/package.sh` create DEB and RPM packages with GTK 3, WebKitGTK 4.1, and Ayatana AppIndicator runtime dependencies.
+- `linux/nfpm.yaml` and `linux/package.sh` create DEB and RPM packages with GTK 3 and WebKitGTK 4.1 runtime dependencies.
 - `macos/package.sh` creates per-architecture PKG and DMG files and supports optional Developer ID signing and notarization.
 - `wails/` contains reproducible Wails metadata and the shared application icon source.
 
 Upgrades preserve the service configuration and state. Uninstall first rolls back the persisted managed-policy receipt chain. User configuration, logs, history, and cached benchmark data are preserved by default.
 
-The desktop application uses `getlantern/systray v1.2.2`. Linux native builds therefore require `libayatana-appindicator3-dev`; the packaged application declares the matching runtime library. Closing the window hides it to the tray, while the tray quit action exits only the unprivileged UI process and leaves the service running.
+The desktop application uses `fyne.io/systray v1.12.2` with the Wails external event loop. Linux uses the desktop session's D-Bus StatusNotifier protocol and does not require native AppIndicator development headers. Closing the window hides it to the tray, while the tray quit action exits only the unprivileged UI process and leaves the service running.
 
 Optional release signing uses these GitHub Secrets:
 
