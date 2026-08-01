@@ -35,4 +35,28 @@ test('主题切换和优选任务状态可操作', async ({ page }) => {
   await page.getByRole('button', { name: '开始优选' }).click();
   await expect(page.getByRole('status')).toBeVisible();
   await expect(page.getByText(/TCP 初筛|下载复筛|选择节点|更新网段/).first()).toBeVisible();
+  await page.getByRole('button', { name: '取消当前任务' }).click();
+  await expect(page.getByText('任务已取消').first()).toBeVisible();
+});
+
+test('一键优选先展示影响确认再执行', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: '一键优选' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText('Ethernet 2')).toBeVisible();
+  await expect(dialog.getByText('系统主机路由')).toBeVisible();
+  await dialog.getByText('以后自动维护').click();
+  await dialog.getByRole('button', { name: '开始并验证' }).click();
+  await expect(page.getByRole('status')).toBeVisible();
+  await expect(page.getByText('已验证').first()).toBeVisible({ timeout: 5_000 });
+});
+
+test('计划过期后重新生成确认计划', async ({ page }) => {
+  await page.goto('/?quickstart=expired');
+  await page.getByRole('button', { name: '一键优选' }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByRole('button', { name: '开始并验证' }).click();
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText('物理出口已完成只读预检')).toBeVisible();
 });

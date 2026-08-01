@@ -10,6 +10,7 @@ import { DataTable } from '../components/DataTable';
 import { ErrorState, LoadingState, Metric, PageHeader, Section } from '../components/Page';
 import { StatusBadge } from '../components/StatusBadge';
 import { formatDate } from '../lib/format';
+import { useUIStore } from '../state/ui';
 
 /** routeTone 将事务状态转换为只表达已有证据的视觉状态。 */
 function routeTone(state: string): 'verified' | 'pending' | 'failed' | 'rolled-back' | 'neutral' {
@@ -30,6 +31,7 @@ export function RoutesPage() {
   const routes = useRoutes();
   const status = useStatus();
   const [selectedID, setSelectedID] = useState<string>();
+  const setPage = useUIStore((current) => current.setPage);
   const rows = routes.data ?? [];
   const selected = rows.find((item) => item.id === selectedID) ?? rows[0];
   const diagnostic = useMutation({ mutationFn: (target: string) => request<DiagnosticReport>('diagnostics.route', { target }) });
@@ -52,9 +54,10 @@ export function RoutesPage() {
   return (
     <Stack gap="lg">
       <PageHeader title="网络路由" description="物理出口、路由事务与直连诊断证据" actions={<Button variant="light" leftSection={<RefreshCw size={16} />} loading={routes.isFetching} onClick={() => Promise.all([routes.refetch(), status.refetch()])}>刷新状态</Button>} />
+      {!path?.interface && <Alert color="yellow" icon={<ShieldAlert size={18} />} title="未发现可信物理出口">自动预检无法确定接口或网关。<Button ml="sm" size="compact-xs" variant="light" color="yellow" onClick={() => setPage('settings')}>打开高级设置</Button></Alert>}
       <SimpleGrid cols={{ base: 2, md: 4 }} spacing="sm">
         <Metric label="物理接口" value={path?.interface ?? '未发现'} detail={path?.interface_index ? `Index ${path.interface_index}` : '没有接口索引'} accent="#1677a6" />
-        <Metric label="IPv4 网关" value={<Text ff="monospace" inherit>{path?.gateway_ipv4 ?? '—'}</Text>} detail={path?.source_ipv4 ?? '无源地址'} />
+        <Metric label="IPv4 网关" value={<Text ff="monospace" inherit>{path?.gateway_ipv4 ?? '—'}</Text>} detail={path?.source_ipv4?.[0] ?? '无源地址'} />
         <Metric label="已验证事务" value={verified} detail={`共 ${rows.length} 条事务`} accent="#2b8a5a" />
         <Metric label="活动临时路由" value={temporary} detail={temporary ? '任务结束后应清理' : '无候选网段残留'} accent={temporary ? '#c47a12' : '#75808a'} />
       </SimpleGrid>

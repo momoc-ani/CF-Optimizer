@@ -70,8 +70,8 @@ export interface OptimizerEvent {
 export interface PhysicalPath {
   interface?: string;
   interface_index?: number;
-  source_ipv4?: string;
-  source_ipv6?: string;
+  source_ipv4?: string[];
+  source_ipv6?: string[];
   gateway_ipv4?: string;
   gateway_ipv6?: string;
 }
@@ -122,6 +122,30 @@ export interface RunReport {
   ipv6_decision: Decision;
   policy_applied: boolean;
   warnings?: string[];
+}
+
+export type QuickStartMode = 'apply_once' | 'apply_and_remember';
+export type QuickStartStatus = 'verified' | 'partial' | 'rolled_back';
+
+export interface QuickStartPlan {
+  plan_id: string;
+  expires_at: string;
+  physical_path: PhysicalPath;
+  effects: string[];
+  warnings?: string[];
+  detections: ProxyDetections;
+  can_apply: boolean;
+  manual_required: boolean;
+  auto_maintenance_enabled: boolean;
+}
+
+export interface QuickStartResult {
+  report: RunReport;
+  mode: QuickStartMode;
+  status: QuickStartStatus;
+  auto_maintenance_enabled: boolean;
+  persistence_warning?: string;
+  error?: string;
 }
 
 export interface RangeSnapshot {

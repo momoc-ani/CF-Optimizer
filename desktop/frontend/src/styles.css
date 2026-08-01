@@ -267,6 +267,19 @@ select {
   border-bottom: 1px solid var(--border);
 }
 
+.quickstart-summary {
+  display: grid;
+  grid-template-columns: minmax(94px, auto) minmax(0, 1fr);
+  gap: 9px 14px;
+  align-items: start;
+  padding-block: 2px;
+}
+
+.quickstart-summary > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .event-row {
   display: grid;
   grid-template-columns: 8px 132px minmax(120px, 0.5fr) minmax(180px, 1.5fr);

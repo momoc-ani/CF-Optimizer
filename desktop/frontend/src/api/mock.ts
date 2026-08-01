@@ -4,6 +4,8 @@ import type {
   DiagnosticReport,
   OptimizerEvent,
   ProxyDetections,
+  QuickStartPlan,
+  QuickStartResult,
   RangeSnapshot,
   RouteTransaction,
   RunReport,
@@ -47,7 +49,7 @@ const baseStatus = (): SystemStatus => ({
     last_ended_at: iso(-3),
     running,
   },
-  physical_path: { interface: 'Ethernet 2', interface_index: 12, source_ipv4: '192.168.50.24', source_ipv6: '2408:8214:1320::24', gateway_ipv4: '192.168.50.1', gateway_ipv6: 'fe80::1' },
+  physical_path: { interface: 'Ethernet 2', interface_index: 12, source_ipv4: ['192.168.50.24'], source_ipv6: ['2408:8214:1320::24'], gateway_ipv4: '192.168.50.1', gateway_ipv6: 'fe80::1' },
   active_event: activeEvent,
 });
 
@@ -129,6 +131,30 @@ export async function mockRequest<T>(method: string, parameters: Record<string, 
   switch (method) {
     case 'system.status': return baseStatus() as T;
     case 'optimizer.run': return runOptimization() as Promise<T>;
+    case 'quickstart.plan': return {
+      plan_id: `plan-${Date.now()}`,
+      expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+      physical_path: baseStatus().physical_path,
+      effects: ['system_routes', 'mihomo_policy'],
+      warnings: [],
+      detections: { 'generic-route': { present: true }, mihomo: proxyDetections.mihomo },
+      can_apply: true,
+      manual_required: false,
+      auto_maintenance_enabled: false,
+    } as QuickStartPlan as T;
+    case 'quickstart.run': {
+      if (new URLSearchParams(window.location.search).get('quickstart') === 'expired' && !window.sessionStorage.getItem('quickstart-expired-once')) {
+        window.sessionStorage.setItem('quickstart-expired-once', 'true');
+        throw new Error('plan_expired: quick-start plan expired; create a new plan');
+      }
+      const report = await runOptimization();
+      return {
+        report,
+        mode: parameters.mode,
+        status: 'verified',
+        auto_maintenance_enabled: parameters.mode === 'apply_and_remember',
+      } as QuickStartResult as T;
+    }
     case 'optimizer.cancel': cancelled = running; return { cancelled } as T;
     case 'ranges.get': return mockRangeSnapshot as T;
     case 'ranges.update': return { snapshot: mockRangeSnapshot, updated: false } as T;

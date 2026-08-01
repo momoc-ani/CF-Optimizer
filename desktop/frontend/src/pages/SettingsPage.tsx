@@ -29,7 +29,13 @@ const settingsSchema = z.object({
   rangeInclude: z.string(),
   rangeExclude: z.string(),
   proxyAutoDetect: z.boolean(),
+  networkInterface: z.string(),
+  gatewayIPv4: z.string(),
+  gatewayIPv6: z.string(),
   manageRoutes: z.boolean(),
+}).superRefine((value, context) => {
+  if (value.manageRoutes && !value.networkInterface.trim()) context.addIssue({ code: 'custom', path: ['networkInterface'], message: '启用路由管理时必须填写物理接口' });
+  if (value.manageRoutes && !value.gatewayIPv4.trim() && !value.gatewayIPv6.trim()) context.addIssue({ code: 'custom', path: ['gatewayIPv4'], message: '至少填写一个物理网关' });
 });
 
 type SettingsForm = z.infer<typeof settingsSchema>;
@@ -58,6 +64,9 @@ function formFromConfig(config: AppConfig): SettingsForm {
     rangeInclude: config.ranges.include.join('\n'),
     rangeExclude: config.ranges.exclude.join('\n'),
     proxyAutoDetect: Boolean(config.proxy.auto_detect),
+    networkInterface: config.network.interface,
+    gatewayIPv4: config.network.gateway_ipv4,
+    gatewayIPv6: config.network.gateway_ipv6,
     manageRoutes: config.network.manage_routes,
   };
 }
@@ -80,7 +89,7 @@ function mergeSettings(config: AppConfig, form: SettingsForm): AppConfig {
       download_url: form.downloadURL,
       tls_server_name: form.tlsServerName,
     },
-    network: { ...config.network, manage_routes: form.manageRoutes },
+    network: { ...config.network, interface: form.networkInterface.trim(), gateway_ipv4: form.gatewayIPv4.trim(), gateway_ipv6: form.gatewayIPv6.trim(), manage_routes: form.manageRoutes },
     proxy: { ...config.proxy, auto_detect: form.proxyAutoDetect },
   };
 }
@@ -91,7 +100,7 @@ export function SettingsPage() {
   const queryClient = useQueryClient();
   const { colorScheme, setColorScheme } = useMantineColorScheme();
   const form = useForm<SettingsForm>({ resolver: zodResolver(settingsSchema), defaultValues: {
-    scheduleEnabled: true, scheduleInterval: '6h', runOnNetworkChange: true, ipv4: true, ipv6: true, candidates: 1000, concurrency: 200, connectAttempts: 4, lossLimitPercent: 25, switchImprovementPercent: 15, downloadURL: '', tlsServerName: '', rangeRefreshInterval: '24h', rangeInclude: '', rangeExclude: '', proxyAutoDetect: true, manageRoutes: false,
+    scheduleEnabled: true, scheduleInterval: '6h', runOnNetworkChange: true, ipv4: true, ipv6: true, candidates: 1000, concurrency: 200, connectAttempts: 4, lossLimitPercent: 25, switchImprovementPercent: 15, downloadURL: '', tlsServerName: '', rangeRefreshInterval: '24h', rangeInclude: '', rangeExclude: '', proxyAutoDetect: true, networkInterface: '', gatewayIPv4: '', gatewayIPv6: '', manageRoutes: false,
   } });
   useEffect(() => { if (config.data) form.reset(formFromConfig(config.data)); }, [config.data, form]);
   const save = useMutation({
@@ -157,6 +166,9 @@ export function SettingsPage() {
               <Stack gap="md">
                 <Controller control={form.control} name="proxyAutoDetect" render={({ field }) => <Switch label="自动检测代理适配器" checked={field.value} onChange={field.onChange} />} />
                 <Controller control={form.control} name="manageRoutes" render={({ field }) => <Switch color="orange" label="允许后台管理系统路由" checked={field.value} onChange={field.onChange} />} />
+                <Controller control={form.control} name="networkInterface" render={({ field }) => <TextInput {...field} label="物理接口" placeholder="自动预检失败时填写" error={errors.networkInterface?.message} />} />
+                <Controller control={form.control} name="gatewayIPv4" render={({ field }) => <TextInput {...field} label="IPv4 网关" ff="monospace" placeholder="例如 192.168.1.1" error={errors.gatewayIPv4?.message} />} />
+                <Controller control={form.control} name="gatewayIPv6" render={({ field }) => <TextInput {...field} label="IPv6 网关" ff="monospace" placeholder="可选" error={errors.gatewayIPv6?.message} />} />
                 <Text size="xs" c="dimmed">配置文件由后台原子保存。代理密钥不会通过此表单读回或覆盖。</Text>
               </Stack>
             </Section>

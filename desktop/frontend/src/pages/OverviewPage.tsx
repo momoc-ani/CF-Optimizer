@@ -1,13 +1,17 @@
 import { Alert, Button, Group, SimpleGrid, Stack, Text, ThemeIcon } from '@mantine/core';
-import { useMemo } from 'react';
+import { useMutation } from '@tanstack/react-query';
+import { useMemo, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
 import { Activity, Cable, Clock3, Network, Play, Route, ShieldCheck } from 'lucide-react';
+import { request } from '../api/client';
 import { useHistory, useProxies, useRanges, useRoutes, useStatus } from '../api/hooks';
-import type { Selection } from '../api/types';
+import type { QuickStartMode, QuickStartPlan, Selection } from '../api/types';
 import { formatDate, formatScore } from '../lib/format';
 import { EmptyState, LoadingState, Metric, PageHeader, Section } from '../components/Page';
 import { StatusBadge } from '../components/StatusBadge';
 import { useRun } from '../hooks/useRun';
+import { QuickStartDialog } from '../components/QuickStartDialog';
+import { useUIStore } from '../state/ui';
 
 function SelectionRow({ title, selection, interfaceName }: { title: string; selection?: Selection; interfaceName?: string }) {
   if (!selection) return <div className="selection-row"><Text fw={650}>{title}</Text><Text c="dimmed" size="sm">尚未选择节点</Text><StatusBadge label="未验证" /></div>;
@@ -29,6 +33,57 @@ export function OverviewPage() {
   const ranges = useRanges();
   const history = useHistory();
   const run = useRun();
+  const setPage = useUIStore((current) => current.setPage);
+  const [isConfirming, setIsConfirming] = useState(false);
+  const [quickStartPlan, setQuickStartPlan] = useState<QuickStartPlan>();
+  const [quickStartMode, setQuickStartMode] = useState<QuickStartMode>('apply_once');
+  const [didRunBenchmarkOnly, setDidRunBenchmarkOnly] = useState(false);
+  const planMutation = useMutation({ mutationFn: () => request<QuickStartPlan>('quickstart.plan') });
+
+  /** prepareQuickStart 请求只读计划，并在已有持续授权时复用确认。 */
+  const prepareQuickStart = async (reuseConfirmedMaintenance = true) => {
+    setDidRunBenchmarkOnly(false);
+    let plan: QuickStartPlan;
+    try {
+      plan = await planMutation.mutateAsync();
+    } catch {
+      return;
+    }
+    setQuickStartPlan(plan);
+    if (reuseConfirmedMaintenance && plan.can_apply && plan.auto_maintenance_enabled) {
+      try {
+        await run.runQuickStart({ plan_id: plan.plan_id, mode: 'apply_and_remember', force_range_refresh: false });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes('plan_expired') || message.includes('plan_stale') || message.includes('plan_not_found')) await prepareQuickStart(false);
+      }
+      return;
+    }
+    setIsConfirming(true);
+  };
+  /** runConfirmedPlan 执行当前计划；计划失效时自动回到新的确认框。 */
+  const runConfirmedPlan = async () => {
+    if (!quickStartPlan) return;
+    setIsConfirming(false);
+    try {
+      await run.runQuickStart({ plan_id: quickStartPlan.plan_id, mode: quickStartMode, force_range_refresh: false });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('plan_expired') || message.includes('plan_stale') || message.includes('plan_not_found')) {
+        await prepareQuickStart(false);
+      }
+    }
+  };
+  /** runBenchmarkOnly 在自动发现失败时保持完全只读的降级路径。 */
+  const runBenchmarkOnly = async () => {
+    setIsConfirming(false);
+    setDidRunBenchmarkOnly(true);
+    try {
+      await run.run({ force_range_refresh: false, apply_policy: false });
+    } catch {
+      // RunContext 已将可恢复错误映射到全局任务状态。
+    }
+  };
   const chart = useMemo(() => {
     const records = [...(history.data ?? [])].reverse();
     return {
@@ -51,7 +106,11 @@ export function OverviewPage() {
   const verifiedRoutes = (routes.data ?? []).filter((item) => item.state === 'verified').length;
   return (
     <Stack gap="lg">
-      <PageHeader title="总览" description="后台服务、当前节点与已验证直连策略" actions={<Button leftSection={<Play size={16} />} loading={run.running} onClick={() => run.run({ force_range_refresh: false, apply_policy: true })}>立即优选</Button>} />
+      <PageHeader title="总览" description="后台服务、当前节点与已验证直连策略" actions={<Button leftSection={<Play size={16} />} loading={planMutation.isPending || run.running} onClick={() => void prepareQuickStart()}>一键优选</Button>} />
+      {planMutation.isError && <Alert color="red" title="预检失败" withCloseButton onClose={() => planMutation.reset()}>{planMutation.error.message}</Alert>}
+      {run.quickStartResult && <Alert color={run.quickStartResult.status === 'verified' ? 'green' : run.quickStartResult.status === 'rolled_back' ? 'gray' : 'yellow'} title={run.quickStartResult.status === 'verified' ? '已验证' : run.quickStartResult.status === 'rolled_back' ? '已回滚' : '部分完成'}>{run.quickStartResult.persistence_warning || run.quickStartResult.error || (run.quickStartResult.auto_maintenance_enabled ? '策略与实际选路已验证，自动维护已经启用。' : '策略与实际选路已验证，本次运行未启用自动维护。')}</Alert>}
+      {didRunBenchmarkOnly && run.report && !run.running && !run.error && <Alert color="blue" title="仅测速完成">候选结果已生成，没有修改系统路由或代理策略。</Alert>}
+      {run.error && !run.running && <Alert color={run.error.message.includes('cancelled') ? 'gray' : 'red'} title={run.error.message.includes('cancelled') ? '任务已取消' : '任务未完成'}>{run.error.message}</Alert>}
       {state?.last_error && <Alert color="red" title="上次任务失败">{state.last_error}</Alert>}
       <SimpleGrid cols={{ base: 2, md: 4 }} spacing="sm">
         <Metric label="后台服务" value={<Group gap={7}><ThemeIcon size="sm" color={state ? 'green' : 'red'} variant="light"><Activity size={14} /></ThemeIcon>{state?.running ? '优选运行中' : '运行正常'}</Group>} detail={`协议 v${status.data?.protocol_version ?? '—'}`} accent="#2b8a5a" />
@@ -85,6 +144,17 @@ export function OverviewPage() {
       <Section title="最近事件">
         {(history.data ?? []).slice(0, 4).map((item) => <div className="event-row" key={item.id}><span className={`event-severity ${item.error ? 'warning' : 'success'}`} /><Text size="sm" className="event-time tabular">{formatDate(item.finished_at)}</Text><Text size="sm" fw={550}>{item.error ? '优选部分完成' : '优选任务完成'}</Text><Text size="sm" c="dimmed" lineClamp={1}>{item.switch_reason || '未发生节点切换'}</Text></div>)}
       </Section>
+      <QuickStartDialog
+        opened={isConfirming}
+        plan={quickStartPlan}
+        mode={quickStartMode}
+        running={run.running}
+        onModeChange={setQuickStartMode}
+        onClose={() => setIsConfirming(false)}
+        onConfirm={runConfirmedPlan}
+        onBenchmarkOnly={runBenchmarkOnly}
+        onAdvanced={() => { setIsConfirming(false); setPage('settings'); }}
+      />
     </Stack>
   );
 }
