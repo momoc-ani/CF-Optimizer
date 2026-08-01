@@ -551,3 +551,48 @@ hosts:
 6. 是否在首版提供自动更新。
 
 推荐首个里程碑以“CLI独立测速 + Generic Route + Mihomo适配 + Windows/Linux验证”为目标，再扩展macOS、更多代理适配器和完整Wails界面。
+
+## 21. 已批准实施决策
+
+以下决策于 2026-08-01 获得批准，作为编码和验收基线：
+
+- 使用 Go 1.23+，核心依赖控制为 `gopkg.in/yaml.v3`、`golang.org/x/sys` 和 `github.com/Microsoft/go-winio`。
+- 首版状态存储采用带版本号的原子 JSON 文件；保留存储接口，后续数据规模确有需要时再迁移 SQLite。
+- IPC 协议采用版本化 JSON Lines：Windows 使用 Named Pipe，Linux/macOS 使用 Unix Domain Socket。
+- 系统路由修改默认关闭；启用后必须使用平台隔离实现、事务日志、验证与回滚。
+- 默认启用 IPv4/IPv6 TCP 和 TLS 测试；HTTPS 下载地址默认为空，只有用户显式配置后才产生下载测速流量。
+- 首个可运行闭环先完成 CLI、测速、Generic Route、Mihomo、后台服务，再扩展其余代理适配器和桌面界面。
+- 桌面界面先输出 Stitch 设计提示词并完成设计稿评审，再按设计稿实现 Wails + React + Mantine 前端。
+- GitHub Actions 提供 Windows、Linux、macOS 的 amd64、arm64 构建矩阵，同时执行 Go、前端与端到端测试。
+
+## 22. UI 设计稿阶段
+
+在阶段6编码前增加设计输入与评审步骤：
+
+1. 输出 `docs/ui/STITCH_UI_PROMPT.md`，包含产品定位、信息架构、全局布局、设计令牌和全部页面要求。
+2. 提示词必须覆盖加载、空数据、运行中、取消、失败、部分成功、需要权限和已验证状态。
+3. 使用 Stitch 生成桌面宽屏、紧凑窗口和窄屏三类设计稿，并覆盖浅色、深色主题。
+4. 评审导航效率、数据密度、危险操作确认、长文本溢出和跨平台 WebView 可实现性。
+5. 将确认后的组件、间距、颜色和交互状态映射到 Mantine Theme，再开始 Wails 前端实现。
+
+## 23. GitHub Actions 构建要求
+
+- `quality`：执行 `gofmt` 检查、`go vet`、`go test`、前端 lint、typecheck 和 Vitest。
+- `build-core`：构建 `windows/linux/darwin` 与 `amd64/arm64` 的 CLI 和后台服务。
+- `build-desktop`：在对应操作系统 runner 上构建 Wails 桌面应用；未配置签名时只生成未签名 CI 产物。
+- `e2e`：在 Linux runner 上以无特权模拟后端运行 Playwright，不修改 CI 主机路由。
+- 发布工作流只在版本标签触发，校验产物哈希；签名、公证和仓库发布需要单独配置 Secrets。
+
+## 24. 执行状态
+
+| 阶段 | 状态 | 当前交付物 | 验收与提交 |
+|---|---|---|---|
+| 阶段0：需求与技术基线 | 已完成 | 项目上下文、实施计划、README、协作规范 | `1674ebd`，协作规范待单独提交 |
+| 阶段1：工程骨架与网段 | 进行中 | Go module、配置、状态、日志、网段、候选生成 | 待 Go test/vet 后提交 |
+| 阶段2：测速与评分核心 | 进行中 | TCP/TLS/HTTPS 测速初稿 | 待评分、迟滞、取消测试完成 |
+| 阶段3：跨平台直连层 | 未开始 | - | 待实现与交叉编译 |
+| 阶段4：代理适配器 | 未开始 | - | 待实现与适配器测试 |
+| 阶段5：后台服务与IPC | 未开始 | - | 待实现与集成测试 |
+| 阶段6A：Stitch UI设计 | 未开始 | - | 待提示词与设计评审清单 |
+| 阶段6B：Wails桌面界面 | 未开始 | - | 待前端测试与 Playwright |
+| 阶段7：发布与稳定性 | 未开始 | - | 待六平台 CI、打包与文档 |
