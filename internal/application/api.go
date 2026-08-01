@@ -28,6 +28,7 @@ type API struct {
 	activeMutex           sync.Mutex
 	activeCancel          context.CancelFunc
 	activeEvent           *optimizer.Event
+	configurationMutex    sync.Mutex
 	quickStartMutex       sync.Mutex
 	quickStartPlan        *quickStartPlanRecord
 	discoverPhysicalPath  physicalPathDiscoverer
@@ -118,6 +119,7 @@ func (a *API) RunOptimization(ctx context.Context, parameters optimizer.RunOptio
 	return a.runWithRunner(ctx, a.runtime.View().Runner, parameters, emit)
 }
 
+// runWithRunner 让普通任务和快速流程共享同一个可取消单任务边界。
 func (a *API) runWithRunner(ctx context.Context, runner *optimizer.Runner, parameters optimizer.RunOptions, emit func(optimizer.Event) error) (optimizer.RunReport, error) {
 	if runner == nil {
 		return optimizer.RunReport{}, errors.New("optimizer runner is unavailable")
@@ -221,6 +223,10 @@ func (a *API) updateConfig(raw json.RawMessage) (map[string]bool, error) {
 	if err := decodeStrict(raw, &parameters); err != nil {
 		return nil, invalidParams(err)
 	}
+	if !a.configurationMutex.TryLock() {
+		return nil, &ipc.Error{Code: "conflict", Message: "configuration is locked by an active quick-start run"}
+	}
+	defer a.configurationMutex.Unlock()
 	view := a.runtime.View()
 	parameters.Config.Proxy.Mihomo.Secret = view.Config.Proxy.Mihomo.Secret
 	if parameters.Config.DataDir == "" {

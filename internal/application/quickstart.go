@@ -62,6 +62,7 @@ type QuickStartResult struct {
 	Error                  string              `json:"error,omitempty"`
 }
 
+// planQuickStart 发现物理出口和适配器，仅缓存指纹绑定的只读确认计划。
 func (a *API) planQuickStart(ctx context.Context, raw json.RawMessage) (QuickStartPlan, error) {
 	var parameters struct{}
 	if err := decodeStrict(raw, &parameters); err != nil {
@@ -116,6 +117,7 @@ func (a *API) planQuickStart(ctx context.Context, raw json.RawMessage) (QuickSta
 	return plan, nil
 }
 
+// runQuickStart 复核并消费确认计划，在同一配置写锁内完成执行和可选持久化。
 func (a *API) runQuickStart(ctx context.Context, raw json.RawMessage, emit func(any) error) (QuickStartResult, error) {
 	var parameters struct {
 		PlanID            string `json:"plan_id"`
@@ -131,6 +133,10 @@ func (a *API) runQuickStart(ctx context.Context, raw json.RawMessage, emit func(
 	if parameters.Mode != quickStartApplyOnce && parameters.Mode != quickStartApplyAndRemember {
 		return QuickStartResult{}, invalidParams(errors.New("mode must be apply_once or apply_and_remember"))
 	}
+	if !a.configurationMutex.TryLock() {
+		return QuickStartResult{}, &ipc.Error{Code: "conflict", Message: "configuration is being updated"}
+	}
+	defer a.configurationMutex.Unlock()
 	record, err := a.consumeQuickStartPlan(parameters.PlanID)
 	if err != nil {
 		return QuickStartResult{}, err
@@ -204,6 +210,7 @@ func (a *API) runQuickStart(ctx context.Context, raw json.RawMessage, emit func(
 	return result, nil
 }
 
+// consumeQuickStartPlan 原子取出单次计划，并拒绝重放或过期确认。
 func (a *API) consumeQuickStartPlan(planID string) (*quickStartPlanRecord, error) {
 	a.quickStartMutex.Lock()
 	defer a.quickStartMutex.Unlock()
@@ -218,6 +225,7 @@ func (a *API) consumeQuickStartPlan(planID string) (*quickStartPlanRecord, error
 	return record, nil
 }
 
+// currentConfigSummary 比较内存配置与磁盘配置，防止覆盖尚未重启加载的更改。
 func (a *API) currentConfigSummary() (string, bool, error) {
 	view := a.runtime.View()
 	activeSummary, err := quickStartConfigSummary(view.Config)
@@ -266,6 +274,7 @@ func presentAdapterNames(detections map[string]proxy.Detection) []string {
 	return names
 }
 
+// quickStartEffects 将已检测适配器转换为前端可稳定映射的影响类型。
 func quickStartEffects(detections map[string]proxy.Detection) []string {
 	effectByAdapter := map[string]string{
 		cleanupAdapterGeneric: "system_routes", cleanupAdapterMihomo: "mihomo_policy",
@@ -281,6 +290,7 @@ func quickStartEffects(detections map[string]proxy.Detection) []string {
 	return effects
 }
 
+// unavailableAdapterWarnings 明确说明本次不会修改已配置但当前不可用的适配器。
 func unavailableAdapterWarnings(cfg config.Config, detections map[string]proxy.Detection) []string {
 	configured := map[string]bool{
 		cleanupAdapterMihomo: cfg.Proxy.Mihomo.Enabled, cleanupAdapterSingBox: cfg.Proxy.SingBox.Enabled,
@@ -297,6 +307,7 @@ func unavailableAdapterWarnings(cfg config.Config, detections map[string]proxy.D
 	return warnings
 }
 
+// classifyQuickStartFailure 仅在新增事务均确认恢复后返回已回滚。
 func classifyQuickStartFailure(transactions []cfnetwork.Transaction, runErr error) string {
 	if len(transactions) == 0 || strings.Contains(strings.ToLower(runErr.Error()), "rollback") {
 		return "partial"

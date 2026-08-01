@@ -174,6 +174,19 @@ func TestQuickStartUsesSharedTaskLock(t *testing.T) {
 	assertQuickStartErrorCode(t, runErr, "conflict")
 }
 
+func TestConfigUpdateRejectsQuickStartWriteConflict(t *testing.T) {
+	api, runtimeState, _ := newQuickStartTestAPI(t, false)
+	runtimeState.ConfigPath = filepath.Join(t.TempDir(), "config.yaml")
+	raw, err := json.Marshal(map[string]any{"config": runtimeState.View().Config})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.configurationMutex.Lock()
+	_, updateErr := api.updateConfig(raw)
+	api.configurationMutex.Unlock()
+	assertQuickStartErrorCode(t, updateErr, "conflict")
+}
+
 func TestQuickStartVerificationFailureReportsRollback(t *testing.T) {
 	api, _, backend := newQuickStartTestAPI(t, true)
 	plan, err := api.planQuickStart(context.Background(), nil)

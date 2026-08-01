@@ -191,6 +191,7 @@ func (r *Runtime) ActivateSession(session RuntimeSession) {
 	r.mutex.Unlock()
 }
 
+// validateManagedPath 要求至少一个已启用地址族具备可验证的物理网关。
 func validateManagedPath(cfg config.Config, physicalPath cfnetwork.PhysicalPath) error {
 	if physicalPath.Interface == "" {
 		return fmt.Errorf("confirmed physical interface is required")
@@ -204,6 +205,7 @@ func validateManagedPath(cfg config.Config, physicalPath cfnetwork.PhysicalPath)
 	return nil
 }
 
+// configForDetectedAdapters 只让本次预检实际可用的适配器参与策略能力计算。
 func configForDetectedAdapters(cfg config.Config, detections map[string]proxy.Detection) config.Config {
 	isPresent := func(name string) bool { return detections[name].Present }
 	cfg.Proxy.Generic.Enabled = isPresent(cleanupAdapterGeneric)
