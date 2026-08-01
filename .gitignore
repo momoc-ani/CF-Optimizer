@@ -1,0 +1,26 @@
+# Build output
+/dist/
+/bin/
+*.exe
+*.dmg
+*.deb
+*.rpm
+*.AppImage
+
+# Runtime state and local configuration
+/data/
+/config.yaml
+*.sock
+
+# Frontend dependencies and reports
+/desktop/frontend/node_modules/
+/desktop/frontend/dist/
+/desktop/frontend/coverage/
+/test-results/
+/playwright-report/
+
+# Editors and operating systems
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
