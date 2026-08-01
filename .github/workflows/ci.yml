@@ -188,17 +188,28 @@ jobs:
           fi
       - name: Create Windows installer
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         env:
           TARGET_ARCH: ${{ matrix.arch }}
         run: |
-          stage="$(cygpath -w "$PWD/dist/stage-windows-${TARGET_ARCH}")"
-          output="$(cygpath -w "$PWD/dist/packages")"
-          curl.exe -fsSL "https://go.microsoft.com/fwlink/p/?LinkId=2124703" \
-            -o "dist/stage-windows-${TARGET_ARCH}/MicrosoftEdgeWebview2Setup.exe"
-          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" \
-            "/DMyVersion=${CI_PACKAGE_VERSION}" "/DMyArch=${TARGET_ARCH}" "/DSourceDir=${stage}" "/DOutputDir=${output}" \
-            "packaging/windows/installer.iss"
+          $stage = (Resolve-Path "dist/stage-windows-$env:TARGET_ARCH").Path
+          $output = (Resolve-Path "dist/packages").Path
+          $webviewInstaller = Join-Path $stage "MicrosoftEdgeWebview2Setup.exe"
+          curl.exe -fsSL "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -o $webviewInstaller
+          if ($LASTEXITCODE -ne 0) {
+            throw "WebView2 installer download failed with exit code $LASTEXITCODE."
+          }
+
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          & $iscc `
+            "/DMyVersion=$env:CI_PACKAGE_VERSION" `
+            "/DMyArch=$env:TARGET_ARCH" `
+            "/DSourceDir=$stage" `
+            "/DOutputDir=$output" `
+            "packaging\windows\installer.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup failed with exit code $LASTEXITCODE."
+          }
       - name: Create Linux DEB and RPM
         if: runner.os == 'Linux'
         shell: bash
