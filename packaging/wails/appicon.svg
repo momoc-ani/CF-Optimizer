@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="surface" x1="112" y1="96" x2="912" y2="928" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#202427"/>
+      <stop offset="1" stop-color="#101315"/>
+    </linearGradient>
+    <linearGradient id="route" x1="252" y1="690" x2="780" y2="314" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#27C499"/>
+      <stop offset="1" stop-color="#52B7F7"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="208" fill="url(#surface)"/>
+  <path d="M250 688C340 688 354 544 448 544H574C664 544 684 336 774 336" fill="none" stroke="url(#route)" stroke-width="80" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="250" cy="688" r="78" fill="#F4F7F8"/>
+  <circle cx="512" cy="544" r="78" fill="#F4F7F8"/>
+  <circle cx="774" cy="336" r="78" fill="#F4F7F8"/>
+  <circle cx="250" cy="688" r="34" fill="#27C499"/>
+  <circle cx="512" cy="544" r="34" fill="#35C2BC"/>
+  <circle cx="774" cy="336" r="34" fill="#52B7F7"/>
+  <path d="M664 676H794M690 760H822" stroke="#F4F7F8" stroke-width="44" stroke-linecap="round" opacity=".92"/>
+</svg>

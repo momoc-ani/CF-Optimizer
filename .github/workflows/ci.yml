@@ -1,0 +1,181 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: 1.23.0
+  NODE_VERSION: 22
+  WAILS_VERSION: v2.10.2
+
+jobs:
+  quality:
+    name: Quality
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Check Go formatting
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [[ -n "$unformatted" ]]; then
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Vet and test Go packages
+        run: |
+          go vet ./...
+          go test ./...
+          go test -race ./...
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: desktop/frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: desktop/frontend
+        run: npm ci
+      - name: Lint, type-check, and test frontend
+        working-directory: desktop/frontend
+        run: |
+          npm run lint
+          npm run typecheck
+          npm run test
+      - name: Validate packaging sources
+        shell: bash
+        run: |
+          bash -n packaging/linux/package.sh packaging/linux/scripts/*.sh
+          bash -n packaging/macos/package.sh packaging/macos/scripts/* packaging/macos/uninstall.sh
+          node -e "JSON.parse(require('fs').readFileSync('cmd/desktop/wails.json', 'utf8'))"
+          node -e "JSON.parse(require('fs').readFileSync('packaging/wails/windows/info.json', 'utf8'))"
+
+  build-core:
+    name: Core ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: quality
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [windows, linux, darwin]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Build CLI and daemon
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          suffix=""
+          if [[ "$GOOS" == windows ]]; then suffix=".exe"; fi
+          output="dist/core-${GOOS}-${GOARCH}"
+          mkdir -p "$output"
+          ldflags="-s -w -X github.com/cf-optimizer/cf-optimizer/internal/version.Version=ci -X github.com/cf-optimizer/cf-optimizer/internal/version.Commit=${GITHUB_SHA}"
+          go build -trimpath -ldflags "$ldflags" -o "$output/cf-optimizer$suffix" ./cmd/cli
+          go build -trimpath -ldflags "$ldflags" -o "$output/cf-optimizerd$suffix" ./cmd/daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/core-${{ matrix.goos }}-${{ matrix.goarch }}/*
+          if-no-files-found: error
+
+  build-desktop:
+    name: Desktop ${{ matrix.target }}
+    needs: quality
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows/amd64
+            runner: windows-latest
+            artifact: desktop-windows-amd64
+          - target: windows/arm64
+            runner: windows-11-arm
+            artifact: desktop-windows-arm64
+          - target: linux/amd64
+            runner: ubuntu-24.04
+            artifact: desktop-linux-amd64
+          - target: linux/arm64
+            runner: ubuntu-24.04-arm
+            artifact: desktop-linux-arm64
+          - target: darwin/amd64
+            runner: macos-15-intel
+            artifact: desktop-darwin-amd64
+          - target: darwin/arm64
+            runner: macos-15
+            artifact: desktop-darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: desktop/frontend/package-lock.json
+      - name: Install Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
+      - name: Install Wails CLI
+        shell: bash
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}
+      - name: Build native desktop application
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          ldflags="-s -w -X github.com/cf-optimizer/cf-optimizer/internal/version.Version=ci -X github.com/cf-optimizer/cf-optimizer/internal/version.Commit=${GITHUB_SHA}"
+          args=(build -clean -trimpath -platform "$TARGET" -ldflags "$ldflags" -o cf-optimizer-ui)
+          if [[ "$TARGET" == linux/* ]]; then args+=(-tags webkit2_41); fi
+          (cd cmd/desktop && wails "${args[@]}")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: packaging/wails/bin/*
+          if-no-files-found: error
+
+  e2e:
+    name: Unprivileged UI E2E
+    needs: quality
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: desktop/frontend/package-lock.json
+      - name: Install frontend and Chromium
+        working-directory: desktop/frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Run Playwright against the simulated backend
+        working-directory: desktop/frontend
+        env:
+          CI: true
+        run: npm run e2e

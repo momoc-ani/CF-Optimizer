@@ -168,6 +168,9 @@ func (a *Adapter) Rollback(ctx context.Context, receipt proxy.Receipt) error {
 	if err != nil {
 		return err
 	}
+	if (payload.PreviousExists && exists && bytes.Equal(content, payload.Previous)) || (!payload.PreviousExists && !exists) {
+		return nil
+	}
 	if !exists || hash(content) != payload.AppliedHash {
 		return fmt.Errorf("%s managed file changed after apply; refusing rollback overwrite", a.name)
 	}

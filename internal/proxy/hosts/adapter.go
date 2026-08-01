@@ -168,6 +168,9 @@ func (a *Adapter) Rollback(_ context.Context, receipt proxy.Receipt) error {
 	if err != nil {
 		return err
 	}
+	if bytes.Equal(current, payload.Previous) {
+		return nil
+	}
 	if hash(current) != payload.AppliedHash {
 		return errors.New("Hosts changed after apply; refusing rollback overwrite")
 	}

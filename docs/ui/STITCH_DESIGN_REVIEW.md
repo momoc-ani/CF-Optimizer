@@ -59,3 +59,5 @@ Design System：`CF Optimizer Design System`（`assets/0f41746fcf384e1689a7de4c6
 | 设置 | `SettingsPage` | `config.get`、`config.update` |
 
 普通权限 UI 不读取或修改真实路由、Hosts、代理配置和系统服务。所有系统相关操作均通过 Wails Bridge 转发到版本化本地 IPC，并由后台再次校验参数。
+
+关闭桌面窗口时界面隐藏到系统托盘；托盘可恢复窗口或退出普通权限 UI。两种操作均不停止独立后台服务，也不取消正在执行的优选任务，重新打开界面后通过 IPC 恢复任务状态。

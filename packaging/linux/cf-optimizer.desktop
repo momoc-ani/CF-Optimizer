@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=CF Optimizer
+Comment=Cloudflare node optimization and direct-route manager
+Exec=/usr/bin/cf-optimizer-ui
+Icon=cf-optimizer
+Terminal=false
+Categories=Network;Utility;
+StartupNotify=true

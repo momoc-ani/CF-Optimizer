@@ -180,14 +180,60 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 			return report, err
 		}
 		report.PolicyApplied = true
+	}
+	if err := r.persistSuccessfulRun(report, stateBefore, applied, options.ApplyPolicy); err != nil {
+		if options.ApplyPolicy && r.policy != nil {
+			rollbackContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.config.Network.CommandTimeout.Duration())
+			defer cancel()
+			if rollbackErr := r.policy.Rollback(rollbackContext, applied); rollbackErr != nil {
+				return report, errors.Join(err, fmt.Errorf("rollback unpersisted policy: %w", rollbackErr))
+			}
+		}
+		return report, err
+	}
+	if options.ApplyPolicy {
 		if cleanupErr := r.removeReplacedHostRoutes(ctx, stateBefore, report); cleanupErr != nil {
 			report.Warnings = append(report.Warnings, cleanupErr.Error())
 		}
 	}
-	if err := r.persistSuccessfulRun(report, stateBefore, applied, options.ApplyPolicy); err != nil {
-		return report, err
-	}
 	return report, nil
+}
+
+// CleanupManagedPolicy 逆序撤销全部已持久化收据，并仅在完整成功后清空当前策略状态。
+func (r *Runner) CleanupManagedPolicy(ctx context.Context) error {
+	return CleanupManagedPolicy(ctx, r.store, r.routes, r.policy)
+}
+
+// CleanupManagedPolicy 恢复路由事务和累计适配器收据，供运行器与卸载专用运行时复用。
+func CleanupManagedPolicy(ctx context.Context, stateStore *store.Store, routes *cfnetwork.RouteController, policy PolicyApplier) error {
+	if stateStore == nil {
+		return errors.New("state store is required for managed policy cleanup")
+	}
+	if routes != nil {
+		if err := routes.Recover(ctx); err != nil {
+			return fmt.Errorf("recover temporary routes: %w", err)
+		}
+	}
+	snapshot := stateStore.Snapshot()
+	if snapshot.Policy == nil {
+		return nil
+	}
+	if policy == nil {
+		return errors.New("stored policy cannot be cleaned because its adapters are disabled")
+	}
+	var applied proxy.ApplyResult
+	if err := json.Unmarshal(snapshot.Policy.Receipts, &applied); err != nil {
+		return fmt.Errorf("decode stored policy receipts: %w", err)
+	}
+	if err := policy.Rollback(ctx, applied); err != nil {
+		return fmt.Errorf("rollback stored policy: %w", err)
+	}
+	return stateStore.Update(func(state *store.State) error {
+		state.CurrentIPv4 = nil
+		state.CurrentIPv6 = nil
+		state.Policy = nil
+		return nil
+	})
 }
 
 func (r *Runner) generateCandidates(snapshot ranges.Snapshot, state store.State, now time.Time) ([]netip.Addr, error) {
@@ -403,6 +449,13 @@ func (r *Runner) persistSuccessfulRun(report RunReport, before store.State, appl
 		if policyApplied {
 			state.CurrentIPv4 = updateSelection(before.CurrentIPv4, report.IPv4Decision, now)
 			state.CurrentIPv6 = updateSelection(before.CurrentIPv6, report.IPv6Decision, now)
+			if before.Policy != nil {
+				var previous proxy.ApplyResult
+				if err := json.Unmarshal(before.Policy.Receipts, &previous); err != nil {
+					return fmt.Errorf("decode previous policy receipts: %w", err)
+				}
+				applied.Receipts = append(previous.Receipts, applied.Receipts...)
+			}
 			receipts, err := json.Marshal(applied)
 			if err != nil {
 				return err

@@ -31,6 +31,11 @@ type options struct {
 	logLevel      string
 }
 
+const (
+	serviceOperationTimeout     = 30 * time.Second
+	managedPolicyCleanupTimeout = 2 * time.Minute
+)
+
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "cf-optimizer:", err)
@@ -74,6 +79,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return runForeground(settings, cfg)
 	case "benchmark":
 		return runDirectBenchmark(settings, cfg, stdout, stderr)
+	case "cleanup":
+		return cleanupCommand(context.Background(), settings, cfg, stdout)
 	case "status", "optimize", "cancel", "test-route", "history", "logs", "ranges", "proxy":
 		return ipcCommand(command, commandArguments, settings, cfg, stdout, stderr)
 	case "config":
@@ -82,6 +89,28 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		printUsage(stderr)
 		return fmt.Errorf("unknown command %q", command)
 	}
+}
+
+// cleanupCommand 拒绝与已注册后台服务并发清理，再进入不依赖物理出口的恢复流程。
+func cleanupCommand(ctx context.Context, settings options, cfg config.Config, output io.Writer) error {
+	current, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	controller, err := service.NewController(current, settings.configPath, cfg)
+	if err != nil {
+		return err
+	}
+	statusContext, cancel := context.WithTimeout(ctx, serviceOperationTimeout)
+	defer cancel()
+	status, err := controller.Status(statusContext)
+	if err != nil {
+		return err
+	}
+	if status.Running {
+		return errors.New("stop the CF Optimizer service before cleaning managed policy")
+	}
+	return cleanupManagedPolicy(ctx, settings, cfg, output)
 }
 
 func initializeConfig(settings options, arguments []string, output io.Writer) error {
@@ -151,7 +180,7 @@ func serviceCommand(ctx context.Context, command string, arguments []string, set
 	if err != nil {
 		return err
 	}
-	operationContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+	operationContext, cancel := context.WithTimeout(ctx, serviceOperationTimeout)
 	defer cancel()
 	switch command {
 	case "install":
@@ -167,7 +196,21 @@ func serviceCommand(ctx context.Context, command string, arguments []string, set
 			return err
 		}
 	case "uninstall":
-		if err := controller.Uninstall(operationContext); err != nil {
+		currentStatus, err := controller.Status(operationContext)
+		if err != nil {
+			return err
+		}
+		if currentStatus.Running {
+			if err := controller.Stop(operationContext); err != nil {
+				return err
+			}
+		}
+		if err := cleanupManagedPolicy(ctx, settings, cfg, io.Discard); err != nil {
+			return fmt.Errorf("clean managed policy before uninstall: %w", err)
+		}
+		removeContext, removeCancel := context.WithTimeout(ctx, serviceOperationTimeout)
+		defer removeCancel()
+		if err := controller.Uninstall(removeContext); err != nil {
 			return err
 		}
 	case "start":
@@ -179,11 +222,33 @@ func serviceCommand(ctx context.Context, command string, arguments []string, set
 			return err
 		}
 	}
-	status, statusErr := controller.Status(operationContext)
+	statusContext, statusCancel := context.WithTimeout(ctx, serviceOperationTimeout)
+	defer statusCancel()
+	status, statusErr := controller.Status(statusContext)
 	if statusErr != nil {
 		return statusErr
 	}
 	return writeJSON(output, status)
+}
+
+// cleanupManagedPolicy 在服务停止后恢复受管路由和代理配置，不删除用户配置或运行历史。
+func cleanupManagedPolicy(parent context.Context, settings options, cfg config.Config, output io.Writer) error {
+	logger, closer, err := logging.New(cfg.DataDir, settings.logLevel, false)
+	if err != nil {
+		return err
+	}
+	defer closer.Close()
+	runtimeState, err := application.BuildCleanup(cfg, settings.configPath, logger)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(parent, managedPolicyCleanupTimeout)
+	defer cancel()
+	if err := runtimeState.CleanupManagedPolicy(ctx); err != nil {
+		return err
+	}
+	logger.Info("受管策略清理完成", "component", "cleanup", "result", "completed")
+	return writeJSON(output, map[string]bool{"cleaned": true})
 }
 
 func runForeground(settings options, cfg config.Config) error {
@@ -346,6 +411,7 @@ Commands:
   run                         Run the daemon in the foreground
   status                      Read daemon state through local IPC
   benchmark                   Run a direct benchmark without applying policy
+  cleanup                     Roll back managed routes and proxy policy
   optimize                    Benchmark and apply verified policy through daemon
   cancel                      Cancel the active optimization
   test-route IP               Collect direct-route evidence for an IP

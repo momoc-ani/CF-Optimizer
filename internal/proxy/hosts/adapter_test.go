@@ -40,6 +40,9 @@ func TestHostsLifecyclePreservesUnmanagedLines(t *testing.T) {
 	if err := adapter.Rollback(context.Background(), receipt); err != nil {
 		t.Fatal(err)
 	}
+	if err := adapter.Rollback(context.Background(), receipt); err != nil {
+		t.Fatalf("rollback should be idempotent: %v", err)
+	}
 	restored, _ := os.ReadFile(path)
 	if string(restored) != previous {
 		t.Fatalf("Hosts was not restored: %q", restored)

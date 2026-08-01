@@ -89,6 +89,9 @@ func TestAdapterApplyVerifyRollbackAndIdempotency(t *testing.T) {
 	if err := adapter.Rollback(context.Background(), receipt); err != nil {
 		t.Fatal(err)
 	}
+	if err := adapter.Rollback(context.Background(), receipt); err != nil {
+		t.Fatalf("rollback should be idempotent: %v", err)
+	}
 	restored, err := os.ReadFile(providerPath)
 	if err != nil {
 		t.Fatal(err)

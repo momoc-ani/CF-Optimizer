@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 
@@ -18,6 +19,15 @@ import (
 	"github.com/cf-optimizer/cf-optimizer/internal/proxy/xray"
 	"github.com/cf-optimizer/cf-optimizer/internal/ranges"
 	"github.com/cf-optimizer/cf-optimizer/internal/store"
+)
+
+const (
+	cleanupAdapterGeneric  = "generic-route"
+	cleanupAdapterMihomo   = "mihomo"
+	cleanupAdapterSingBox  = "sing-box"
+	cleanupAdapterXray     = "xray"
+	cleanupAdapterExternal = "external"
+	cleanupAdapterHosts    = "windows-hosts"
 )
 
 // Runtime 汇总一个进程共享的核心组件和已验证依赖关系。
@@ -77,6 +87,75 @@ func Build(cfg config.Config, configPath string, logger *slog.Logger) (*Runtime,
 		Routes: routeController, RouteBackend: routeBackend, PhysicalPath: physicalPath,
 		DirectDial: directDial, ProxyCoordinator: proxyCoordinator, Logger: logger,
 	}, nil
+}
+
+// BuildCleanup 创建不依赖当前物理出口的最小运行时，仅用于卸载前恢复持久化策略。
+func BuildCleanup(cfg config.Config, configPath string, logger *slog.Logger) (*Runtime, error) {
+	if logger == nil {
+		return nil, fmt.Errorf("application logger is required")
+	}
+	stateStore, err := store.Open(cfg.DataDir, cfg.History.MaxRuns)
+	if err != nil {
+		return nil, err
+	}
+	routeBackend := cfnetwork.NewPlatformRouteBackend(cfg.Network.CommandTimeout.Duration())
+	routeController, err := cfnetwork.NewRouteController(cfg.DataDir, routeBackend, true, logger)
+	if err != nil {
+		return nil, err
+	}
+	cleanupConfig, err := configForStoredReceipts(cfg, stateStore.Snapshot())
+	if err != nil {
+		return nil, err
+	}
+	proxyCoordinator, err := buildProxyCoordinator(cleanupConfig, cfnetwork.PhysicalPath{}, routeController, logger)
+	if err != nil {
+		return nil, err
+	}
+	return &Runtime{
+		Config: cfg, ConfigPath: configPath, Store: stateStore, Routes: routeController,
+		RouteBackend: routeBackend, ProxyCoordinator: proxyCoordinator, Logger: logger,
+	}, nil
+}
+
+// CleanupManagedPolicy 执行卸载专用运行时的路由恢复和累计收据回滚。
+func (r *Runtime) CleanupManagedPolicy(ctx context.Context) error {
+	return optimizer.CleanupManagedPolicy(ctx, r.Store, r.Routes, r.ProxyCoordinator)
+}
+
+func configForStoredReceipts(cfg config.Config, state store.State) (config.Config, error) {
+	cfg.Network.ManageRoutes = true
+	cfg.Proxy.Generic.Enabled = false
+	cfg.Proxy.Mihomo.Enabled = false
+	cfg.Proxy.SingBox.Enabled = false
+	cfg.Proxy.Xray.Enabled = false
+	cfg.Proxy.External.Enabled = false
+	cfg.Hosts.Enabled = false
+	if state.Policy == nil {
+		return cfg, nil
+	}
+	var applied proxy.ApplyResult
+	if err := json.Unmarshal(state.Policy.Receipts, &applied); err != nil {
+		return config.Config{}, fmt.Errorf("decode stored policy receipts: %w", err)
+	}
+	for _, receipt := range applied.Receipts {
+		switch receipt.Adapter {
+		case cleanupAdapterGeneric:
+			cfg.Proxy.Generic.Enabled = true
+		case cleanupAdapterMihomo:
+			cfg.Proxy.Mihomo.Enabled = true
+		case cleanupAdapterSingBox:
+			cfg.Proxy.SingBox.Enabled = true
+		case cleanupAdapterXray:
+			cfg.Proxy.Xray.Enabled = true
+		case cleanupAdapterExternal:
+			cfg.Proxy.External.Enabled = true
+		case cleanupAdapterHosts:
+			cfg.Hosts.Enabled = true
+		default:
+			return config.Config{}, fmt.Errorf("stored policy references unsupported adapter %q", receipt.Adapter)
+		}
+	}
+	return cfg, nil
 }
 
 func buildProxyCoordinator(cfg config.Config, physicalPath cfnetwork.PhysicalPath, routeController *cfnetwork.RouteController, logger *slog.Logger) (*proxy.Coordinator, error) {

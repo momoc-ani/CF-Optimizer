@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+cli=/usr/local/bin/cf-optimizer
+config_path='/Library/Application Support/CF Optimizer/config.yaml'
+if [ -x "$cli" ] && [ -f /Library/LaunchDaemons/com.cfoptimizer.daemon.plist ]; then
+  "$cli" --config "$config_path" stop || exit 1
+fi

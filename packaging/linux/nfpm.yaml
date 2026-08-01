@@ -1,0 +1,52 @@
+name: cf-optimizer
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${CFOPT_VERSION}
+maintainer: CF Optimizer Contributors
+description: Cross-platform Cloudflare node benchmark and verified direct-route manager.
+homepage: https://gitee.com/aurora-momoc/cf-optimizer
+section: net
+priority: optional
+contents:
+  - src: ${CFOPT_STAGE}/cf-optimizer
+    dst: /usr/bin/cf-optimizer
+    expand: true
+    file_info:
+      mode: 0755
+  - src: ${CFOPT_STAGE}/cf-optimizerd
+    dst: /usr/bin/cf-optimizerd
+    expand: true
+    file_info:
+      mode: 0755
+  - src: ${CFOPT_STAGE}/cf-optimizer-ui
+    dst: /usr/bin/cf-optimizer-ui
+    expand: true
+    file_info:
+      mode: 0755
+  - src: config.example.yaml
+    dst: /usr/share/cf-optimizer/config.example.yaml
+    file_info:
+      mode: 0644
+  - src: packaging/linux/cf-optimizer.desktop
+    dst: /usr/share/applications/cf-optimizer.desktop
+    file_info:
+      mode: 0644
+  - src: packaging/wails/appicon.png
+    dst: /usr/share/icons/hicolor/512x512/apps/cf-optimizer.png
+    file_info:
+      mode: 0644
+scripts:
+  preinstall: packaging/linux/scripts/preinstall.sh
+  postinstall: packaging/linux/scripts/postinstall.sh
+  preremove: packaging/linux/scripts/preremove.sh
+overrides:
+  deb:
+    depends:
+      - libgtk-3-0
+      - libwebkit2gtk-4.1-0
+      - libayatana-appindicator3-1
+  rpm:
+    depends:
+      - gtk3
+      - webkit2gtk4.1
+      - libayatana-appindicator-gtk3

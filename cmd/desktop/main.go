@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -29,16 +30,26 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	tray, err := newTrayController()
+	if err != nil {
+		return err
+	}
+	tray.Register()
+	defer tray.Shutdown(context.Background())
 	return wails.Run(&options.App{
-		Title:             "CF Optimizer",
-		Width:             1280,
-		Height:            820,
-		MinWidth:          720,
-		MinHeight:         620,
-		AssetServer:       &assetserver.Options{Assets: desktop.Assets},
-		BackgroundColour:  &options.RGBA{R: 246, G: 247, B: 248, A: 1},
-		OnStartup:         bridge.Startup,
-		HideWindowOnClose: false,
+		Title:            "CF Optimizer",
+		Width:            1280,
+		Height:           820,
+		MinWidth:         720,
+		MinHeight:        620,
+		AssetServer:      &assetserver.Options{Assets: desktop.Assets},
+		BackgroundColour: &options.RGBA{R: 246, G: 247, B: 248, A: 1},
+		OnStartup: func(ctx context.Context) {
+			bridge.Startup(ctx)
+			tray.Startup(ctx)
+		},
+		OnShutdown:        tray.Shutdown,
+		HideWindowOnClose: true,
 		Bind:              []any{bridge},
 	})
 }

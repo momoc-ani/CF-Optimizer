@@ -40,7 +40,8 @@ func (staticBenchmark) Run(_ context.Context, addresses []netip.Addr, progress f
 }
 
 type recordingPolicy struct {
-	policies []proxy.DirectPolicy
+	policies  []proxy.DirectPolicy
+	rollbacks []proxy.ApplyResult
 }
 
 func (*recordingPolicy) Capabilities() proxy.Capabilities {
@@ -53,7 +54,10 @@ func (p *recordingPolicy) Apply(_ context.Context, policy proxy.DirectPolicy) (p
 	return proxy.ApplyResult{Receipts: []proxy.Receipt{{ID: "test", Adapter: "test", Changed: true, Payload: payload}}}, nil
 }
 
-func (*recordingPolicy) Rollback(context.Context, proxy.ApplyResult) error { return nil }
+func (p *recordingPolicy) Rollback(_ context.Context, applied proxy.ApplyResult) error {
+	p.rollbacks = append(p.rollbacks, applied)
+	return nil
+}
 
 func TestRunnerBenchmarkOnlyDoesNotChangeAppliedSelection(t *testing.T) {
 	runner, stateStore := newTestRunner(t, nil)
@@ -86,6 +90,33 @@ func TestRunnerAppliesAndPersistsVerifiedSelection(t *testing.T) {
 	}
 	if len(policy.policies) != 1 || len(policy.policies[0].IPv4CIDRs) != 1 {
 		t.Fatalf("unexpected applied policy: %#v", policy.policies)
+	}
+}
+
+func TestRunnerAccumulatesReceiptsAndCleansManagedPolicy(t *testing.T) {
+	policy := &recordingPolicy{}
+	runner, stateStore := newTestRunner(t, policy)
+	for run := 0; run < 2; run++ {
+		if _, err := runner.Run(context.Background(), RunOptions{ApplyPolicy: true}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var applied proxy.ApplyResult
+	if err := json.Unmarshal(stateStore.Snapshot().Policy.Receipts, &applied); err != nil {
+		t.Fatal(err)
+	}
+	if len(applied.Receipts) != 2 {
+		t.Fatalf("expected cumulative cleanup receipts, got %#v", applied.Receipts)
+	}
+	if err := runner.CleanupManagedPolicy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state := stateStore.Snapshot()
+	if state.Policy != nil || state.CurrentIPv4 != nil || len(policy.rollbacks) != 1 || len(policy.rollbacks[0].Receipts) != 2 {
+		t.Fatalf("unexpected cleanup result: state=%#v rollbacks=%#v", state, policy.rollbacks)
+	}
+	if err := runner.CleanupManagedPolicy(context.Background()); err != nil {
+		t.Fatalf("cleanup should be idempotent: %v", err)
 	}
 }
 

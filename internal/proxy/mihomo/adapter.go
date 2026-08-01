@@ -192,6 +192,9 @@ func (a *Adapter) Rollback(ctx context.Context, receipt proxy.Receipt) error {
 	if err != nil {
 		return err
 	}
+	if (payload.PreviousExists && exists && bytes.Equal(current, payload.Previous)) || (!payload.PreviousExists && !exists) {
+		return nil
+	}
 	if !exists || contentHash(current) != payload.AppliedHash {
 		return errors.New("Mihomo provider changed after apply; refusing to overwrite it during rollback")
 	}

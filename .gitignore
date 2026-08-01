@@ -6,6 +6,9 @@
 *.deb
 *.rpm
 *.AppImage
+*.pkg
+/packaging/wails/bin/
+/packaging/wails/windows/icon.ico
 
 # Runtime state and local configuration
 /data/
@@ -21,6 +24,8 @@
 /desktop/frontend/*.tsbuildinfo
 /desktop/frontend/vite.config.js
 /desktop/frontend/vite.config.d.ts
+/desktop/frontend/package.json.md5
+/desktop/frontend/src/wailsjs/
 /test-results/
 /playwright-report/
 

@@ -1,0 +1,15 @@
+{
+  "fixed": {
+    "file_version": "{{.Info.ProductVersion}}"
+  },
+  "info": {
+    "0409": {
+      "ProductVersion": "{{.Info.ProductVersion}}",
+      "CompanyName": "{{.Info.CompanyName}}",
+      "FileDescription": "CF Optimizer desktop operations console",
+      "LegalCopyright": "{{.Info.Copyright}}",
+      "ProductName": "{{.Info.ProductName}}",
+      "Comments": "{{.Info.Comments}}"
+    }
+  }
+}
