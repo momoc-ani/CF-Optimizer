@@ -47,17 +47,28 @@ type RunSummary struct {
 	Error        string          `json:"error,omitempty"`
 }
 
+// NodeStats 聚合节点历史表现，并记录连续失败后的冷却时间。
+type NodeStats struct {
+	Attempts      int       `json:"attempts"`
+	Successes     int       `json:"successes"`
+	FailureStreak int       `json:"failure_streak"`
+	AverageScore  float64   `json:"average_score"`
+	LastTestedAt  time.Time `json:"last_tested_at"`
+	CooldownUntil time.Time `json:"cooldown_until,omitempty"`
+}
+
 // State 保存后台服务当前节点、运行状态和历史摘要。
 type State struct {
-	Version       int          `json:"version"`
-	UpdatedAt     time.Time    `json:"updated_at"`
-	CurrentIPv4   *Selection   `json:"current_ipv4,omitempty"`
-	CurrentIPv6   *Selection   `json:"current_ipv6,omitempty"`
-	History       []RunSummary `json:"history"`
-	LastError     string       `json:"last_error,omitempty"`
-	LastStartedAt time.Time    `json:"last_started_at,omitempty"`
-	LastEndedAt   time.Time    `json:"last_ended_at,omitempty"`
-	Running       bool         `json:"running"`
+	Version       int                  `json:"version"`
+	UpdatedAt     time.Time            `json:"updated_at"`
+	CurrentIPv4   *Selection           `json:"current_ipv4,omitempty"`
+	CurrentIPv6   *Selection           `json:"current_ipv6,omitempty"`
+	History       []RunSummary         `json:"history"`
+	Nodes         map[string]NodeStats `json:"nodes"`
+	LastError     string               `json:"last_error,omitempty"`
+	LastStartedAt time.Time            `json:"last_started_at,omitempty"`
+	LastEndedAt   time.Time            `json:"last_ended_at,omitempty"`
+	Running       bool                 `json:"running"`
 }
 
 // Store 串行化状态更新，并将每次变更原子写入磁盘。
@@ -73,7 +84,7 @@ func Open(dataDir string, maxRuns int) (*Store, error) {
 	if maxRuns < 1 {
 		maxRuns = 500
 	}
-	s := &Store{path: filepath.Join(dataDir, "state.json"), maxRuns: maxRuns, state: State{Version: StateSchemaVersion, History: []RunSummary{}}}
+	s := &Store{path: filepath.Join(dataDir, "state.json"), maxRuns: maxRuns, state: State{Version: StateSchemaVersion, History: []RunSummary{}, Nodes: map[string]NodeStats{}}}
 	data, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
@@ -86,6 +97,9 @@ func Open(dataDir string, maxRuns int) (*Store, error) {
 	}
 	if s.state.Version != StateSchemaVersion {
 		return nil, fmt.Errorf("unsupported state version %d", s.state.Version)
+	}
+	if s.state.Nodes == nil {
+		s.state.Nodes = map[string]NodeStats{}
 	}
 	return s, nil
 }
@@ -109,6 +123,9 @@ func (s *Store) Update(fn func(*State) error) error {
 		return err
 	}
 	next.Version = StateSchemaVersion
+	if next.Nodes == nil {
+		next.Nodes = map[string]NodeStats{}
+	}
 	next.UpdatedAt = time.Now().UTC()
 	if len(next.History) > s.maxRuns {
 		next.History = append([]RunSummary(nil), next.History[len(next.History)-s.maxRuns:]...)

@@ -37,6 +37,7 @@ benchmark:
   switch_improvement: 0.15
   minimum_hold: 30m
   failure_threshold: 3
+  failure_cooldown: 6h
   daily_seed: ""
 
 network:

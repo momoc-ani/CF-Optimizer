@@ -19,6 +19,7 @@ type Options struct {
 	IPv6      bool
 	Seed      string
 	Preferred []netip.Addr
+	Cooldown  []netip.Addr
 }
 
 // DailySeed 将 UTC 日期与用户种子组合，保证同一天输出可复现。
@@ -42,8 +43,12 @@ func Generate(snapshot ranges.Snapshot, options Options) ([]netip.Addr, error) {
 	digest := sha256.Sum256([]byte(options.Seed))
 	rng := rand.New(rand.NewSource(int64(binary.LittleEndian.Uint64(digest[:8]))))
 	seen := make(map[netip.Addr]struct{}, options.Count)
+	cooldown := make(map[netip.Addr]struct{}, len(options.Cooldown))
+	for _, addr := range options.Cooldown {
+		cooldown[addr.Unmap()] = struct{}{}
+	}
 	result := make([]netip.Addr, 0, options.Count)
-	allowed := func(addr netip.Addr) bool {
+	allowed := func(addr netip.Addr, isPreferred bool) bool {
 		if !addr.IsValid() || (addr.Is4() && !options.IPv4) || (addr.Is6() && !options.IPv6) {
 			return false
 		}
@@ -62,11 +67,14 @@ func Generate(snapshot ranges.Snapshot, options Options) ([]netip.Addr, error) {
 				return false
 			}
 		}
+		if _, isCoolingDown := cooldown[addr.Unmap()]; isCoolingDown && !isPreferred {
+			return false
+		}
 		return true
 	}
-	add := func(addr netip.Addr) {
+	add := func(addr netip.Addr, isPreferred bool) {
 		addr = addr.Unmap()
-		if len(result) >= options.Count || !allowed(addr) {
+		if len(result) >= options.Count || !allowed(addr, isPreferred) {
 			return
 		}
 		if _, ok := seen[addr]; ok {
@@ -76,7 +84,7 @@ func Generate(snapshot ranges.Snapshot, options Options) ([]netip.Addr, error) {
 		result = append(result, addr)
 	}
 	for _, addr := range options.Preferred {
-		add(addr)
+		add(addr, true)
 	}
 
 	v4, v6 := split(prefixes)
@@ -88,13 +96,13 @@ func Generate(snapshot ranges.Snapshot, options Options) ([]netip.Addr, error) {
 		needV4 := countFamily(result, true) < v4Target
 		needV6 := countFamily(result, false) < v6Target
 		if needV4 && (!needV6 || attempts%2 == 0) {
-			add(sampleIPv4(rng, v4))
+			add(sampleIPv4(rng, v4), false)
 		} else if needV6 {
-			add(sampleIPv6(rng, v6))
+			add(sampleIPv6(rng, v6), false)
 		} else if len(v4) > 0 {
-			add(sampleIPv4(rng, v4))
+			add(sampleIPv4(rng, v4), false)
 		} else {
-			add(sampleIPv6(rng, v6))
+			add(sampleIPv6(rng, v6), false)
 		}
 	}
 	if len(result) < options.Count {

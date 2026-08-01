@@ -44,3 +44,17 @@ func TestPreferredAndExcluded(t *testing.T) {
 		}
 	}
 }
+
+func TestCooldownSkipsRandomCandidateButKeepsPreferred(t *testing.T) {
+	snapshot := ranges.Snapshot{Version: 1, IPv4: []string{"1.1.1.1/32"}}
+	address := netip.MustParseAddr("1.1.1.1")
+	values, err := Generate(snapshot, Options{
+		Count: 1, IPv4: true, Seed: "x", Preferred: []netip.Addr{address}, Cooldown: []netip.Addr{address},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 || values[0] != address {
+		t.Fatalf("current preferred node must bypass cooldown: %v", values)
+	}
+}

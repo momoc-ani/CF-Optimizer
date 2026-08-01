@@ -106,6 +106,7 @@ type BenchmarkConfig struct {
 	SwitchImprovement float64  `yaml:"switch_improvement" json:"switch_improvement"`
 	MinimumHold       Duration `yaml:"minimum_hold" json:"minimum_hold"`
 	FailureThreshold  int      `yaml:"failure_threshold" json:"failure_threshold"`
+	FailureCooldown   Duration `yaml:"failure_cooldown" json:"failure_cooldown"`
 	DailySeed         string   `yaml:"daily_seed" json:"daily_seed"`
 }
 
@@ -161,7 +162,8 @@ func Default() Config {
 			IPv4: true, IPv6: true, Candidates: 1000, ConnectAttempts: 4, Concurrency: 200,
 			ConnectTimeout: Duration(1500 * time.Millisecond), LatencyLimit: Duration(300 * time.Millisecond), LossLimit: 0.25,
 			DownloadTop: 20, TLSServerName: "speed.cloudflare.com", TLSTimeout: Duration(5 * time.Second), DownloadDuration: Duration(8 * time.Second),
-			DownloadMaxBytes: 32 << 20, SwitchImprovement: 0.15, MinimumHold: Duration(30 * time.Minute), FailureThreshold: 3,
+			DownloadMaxBytes: 32 << 20, SwitchImprovement: 0.15, MinimumHold: Duration(30 * time.Minute),
+			FailureThreshold: 3, FailureCooldown: Duration(6 * time.Hour),
 		},
 		Network: NetworkConfig{CommandTimeout: Duration(10 * time.Second)},
 		Proxy:   ProxyConfig{AutoDetect: true, Mihomo: MihomoConfig{Controller: "http://127.0.0.1:9090", Timeout: Duration(5 * time.Second)}},
@@ -223,6 +225,18 @@ func (c Config) Validate() error {
 	if c.Benchmark.Concurrency < 1 || c.Benchmark.Concurrency > 4096 {
 		return errors.New("benchmark.concurrency must be between 1 and 4096")
 	}
+	if c.Benchmark.DownloadTop < 1 || c.Benchmark.DownloadTop > c.Benchmark.Candidates {
+		return errors.New("benchmark.download_top must be between 1 and benchmark.candidates")
+	}
+	if c.Benchmark.FailureThreshold < 1 || c.Benchmark.FailureThreshold > 100 {
+		return errors.New("benchmark.failure_threshold must be between 1 and 100")
+	}
+	if strings.TrimSpace(c.Benchmark.TLSServerName) == "" && c.Benchmark.DownloadURL == "" {
+		return errors.New("benchmark.tls_server_name is required when download_url is empty")
+	}
+	if c.Benchmark.DownloadURL != "" && c.Benchmark.DownloadMaxBytes < 1 {
+		return errors.New("benchmark.download_max_bytes must be positive when download_url is configured")
+	}
 	if !c.Benchmark.IPv4 && !c.Benchmark.IPv6 {
 		return errors.New("at least one IP family must be enabled")
 	}
@@ -239,7 +253,8 @@ func (c Config) Validate() error {
 		"schedule.interval": c.Schedule.Interval, "ranges.refresh_interval": c.Ranges.RefreshInterval,
 		"ranges.stale_after": c.Ranges.StaleAfter, "benchmark.connect_timeout": c.Benchmark.ConnectTimeout,
 		"benchmark.latency_limit": c.Benchmark.LatencyLimit, "benchmark.tls_timeout": c.Benchmark.TLSTimeout,
-		"network.command_timeout": c.Network.CommandTimeout,
+		"benchmark.failure_cooldown": c.Benchmark.FailureCooldown,
+		"network.command_timeout":    c.Network.CommandTimeout,
 	} {
 		if value.Duration() <= 0 {
 			return fmt.Errorf("%s must be positive", name)
