@@ -15,7 +15,7 @@ CF Optimizer 是面向 Windows、Linux 和 macOS 的 Cloudflare 节点测速、�
 - 按成功率、延迟、抖动、丢包和吞吐评分，并通过历史平滑、冷却、迟滞与最短保持时间避免频繁切换。
 - 在启用后，以事务方式计划、应用、验证和回滚临时网段路由及最终 `/32`、`/128` 主机路由。
 - 支持 Generic Route、Mihomo、sing-box、Xray、版本化 External JSON-RPC 与可选 Windows Hosts 适配。
-- 通过 Windows Service、systemd 或 LaunchDaemon 运行后台服务；关闭桌面窗口会隐藏到系统托盘，重新打开或退出 UI 都不会停止服务或正在运行的任务。
+- 通过 Windows Service、systemd 或 LaunchDaemon 运行后台服务；关闭桌面窗口会隐藏到系统托盘，退出 UI 不会停止服务或正在运行的任务。
 - 提供总览、测速优选、代理适配、网络路由、网段管理、历史、日志诊断和设置八个桌面页面。
 
 ### 进程与权限边界
@@ -32,75 +32,21 @@ Wails Bridge -> 白名单 IPC -> cf-optimizerd 特权后台服务
 
 Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix Domain Socket。UI 不能执行 shell，也不能直接修改路由、Hosts 或代理配置；IPC 服务端会再次严格验证所有参数。
 
-### 系统要求
+### 平台使用指南
 
-| 平台 | 最低运行要求 | 发布架构 |
-|---|---|---|
-| Windows | Windows 10/11、Microsoft Edge WebView2 Runtime | amd64、arm64 |
-| Linux | systemd、GTK 3、WebKitGTK 4.1、Ayatana AppIndicator | amd64、arm64 |
-| macOS | macOS 11+ | amd64、arm64 |
+从版本发布页下载对应架构的安装包和 `SHA256SUMS`，然后按目标系统指南操作。CI 产物在未配置证书时可能未签名。
 
-CI 产物在未配置证书时是未签名包。正式分发应配置 Windows Authenticode，以及 Apple Developer ID 签名和公证。
-
-### 安装
-
-从版本发布页选择与系统架构一致的产物，并用 `SHA256SUMS` 校验文件。
-
-Windows：以管理员身份运行 `cf-optimizer-<version>-windows-<arch>-setup.exe`。安装器会检查 WebView2，缺失时运行 Microsoft Evergreen Bootstrapper，然后创建配置并安装后台服务。升级安装会停止并重新启动已有服务，同时保留配置和状态。
-
-Debian/Ubuntu：
-
-```bash
-sudo apt install ./cf-optimizer-<version>-linux-amd64.deb
-```
-
-Fedora/RHEL 系：
-
-```bash
-sudo dnf install ./cf-optimizer-<version>-linux-amd64.rpm
-```
-
-macOS：打开对应架构的 DMG 并运行其中的 PKG。未签名 CI 包可能需要在“隐私与安全性”中手动批准；正式签名发布不需要这一步。
-
-### 首次使用
-
-安装器会创建默认配置并启动服务。先检查状态，再进行不应用策略的测速：
-
-```bash
-cf-optimizer service-status
-cf-optimizer status
-cf-optimizer benchmark
-```
-
-完整优选由后台服务执行：
-
-```bash
-cf-optimizer optimize
-cf-optimizer history
-cf-optimizer logs --lines 100
-```
-
-诊断指定 IP 的实际出口证据：
-
-```bash
-cf-optimizer test-route 1.1.1.1
-```
-
-全局选项必须放在命令前，例如：
-
-```bash
-cf-optimizer --config /etc/cf-optimizer/config.yaml --json status
-```
-
-### 默认路径
-
-| 平台 | 配置 | 状态、历史和日志 | IPC |
+| 平台 | 发布产物 | 最低运行要求 | 完整指南 |
 |---|---|---|---|
-| Windows | `%ProgramData%\CF Optimizer\config.yaml` | `%ProgramData%\CF Optimizer` | `\\.\pipe\cf-optimizer-v1` |
-| Linux | `/etc/cf-optimizer/config.yaml` | `/var/lib/cf-optimizer` | `/var/lib/cf-optimizer/daemon.sock` |
-| macOS | `/Library/Application Support/CF Optimizer/config.yaml` | 同目录 | 同目录下 `daemon.sock` |
+| Windows amd64/arm64 | `*-windows-*-setup.exe` | Windows 10/11、WebView2 Runtime | [Windows 安装与使用](docs/platforms/windows.md#中文) |
+| macOS amd64/arm64 | `*-darwin-*.dmg`，内含 PKG | macOS 11+ | [macOS 安装与使用](docs/platforms/macos.md#中文) |
+| Linux amd64/arm64 | `*-linux-*.deb` 或 `*.rpm` | systemd、GTK 3、WebKitGTK 4.1、Ayatana AppIndicator | [Linux 安装与使用](docs/platforms/linux.md#中文) |
 
-完整字段见 [config.example.yaml](config.example.yaml)。重要的安全默认值：
+在 WSL 中不要安装 Linux 后台服务来管理 Windows 主机网络，应在 Windows 主机中使用 Windows 安装包。
+
+### 安全默认值
+
+完整配置字段见 [config.example.yaml](config.example.yaml)。重要默认值如下：
 
 - `network.manage_routes: false`：默认不修改系统路由。
 - `benchmark.download_url: ""`：默认不产生下载测速流量。
@@ -108,30 +54,11 @@ cf-optimizer --config /etc/cf-optimizer/config.yaml --json status
 - `ranges.max_change_percent` 限制远程网段异常变化。
 - 代理密钥不会写入诊断导出；日志和导出还会再次脱敏。
 
-启用路由前，应明确填写物理接口和网关，先运行 `test-route` 检查证据。不要尝试绕过 VPN Kill Switch；无法验证物理出口时应保持路由管理关闭。
-
-### 服务管理与卸载
-
-```bash
-cf-optimizer start
-cf-optimizer service-status
-cf-optimizer stop
-cf-optimizer cleanup
-```
-
-`cleanup` 逆序回滚持久化的受管路由和代理策略，不删除配置、日志或历史。安装器和包管理器卸载会先停止服务并执行同一清理流程；若外部程序修改了受管文件，清理会拒绝覆盖并中止卸载，便于人工核对。
-
-Windows 使用“已安装的应用”卸载。Linux 使用 `sudo apt remove cf-optimizer` 或 `sudo dnf remove cf-optimizer`。macOS 使用：
-
-```bash
-sudo /usr/local/share/cf-optimizer/uninstall.sh
-```
-
-卸载默认保留用户配置和运行数据，重新安装可以继续使用。需要彻底删除时，应在确认不再需要历史和日志后手动移除上表中的产品专属数据目录。
+启用路由前，应明确填写物理接口和网关，先运行路由诊断并检查实际证据。不要尝试绕过 VPN Kill Switch；无法验证物理出口时应保持路由管理关闭。
 
 ### 从源码开发
 
-需要 Go 1.23+、Node.js 22+。桌面构建还需要 Wails CLI；Linux 需要 `libgtk-3-dev`、`libwebkit2gtk-4.1-dev` 和 `libayatana-appindicator3-dev`。
+需要 Go 1.23+、Node.js 22+。桌面构建还需要 Wails CLI；Linux 额外需要 `libgtk-3-dev`、`libwebkit2gtk-4.1-dev` 和 `libayatana-appindicator3-dev`。
 
 ```bash
 go mod download
@@ -172,7 +99,7 @@ Linux 使用 WebKitGTK 4.1 时增加 `-tags webkit2_41`。打包资源见 [packa
 
 ### 当前验证边界
 
-自动测试使用 mock 后端，不修改开发机或 CI 主机网络。跨平台编译和安装资源已覆盖，但 Windows/macOS 签名包、三平台真实服务安装、真实路由切换以及 VPN/代理组合仍需要对应真机验收。没有真实连接证据时，不应把“策略已写入”等同于“流量已直连”。
+自动测试使用 mock 后端，不修改开发机或 CI 主机网络。跨平台编译和安装资源已覆盖，但 Windows/macOS 签名包、三平台真实服务安装、真实托盘交互、真实路由切换以及 VPN/代理组合仍需要对应真机验收。没有真实连接证据时，不应把“策略已写入”等同于“流量已直连”。
 
 ---
 
@@ -189,7 +116,7 @@ The project does not treat a successful configuration write as proof that traffi
 - Score success rate, latency, jitter, loss, and throughput, with history smoothing, cooldown, hysteresis, and minimum hold time.
 - Plan, apply, verify, audit, and roll back temporary range routes and final `/32` or `/128` host routes when route management is enabled.
 - Integrate with Generic Route, Mihomo, sing-box, Xray, versioned External JSON-RPC, and optional Windows Hosts adapters.
-- Run under Windows Service, systemd, or LaunchDaemon. Closing the desktop window hides it to the system tray; reopening or quitting the UI does not stop the service or an active task.
+- Run under Windows Service, systemd, or LaunchDaemon. Closing the desktop window hides it to the system tray; quitting the UI does not stop the service or an active task.
 - Provide eight operational views: overview, benchmark, proxy adapters, routes, ranges, history, logs/diagnostics, and settings.
 
 ### Process and privilege boundary
@@ -206,75 +133,21 @@ Wails Bridge -> allowlisted IPC -> privileged cf-optimizerd
 
 Windows uses an ACL-protected Named Pipe; Linux and macOS use a permission-protected Unix Domain Socket. The UI cannot execute shell commands or directly edit routes, Hosts, or proxy configuration. The service validates every IPC parameter again.
 
-### Requirements
+### Platform guides
 
-| Platform | Minimum runtime | Architectures |
-|---|---|---|
-| Windows | Windows 10/11 and Microsoft Edge WebView2 Runtime | amd64, arm64 |
-| Linux | systemd, GTK 3, WebKitGTK 4.1, and Ayatana AppIndicator | amd64, arm64 |
-| macOS | macOS 11+ | amd64, arm64 |
+Download the installer for the target architecture and `SHA256SUMS` from the release page, then follow the corresponding guide. CI artifacts may be unsigned when signing credentials are not configured.
 
-CI packages are unsigned unless signing credentials are configured. Production distribution should use Windows Authenticode plus Apple Developer ID signing and notarization.
-
-### Installation
-
-Select the release asset matching the target architecture and verify it with `SHA256SUMS`.
-
-Windows: run `cf-optimizer-<version>-windows-<arch>-setup.exe` as Administrator. The installer checks WebView2 and runs Microsoft's Evergreen Bootstrapper when needed, initializes configuration, and installs the background service. Upgrades stop and restart the existing service while preserving configuration and state.
-
-Debian/Ubuntu:
-
-```bash
-sudo apt install ./cf-optimizer-<version>-linux-amd64.deb
-```
-
-Fedora/RHEL family:
-
-```bash
-sudo dnf install ./cf-optimizer-<version>-linux-amd64.rpm
-```
-
-macOS: open the architecture-specific DMG and run the enclosed PKG. Unsigned CI packages may require manual approval under Privacy & Security; properly signed production packages do not.
-
-### First run
-
-Installers create a default configuration and start the service. Check status, then run a benchmark that does not apply policy:
-
-```bash
-cf-optimizer service-status
-cf-optimizer status
-cf-optimizer benchmark
-```
-
-Ask the background service to benchmark and apply configured policy:
-
-```bash
-cf-optimizer optimize
-cf-optimizer history
-cf-optimizer logs --lines 100
-```
-
-Collect effective egress evidence for a target IP:
-
-```bash
-cf-optimizer test-route 1.1.1.1
-```
-
-Global options must precede the command:
-
-```bash
-cf-optimizer --config /etc/cf-optimizer/config.yaml --json status
-```
-
-### Default paths
-
-| Platform | Configuration | State, history, and logs | IPC |
+| Platform | Release asset | Minimum runtime | Full guide |
 |---|---|---|---|
-| Windows | `%ProgramData%\CF Optimizer\config.yaml` | `%ProgramData%\CF Optimizer` | `\\.\pipe\cf-optimizer-v1` |
-| Linux | `/etc/cf-optimizer/config.yaml` | `/var/lib/cf-optimizer` | `/var/lib/cf-optimizer/daemon.sock` |
-| macOS | `/Library/Application Support/CF Optimizer/config.yaml` | same directory | `daemon.sock` in the same directory |
+| Windows amd64/arm64 | `*-windows-*-setup.exe` | Windows 10/11 and WebView2 Runtime | [Install and use on Windows](docs/platforms/windows.md#english) |
+| macOS amd64/arm64 | `*-darwin-*.dmg` containing a PKG | macOS 11+ | [Install and use on macOS](docs/platforms/macos.md#english) |
+| Linux amd64/arm64 | `*-linux-*.deb` or `*.rpm` | systemd, GTK 3, WebKitGTK 4.1, and Ayatana AppIndicator | [Install and use on Linux](docs/platforms/linux.md#english) |
 
-See [config.example.yaml](config.example.yaml) for every field. Important secure defaults are:
+Do not install the Linux service under WSL to manage Windows host networking. Install the Windows package on the Windows host instead.
+
+### Secure defaults
+
+See [config.example.yaml](config.example.yaml) for every field. Important defaults are:
 
 - `network.manage_routes: false`: the default configuration does not change system routes.
 - `benchmark.download_url: ""`: download benchmark traffic is disabled by default.
@@ -282,30 +155,11 @@ See [config.example.yaml](config.example.yaml) for every field. Important secure
 - `ranges.max_change_percent` limits abnormal remote range changes.
 - Proxy secrets are excluded from diagnostics, and exported logs are redacted again.
 
-Before enabling route management, specify the physical interface and gateway and inspect `test-route` evidence. Do not try to bypass a VPN Kill Switch; keep route management disabled when physical egress cannot be verified.
-
-### Service management and removal
-
-```bash
-cf-optimizer start
-cf-optimizer service-status
-cf-optimizer stop
-cf-optimizer cleanup
-```
-
-`cleanup` rolls back the persisted managed route and proxy receipt chain without deleting configuration, logs, or history. Platform uninstallers stop the service and run the same cleanup first. If another process has changed a managed file, cleanup refuses to overwrite it and aborts removal for manual review.
-
-Use Installed Apps on Windows. On Linux, run `sudo apt remove cf-optimizer` or `sudo dnf remove cf-optimizer`. On macOS, run:
-
-```bash
-sudo /usr/local/share/cf-optimizer/uninstall.sh
-```
-
-Removal preserves user configuration and runtime state by default, so a later installation can reuse them. For complete deletion, manually remove the product-specific data directory listed above only after confirming its history and logs are no longer needed.
+Before enabling route management, specify the physical interface and gateway, run route diagnostics, and inspect the resulting evidence. Do not try to bypass a VPN Kill Switch; keep route management disabled when physical egress cannot be verified.
 
 ### Development from source
 
-Development requires Go 1.23+ and Node.js 22+. Desktop builds also require the Wails CLI; Linux requires `libgtk-3-dev`, `libwebkit2gtk-4.1-dev`, and `libayatana-appindicator3-dev`.
+Development requires Go 1.23+ and Node.js 22+. Desktop builds also require the Wails CLI. Linux additionally requires `libgtk-3-dev`, `libwebkit2gtk-4.1-dev`, and `libayatana-appindicator3-dev`.
 
 ```bash
 go mod download
@@ -346,4 +200,4 @@ Pushing a `v<major>.<minor>.<patch>` tag runs the release workflow. It produces 
 
 ### Current verification boundary
 
-Automated tests use mock backends and do not modify the developer or CI host network. Cross-platform compilation and packaging resources are covered, but signed Windows/macOS packages, real service installation on all three platforms, real route switching, and VPN/proxy combinations still require matching physical machines. Without real connection evidence, “policy written” must not be interpreted as “traffic is direct.”
+Automated tests use mock backends and do not modify the developer or CI host network. Cross-platform compilation and packaging resources are covered, but signed Windows/macOS packages, real service installation on all three platforms, real tray interaction, real route switching, and VPN/proxy combinations still require matching physical machines. Without real connection evidence, “policy written” must not be interpreted as “traffic is direct.”
