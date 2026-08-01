@@ -84,14 +84,14 @@ jobs:
           version="${GITHUB_REF_NAME}"
           build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           ldflags="-s -w -X github.com/cf-optimizer/cf-optimizer/internal/version.Version=${version} -X github.com/cf-optimizer/cf-optimizer/internal/version.Commit=${GITHUB_SHA} -X github.com/cf-optimizer/cf-optimizer/internal/version.Date=${build_date}"
-          args=(build -clean -trimpath -platform "$TARGET" -ldflags "$ldflags" -o cf-optimizer-ui)
+          suffix=""
+          if [[ "$TARGET_OS" == windows ]]; then suffix=".exe"; fi
+          args=(build -clean -trimpath -platform "$TARGET" -ldflags "$ldflags" -o "cf-optimizer-ui${suffix}")
           if [[ "$TARGET_OS" == linux ]]; then args+=(-tags webkit2_41); fi
           (cd cmd/desktop && wails "${args[@]}")
 
           stage="dist/stage-${TARGET_OS}-${TARGET_ARCH}"
           mkdir -p "$stage" dist/release
-          suffix=""
-          if [[ "$TARGET_OS" == windows ]]; then suffix=".exe"; fi
           CGO_ENABLED=0 GOOS="$TARGET_OS" GOARCH="$TARGET_ARCH" go build -trimpath -ldflags "$ldflags" -o "$stage/cf-optimizer$suffix" ./cmd/cli
           CGO_ENABLED=0 GOOS="$TARGET_OS" GOARCH="$TARGET_ARCH" go build -trimpath -ldflags "$ldflags" -o "$stage/cf-optimizerd$suffix" ./cmd/daemon
           if [[ "$TARGET_OS" != darwin ]]; then

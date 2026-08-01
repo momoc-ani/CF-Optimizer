@@ -171,14 +171,14 @@ jobs:
         run: |
           build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           ldflags="-s -w -X github.com/cf-optimizer/cf-optimizer/internal/version.Version=${CI_PACKAGE_VERSION} -X github.com/cf-optimizer/cf-optimizer/internal/version.Commit=${GITHUB_SHA} -X github.com/cf-optimizer/cf-optimizer/internal/version.Date=${build_date}"
-          args=(build -clean -trimpath -platform "$TARGET" -ldflags "$ldflags" -o cf-optimizer-ui)
+          suffix=""
+          if [[ "$TARGET_OS" == windows ]]; then suffix=".exe"; fi
+          args=(build -clean -trimpath -platform "$TARGET" -ldflags "$ldflags" -o "cf-optimizer-ui${suffix}")
           if [[ "$TARGET_OS" == linux ]]; then args+=(-tags webkit2_41); fi
           (cd cmd/desktop && wails "${args[@]}")
 
           stage="dist/stage-${TARGET_OS}-${TARGET_ARCH}"
           mkdir -p "$stage" dist/packages
-          suffix=""
-          if [[ "$TARGET_OS" == windows ]]; then suffix=".exe"; fi
           if [[ "$TARGET_OS" != darwin ]]; then
             cp "packaging/wails/bin/cf-optimizer-ui$suffix" "$stage/cf-optimizer-ui$suffix"
           fi
