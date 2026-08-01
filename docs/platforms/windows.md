@@ -25,6 +25,8 @@ $env:PROCESSOR_ARCHITECTURE
 - `AMD64`：下载 `cf-optimizer-<version>-windows-amd64-setup.exe`。
 - `ARM64`：下载 `cf-optimizer-<version>-windows-arm64-setup.exe`。
 
+每个架构只发布一个完整 EXE 安装器，不需要额外下载后台服务或桌面程序。
+
 同时下载发布页中的 `SHA256SUMS`。在安装包所在目录计算哈希并与清单中同名文件比较：
 
 ```powershell
@@ -176,6 +178,8 @@ $env:PROCESSOR_ARCHITECTURE
 
 - `AMD64`: download `cf-optimizer-<version>-windows-amd64-setup.exe`.
 - `ARM64`: download `cf-optimizer-<version>-windows-arm64-setup.exe`.
+
+Each architecture publishes one complete EXE installer; the service and desktop application require no separate downloads.
 
 Download `SHA256SUMS` from the same release. Calculate the installer hash and compare it with the entry for the same filename:
 

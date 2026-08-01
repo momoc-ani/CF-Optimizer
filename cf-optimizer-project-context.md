@@ -243,8 +243,7 @@ cf-optimizer test-route
 |---|---:|---:|
 | Windows | 18–35 MB | 35–60 MB |
 | macOS DMG | 20–40 MB | 40–70 MB |
-| Linux DEB/RPM | 15–30 MB | 30–55 MB |
-| Linux AppImage | 60–120 MB | 单文件 |
+| Linux TAR.GZ（内含 DEB/RPM） | 20–50 MB | 30–55 MB |
 
 Windows如果完整捆绑固定版WebView2，可能额外增加150–250 MB，因此默认只检查系统WebView2并在缺失时安装。
 
@@ -260,6 +259,8 @@ linux-arm64
 darwin-amd64
 darwin-arm64
 ```
+
+每个目标只公开一个安装包：Windows 使用 EXE，Linux 使用同时包含 DEB、RPM 和统一安装脚本的 TAR.GZ，macOS 使用内含 PKG 的 DMG。发布页另提供覆盖六个安装包的 `SHA256SUMS`。
 
 Windows正式发布建议代码签名，macOS正式发布需要Apple Developer签名和公证。
 
@@ -283,7 +284,7 @@ Windows正式发布建议代码签名，macOS正式发布需要Apple Developer�
 
 1. 首版是否默认启用IPv6测速。
 2. 项目自有Cloudflare测速域名和最大带宽成本。
-3. 首版支持哪些Linux发行版。
+3. Linux 已确认支持 Debian/Ubuntu 与 Fedora/RHEL 系；仍需确定首轮真机验收的具体发行版版本。
 4. 需要优先验证的代理客户端和版本。
 5. Windows和macOS代码签名证书安排。
 6. 首版是否包含应用自动更新。

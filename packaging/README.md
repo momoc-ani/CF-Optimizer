@@ -1,10 +1,11 @@
 # Packaging resources
 
-The CI and release workflows build all packages from native GitHub-hosted runners. Regular CI runs aggregate unsigned commit-validation packages and `SHA256SUMS` in the `installers` artifact. Version tags publish the same package formats through the release workflow, with optional signing and notarization.
+The CI and release workflows build packages on native GitHub-hosted runners. Every run exposes exactly one installer for each operating-system and architecture pair: two Windows EXE files, two Linux TAR.GZ bundles, and two macOS DMG files. `SHA256SUMS` is published separately and covers exactly those six files. Regular CI aggregates unsigned commit-validation outputs in the `installers` artifact; version tags publish the same layout with a platform download table and optional signing or notarization.
 
 - `windows/installer.iss` creates per-architecture installers, checks WebView2, and manages the Windows Service.
-- `linux/nfpm.yaml` and `linux/package.sh` create DEB and RPM packages with GTK 3 and WebKitGTK 4.1 runtime dependencies.
-- `macos/package.sh` creates per-architecture PKG and DMG files and supports optional Developer ID signing and notarization.
+- `linux/nfpm.yaml` and `linux/package.sh` create one bundle per architecture containing DEB, RPM, and `install.sh`. The installer selects `apt-get`, `dnf`, or `yum`, so Debian/Ubuntu and Fedora/RHEL remain supported without separate release downloads.
+- `macos/package.sh` creates and optionally signs/notarizes a PKG in a temporary directory, then publishes only the per-architecture DMG containing that PKG.
+- `verify-release-assets.sh` rejects missing, empty, duplicate, or extra packages before checksums and release upload; `release-downloads.sh` generates the six-target download table.
 - `wails/` contains reproducible Wails metadata and the shared application icon source.
 
 Upgrades preserve the service configuration and state. Uninstall first rolls back the persisted managed-policy receipt chain. User configuration, logs, history, and cached benchmark data are preserved by default.

@@ -6,7 +6,7 @@
 
 ### 1. 适用范围
 
-本指南适用于使用 systemd 的 amd64 或 arm64 桌面 Linux。发布包提供 Debian/Ubuntu 的 DEB，以及 Fedora/RHEL 系的 RPM。桌面程序依赖 GTK 3 和 WebKitGTK 4.1；托盘通过桌面会话的 D-Bus StatusNotifier 协议注册。
+本指南适用于使用 systemd 的 amd64 或 arm64 桌面 Linux。每个架构只发布一个归档，其中同时包含 Debian/Ubuntu 的 DEB、Fedora/RHEL 系的 RPM 和统一安装脚本。桌面程序依赖 GTK 3 和 WebKitGTK 4.1；托盘通过桌面会话的 D-Bus StatusNotifier 协议注册。
 
 WSL 不应作为 Windows 主机网络的服务部署环境。要管理 Windows 的物理网卡和路由，请在 Windows 主机安装 Windows 版本。无 systemd 的 Linux 环境不会由安装脚本自动注册服务。
 
@@ -18,30 +18,36 @@ WSL 不应作为 Windows 主机网络的服务部署环境。要管理 Windows �
 uname -m
 ```
 
-- `x86_64`：下载 `cf-optimizer-<version>-linux-amd64.deb` 或 `.rpm`。
-- `aarch64`、`arm64`：下载 `cf-optimizer-<version>-linux-arm64.deb` 或 `.rpm`。
+- `x86_64`：下载 `cf-optimizer-<version>-linux-amd64.tar.gz`。
+- `aarch64`、`arm64`：下载 `cf-optimizer-<version>-linux-arm64.tar.gz`。
 
 同时下载 `SHA256SUMS`，计算包哈希并与清单中同名文件比较：
 
 ```bash
-asset='cf-optimizer-<version>-linux-amd64.deb'
+asset='cf-optimizer-<version>-linux-amd64.tar.gz'
 sha256sum "$asset"
 grep "  $asset\$" SHA256SUMS
 ```
 
-两个值不一致时不要安装。
+两个值不一致时不要解压或安装。
 
 ### 3. 安装
 
-Debian/Ubuntu：
+解压对应架构的归档并运行统一安装脚本：
 
 ```bash
-sudo apt install ./cf-optimizer-<version>-linux-amd64.deb
+tar -xzf cf-optimizer-<version>-linux-amd64.tar.gz
+cd cf-optimizer-<version>-linux-amd64
+sudo ./install.sh
 ```
 
-Fedora/RHEL 系：
+脚本在 Debian/Ubuntu 上选择内部 DEB 和 `apt-get`，在 Fedora/RHEL 上选择内部 RPM 和 `dnf` 或 `yum`。需要绕过自动识别时，也可以在解压目录手工安装：
 
 ```bash
+# Debian/Ubuntu
+sudo apt install ./cf-optimizer-<version>-linux-amd64.deb
+
+# Fedora/RHEL
 sudo dnf install ./cf-optimizer-<version>-linux-amd64.rpm
 ```
 
@@ -79,7 +85,7 @@ cf-optimizer-ui
 
 普通用户只需完成三步：
 
-1. 下载对应架构的 DEB 或 RPM，并使用系统包管理器安装。
+1. 下载对应架构的 Linux 归档，解压并运行其中的 `sudo ./install.sh`。
 2. 从应用菜单打开 CF Optimizer，等待总览显示后台已连接；程序会自动执行只读物理出口预检。
 3. 点击“一键优选”，在一个确认框中核对接口、网关和影响范围，然后选择“仅本次应用”或“以后自动维护”并开始。
 
@@ -146,15 +152,21 @@ sudo cf-optimizer cleanup
 
 ### 9. 升级与卸载
 
-Debian/Ubuntu 升级：
+下载新版本归档后，通过同一个安装脚本升级：
 
 ```bash
-sudo apt install ./cf-optimizer-<new-version>-linux-amd64.deb
+tar -xzf cf-optimizer-<new-version>-linux-amd64.tar.gz
+cd cf-optimizer-<new-version>-linux-amd64
+sudo ./install.sh
 ```
 
-Fedora/RHEL 系升级：
+高级用户仍可直接使用归档内的包：
 
 ```bash
+# Debian/Ubuntu
+sudo apt install ./cf-optimizer-<new-version>-linux-amd64.deb
+
+# Fedora/RHEL
 sudo dnf upgrade ./cf-optimizer-<new-version>-linux-amd64.rpm
 ```
 
@@ -182,7 +194,7 @@ sudo cf-optimizer logs --lines 200
 ```
 
 - `systemd` 未运行：目标环境不满足正式服务要求。在 WSL 中应改用 Windows 主机版本；其他环境需使用支持 systemd 的桌面发行版。
-- 服务未安装：重新安装 DEB/RPM，确认安装脚本没有因权限或缺少 systemd 中断。
+- 服务未安装：重新运行归档中的 `sudo ./install.sh`，确认没有因权限或缺少 systemd 中断；必要时手工安装其中的 DEB/RPM 查看包管理器错误。
 - UI 无法启动：确认 GTK 3 和 WebKitGTK 4.1 运行库已安装，并从终端查看错误。
 - UI 无法连接：确认 `/var/lib/cf-optimizer/daemon.sock` 存在、服务运行正常且目录权限未被手动修改。
 - 托盘不可见：检查桌面环境是否支持 D-Bus StatusNotifier；不要因此用 root 启动 UI。
@@ -195,7 +207,7 @@ sudo cf-optimizer logs --lines 200
 
 ### 1. Scope
 
-This guide covers amd64 and arm64 desktop Linux systems using systemd. Releases provide DEB packages for Debian/Ubuntu and RPM packages for Fedora/RHEL families. The desktop application depends on GTK 3 and WebKitGTK 4.1; its tray registers through the desktop session's D-Bus StatusNotifier protocol.
+This guide covers amd64 and arm64 desktop Linux systems using systemd. Each architecture has one release bundle containing a DEB for Debian/Ubuntu, an RPM for Fedora/RHEL families, and one installer script. The desktop application depends on GTK 3 and WebKitGTK 4.1; its tray registers through the desktop session's D-Bus StatusNotifier protocol.
 
 WSL is not a deployment environment for managing Windows host networking. Install the Windows version on the Windows host to manage its physical adapters and routes. Linux environments without systemd do not receive automatic service registration from the package scripts.
 
@@ -207,30 +219,36 @@ Check the system architecture:
 uname -m
 ```
 
-- `x86_64`: download `cf-optimizer-<version>-linux-amd64.deb` or `.rpm`.
-- `aarch64` or `arm64`: download `cf-optimizer-<version>-linux-arm64.deb` or `.rpm`.
+- `x86_64`: download `cf-optimizer-<version>-linux-amd64.tar.gz`.
+- `aarch64` or `arm64`: download `cf-optimizer-<version>-linux-arm64.tar.gz`.
 
 Download `SHA256SUMS`, calculate the package hash, and compare it with the same filename in the manifest:
 
 ```bash
-asset='cf-optimizer-<version>-linux-amd64.deb'
+asset='cf-optimizer-<version>-linux-amd64.tar.gz'
 sha256sum "$asset"
 grep "  $asset\$" SHA256SUMS
 ```
 
-Do not install the package when the values differ.
+Do not extract or install the bundle when the values differ.
 
 ### 3. Install
 
-Debian/Ubuntu:
+Extract the bundle for the machine architecture and run its installer:
 
 ```bash
-sudo apt install ./cf-optimizer-<version>-linux-amd64.deb
+tar -xzf cf-optimizer-<version>-linux-amd64.tar.gz
+cd cf-optimizer-<version>-linux-amd64
+sudo ./install.sh
 ```
 
-Fedora/RHEL family:
+The script selects the internal DEB with `apt-get` on Debian/Ubuntu, or the internal RPM with `dnf` or `yum` on Fedora/RHEL. To bypass automatic detection, install the internal package directly:
 
 ```bash
+# Debian/Ubuntu
+sudo apt install ./cf-optimizer-<version>-linux-amd64.deb
+
+# Fedora/RHEL
 sudo dnf install ./cf-optimizer-<version>-linux-amd64.rpm
 ```
 
@@ -268,7 +286,7 @@ The unprivileged UI only communicates through a permission-protected Unix Domain
 
 The normal workflow has three steps:
 
-1. Download the DEB or RPM for the machine architecture and install it with the system package manager.
+1. Download the Linux bundle for the machine architecture, extract it, and run `sudo ./install.sh` inside it.
 2. Open CF Optimizer from the application menu and wait for the Overview to show a connected service. The application performs a read-only physical-egress preflight automatically.
 3. Select One-click Optimize, review the interface, gateway, and effects in one confirmation dialog, then choose Apply once or Maintain automatically and start.
 
@@ -335,15 +353,21 @@ sudo cf-optimizer cleanup
 
 ### 9. Upgrade and remove
 
-Upgrade on Debian/Ubuntu:
+Download and extract the new bundle, then upgrade through the same installer:
 
 ```bash
-sudo apt install ./cf-optimizer-<new-version>-linux-amd64.deb
+tar -xzf cf-optimizer-<new-version>-linux-amd64.tar.gz
+cd cf-optimizer-<new-version>-linux-amd64
+sudo ./install.sh
 ```
 
-Upgrade on Fedora/RHEL family:
+Advanced users can still install the package inside the bundle directly:
 
 ```bash
+# Debian/Ubuntu
+sudo apt install ./cf-optimizer-<new-version>-linux-amd64.deb
+
+# Fedora/RHEL
 sudo dnf upgrade ./cf-optimizer-<new-version>-linux-amd64.rpm
 ```
 
@@ -371,7 +395,7 @@ sudo cf-optimizer logs --lines 200
 ```
 
 - systemd unavailable: the environment does not meet the supported service requirements. Use the Windows host build for WSL, or a desktop distribution with systemd for Linux.
-- Service missing: reinstall the DEB/RPM and confirm package scripts were not interrupted by permissions or missing systemd.
+- Service missing: rerun `sudo ./install.sh` from the bundle and confirm it was not interrupted by permissions or missing systemd. Install the internal DEB/RPM manually when package-manager diagnostics are needed.
 - UI startup failure: confirm GTK 3 and WebKitGTK 4.1 runtime libraries are installed, then launch from a terminal to inspect errors.
 - UI cannot connect: confirm `/var/lib/cf-optimizer/daemon.sock` exists, the service is healthy, and directory permissions were not changed manually.
 - Tray missing: inspect the desktop environment's D-Bus StatusNotifier support. Do not run the UI as root as a workaround.

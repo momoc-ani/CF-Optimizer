@@ -34,13 +34,13 @@ Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix
 
 ### 平台使用指南
 
-正式版本从发布页下载对应架构的安装包和 `SHA256SUMS`。普通 CI 成功后也会提供 `installers` artifact，文件版本为 `0.0.<run_number>`，用于提交验证且未签名。下载后按目标系统指南操作。
+正式版本的发布页按 Windows、Linux、macOS 和处理器架构列出六个安装包，并另附 `SHA256SUMS`。普通 CI 成功后也会提供内容相同的 `installers` artifact，文件版本为 `0.0.<run_number>`，用于提交验证且未签名。下载后按目标系统指南操作。
 
 | 平台 | 发布产物 | 最低运行要求 | 完整指南 |
 |---|---|---|---|
 | Windows amd64/arm64 | `*-windows-*-setup.exe` | Windows 10/11、WebView2 Runtime | [Windows 安装与使用](docs/platforms/windows.md#中文) |
 | macOS amd64/arm64 | `*-darwin-*.dmg`，内含 PKG | macOS 11+ | [macOS 安装与使用](docs/platforms/macos.md#中文) |
-| Linux amd64/arm64 | `*-linux-*.deb` 或 `*.rpm` | systemd、GTK 3、WebKitGTK 4.1、支持 StatusNotifier 的桌面环境 | [Linux 安装与使用](docs/platforms/linux.md#中文) |
+| Linux amd64/arm64 | `*-linux-*.tar.gz`，内含 DEB、RPM 和统一安装脚本 | systemd、GTK 3、WebKitGTK 4.1、支持 StatusNotifier 的桌面环境 | [Linux 安装与使用](docs/platforms/linux.md#中文) |
 
 在 WSL 中不要安装 Linux 后台服务来管理 Windows 主机网络，应在 Windows 主机中使用 Windows 安装包。
 
@@ -102,11 +102,11 @@ Linux 使用 WebKitGTK 4.1 时增加 `-tags webkit2_41`。打包资源见 [packa
 
 - `quality`：gofmt、go vet、Go test/race、ESLint、TypeScript 和 Vitest。
 - `build-core`：Windows/Linux/macOS × amd64/arm64 的 CLI 与后台服务。
-- `build-desktop`：六个目标在对应原生 runner 上构建 Wails 应用，并生成 Windows EXE、Linux DEB/RPM、macOS PKG/DMG。
+- `build-desktop`：六个目标在对应原生 runner 上构建 Wails 应用，每个目标只输出一个公开安装包；Linux 归档内部保留 DEB/RPM，macOS DMG 内部保留 PKG。
 - `package-manifest`：聚合六个平台安装包，生成并验证 `SHA256SUMS`，上传 `installers` artifact。
 - `e2e`：Linux 普通用户环境中的三窗口 Playwright 测试，不修改路由、Hosts、代理或系统服务。
 
-推送 `v<major>.<minor>.<patch>` 标签会运行发布工作流，生成 Windows 安装器、Linux DEB/RPM、macOS PKG/DMG 和经验证的 `SHA256SUMS`。签名、公证需要在发布环境中单独配置证书和 Secrets。
+推送 `v<major>.<minor>.<patch>` 标签会运行发布工作流，严格校验并发布六个安装包和 `SHA256SUMS`，同时在 Release 正文生成分平台下载表。签名、公证需要在发布环境中单独配置证书和 Secrets。
 
 ### 当前验证边界
 
@@ -146,13 +146,13 @@ Windows uses an ACL-protected Named Pipe; Linux and macOS use a permission-prote
 
 ### Platform guides
 
-For a formal release, download the installer for the target architecture and `SHA256SUMS` from the release page. Every successful regular CI run also provides an unsigned `installers` artifact using version `0.0.<run_number>` for commit validation. Then follow the corresponding platform guide.
+A formal release lists six installers by Windows, Linux, macOS, and processor architecture, plus `SHA256SUMS`. Every successful regular CI run also provides an unsigned `installers` artifact with the same layout using version `0.0.<run_number>` for commit validation. Then follow the corresponding platform guide.
 
 | Platform | Release asset | Minimum runtime | Full guide |
 |---|---|---|---|
 | Windows amd64/arm64 | `*-windows-*-setup.exe` | Windows 10/11 and WebView2 Runtime | [Install and use on Windows](docs/platforms/windows.md#english) |
 | macOS amd64/arm64 | `*-darwin-*.dmg` containing a PKG | macOS 11+ | [Install and use on macOS](docs/platforms/macos.md#english) |
-| Linux amd64/arm64 | `*-linux-*.deb` or `*.rpm` | systemd, GTK 3, WebKitGTK 4.1, and a StatusNotifier-capable desktop | [Install and use on Linux](docs/platforms/linux.md#english) |
+| Linux amd64/arm64 | `*-linux-*.tar.gz` containing DEB, RPM, and one installer script | systemd, GTK 3, WebKitGTK 4.1, and a StatusNotifier-capable desktop | [Install and use on Linux](docs/platforms/linux.md#english) |
 
 Do not install the Linux service under WSL to manage Windows host networking. Install the Windows package on the Windows host instead.
 
@@ -214,11 +214,11 @@ Add `-tags webkit2_41` on Linux when using WebKitGTK 4.1. See [packaging/README.
 
 - `quality`: gofmt, go vet, Go test/race, ESLint, TypeScript, and Vitest.
 - `build-core`: CLI and daemon builds for Windows/Linux/macOS on amd64/arm64.
-- `build-desktop`: native Wails builds for all six targets, plus Windows EXE, Linux DEB/RPM, and macOS PKG/DMG packaging.
+- `build-desktop`: native Wails builds for all six targets with one public installer per target; Linux bundles retain DEB/RPM internally, and each macOS DMG retains its PKG.
 - `package-manifest`: collects all six platform packages, generates and verifies `SHA256SUMS`, and uploads the `installers` artifact.
 - `e2e`: three-window Playwright tests with an unprivileged simulated backend that never edits routes, Hosts, proxy configuration, or services.
 
-Pushing a `v<major>.<minor>.<patch>` tag runs the release workflow. It produces Windows installers, Linux DEB/RPM packages, macOS PKG/DMG packages, and a verified `SHA256SUMS`. Signing and notarization require certificates and Secrets configured separately in the release environment.
+Pushing a `v<major>.<minor>.<patch>` tag runs the release workflow. It strictly validates and publishes six installers plus `SHA256SUMS`, and generates a platform download table in the release body. Signing and notarization require certificates and Secrets configured separately in the release environment.
 
 ### Current verification boundary
 

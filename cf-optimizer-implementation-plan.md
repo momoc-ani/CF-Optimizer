@@ -60,7 +60,7 @@
 | 本地通信 | Windows Named Pipe、Unix Domain Socket |
 | 自动化测试 | Go test、Vitest、Playwright |
 
-Wails 使用操作系统 WebView，不捆绑完整 Chromium。目标安装包约为 Windows 18–35 MB、macOS 20–40 MB、Linux DEB/RPM 15–30 MB。
+Wails 使用操作系统 WebView，不捆绑完整 Chromium。目标安装包约为 Windows 18–35 MB、macOS DMG 20–40 MB、Linux 单架构归档 20–50 MB；Linux 归档同时包含 DEB 与 RPM，实际大小以原生 runner 产物为准。
 
 ## 4. 总体架构
 
@@ -494,8 +494,8 @@ hosts:
 ### 阶段7：发布与稳定性（5–8天）
 
 - Windows安装器和WebView2检查。
-- Linux DEB/RPM，按需提供AppImage。
-- macOS Universal或双架构应用、签名和公证准备。
+- Linux 每架构单一归档，内部提供 DEB、RPM 和统一安装脚本。
+- macOS 双架构 DMG，内部 PKG 完成签名和公证准备但不单独发布。
 - 升级、卸载、配置迁移和异常恢复测试。
 - 用户文档和诊断报告导出。
 
@@ -687,4 +687,4 @@ GitHub Release 面向用户只公开 Windows、Linux、macOS 与 amd64、arm64 �
 | 阶段6B：Wails桌面界面 | 已完成 | Wails Bridge、React/Mantine 八页界面、TanStack Query/Table、Zustand、RHF/Zod、ECharts、实时任务条、深浅主题、响应式布局、完整状态、跨平台系统托盘与关闭隐藏行为 | 前端 lint/typecheck/build、6 个 Vitest、三窗口矩阵 6 个 Playwright、Go test/vet、生产资源嵌入与托盘图标测试通过；关闭或退出 UI 不取消后台任务，`0352962`，托盘补充纳入阶段7提交 |
 | 阶段7：发布与稳定性 | 已完成 | Windows Inno Setup/WebView2 与服务生命周期、Linux DEB/RPM、macOS PKG/DMG 及签名公证入口、六目标核心和原生桌面 CI、普通 CI 的 `installers` 安装包与 SHA-256 聚合产物、无特权 E2E、tag 发布与 SHA-256、系统托盘、累计策略收据安全卸载、中英双语 `README.md` 及 Windows/macOS/Linux 平台使用指南；托盘切换为 Wails 外部事件循环兼容的 `fyne.io/systray`，Linux 使用 D-Bus StatusNotifier 并移除 Ayatana 依赖；固定 Wails 2.10.2 要求的 `go-webview2 v1.0.19` 回调契约 | Go test/vet/race、前端 lint/typecheck/build、6 个 Vitest、三窗口 6 个 Playwright、六目标核心与 Windows 双架构桌面编译、Linux Wails 生产构建/隔离启动、DEB/RPM 实际生成及 actionlint 通过；本轮已确认 Linux bindings 在无显示服务环境完成生成，并静态确认 macOS 不再重复定义 `AppDelegate` 及 Windows WebView2 回调签名恢复兼容；普通 CI 安装包和汇总校验清单待六个平台 runner 复验；三平台真实安装、签名公证、托盘交互和真实路由仍需对应真机发布验收，见阶段7提交 |
 | 阶段8：三步使用体验 | 已完成（真机验收待发布） | `quickstart.plan/run` 短期确认计划、网络/配置/适配器一致性复核、共享单任务锁、验证后持续维护切换；总览一键确认、仅测速降级、高级接口/网关覆盖和四类结果；根 README 与三平台双语三步指南 | Go test/vet/race、9 个 Vitest、三窗口矩阵 12 个 Playwright 和 Vite 生产构建通过，`7d1014d`、`fc67e93`、`9a953c7`；未在 WSL 启动或构建桌面宿主，Windows/Linux/macOS 真机权限提示、真实路由/代理证据和安装后交互仍待发布验收 |
-| 阶段9：六目标发布资产 | 进行中（发布链路已完成） | Linux 每架构单一归档内含 DEB、RPM 与自动安装脚本；macOS PKG 仅封装在 DMG 内部；CI/Release 严格聚合六个安装包并生成分平台下载表 | Linux 双架构归档、六文件清单与下载链接测试及 actionlint 通过；中英文文档和六目标原生 runner 复验待后续提交 |
+| 阶段9：六目标发布资产 | 已完成（原生 runner 复验待发布） | Linux 每架构单一归档内含 DEB、RPM 与自动安装脚本；macOS PKG 仅封装在 DMG 内部；CI/Release 严格聚合六个安装包并生成分平台下载表；根 README、三平台双语指南与打包说明已同步 | Linux 双架构归档、六文件清单与下载链接测试、文档一致性检查及 actionlint 通过；Windows/Linux/macOS 六目标实际安装包和 Release 资产数量仍待推送后的原生 runner 验证，`95f2c84`、`7d43874`，见阶段9文档提交 |

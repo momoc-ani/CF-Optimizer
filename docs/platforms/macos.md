@@ -19,6 +19,8 @@ uname -m
 - `arm64`：下载 `cf-optimizer-<version>-darwin-arm64.dmg`。
 - `x86_64`：下载 `cf-optimizer-<version>-darwin-amd64.dmg`。
 
+每个架构只发布一个 DMG；PKG 位于 DMG 内部，不作为单独下载项发布。
+
 同时下载 `SHA256SUMS`，计算 DMG 哈希并与清单中同名文件比较：
 
 ```bash
@@ -167,6 +169,8 @@ uname -m
 
 - `arm64`: download `cf-optimizer-<version>-darwin-arm64.dmg`.
 - `x86_64`: download `cf-optimizer-<version>-darwin-amd64.dmg`.
+
+Each architecture publishes one DMG. Its PKG remains inside the disk image and is not a separate release download.
 
 Download `SHA256SUMS`, calculate the DMG hash, and compare it with the entry for the same filename:
 
