@@ -64,8 +64,10 @@ jobs:
       - name: Validate packaging sources
         shell: bash
         run: |
-          bash -n packaging/linux/package.sh packaging/linux/scripts/*.sh
+          bash -n packaging/*.sh packaging/linux/*.sh packaging/linux/scripts/*.sh packaging/tests/*.sh
           bash -n packaging/macos/package.sh packaging/macos/scripts/* packaging/macos/uninstall.sh
+          bash packaging/tests/package-outputs.sh
+          bash packaging/tests/release-assets-test.sh
           node -e "JSON.parse(require('fs').readFileSync('cmd/desktop/wails.json', 'utf8'))"
           node -e "JSON.parse(require('fs').readFileSync('packaging/wails/windows/info.json', 'utf8'))"
 
@@ -210,13 +212,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Inno Setup failed with exit code $LASTEXITCODE."
           }
-      - name: Create Linux DEB and RPM
+      - name: Create Linux installer bundle
         if: runner.os == 'Linux'
         shell: bash
         env:
           TARGET_ARCH: ${{ matrix.arch }}
         run: packaging/linux/package.sh "$CI_PACKAGE_VERSION" "$TARGET_ARCH" "dist/stage-linux-${TARGET_ARCH}" dist/packages
-      - name: Create macOS PKG and DMG
+      - name: Create macOS DMG
         if: runner.os == 'macOS'
         shell: bash
         env:
@@ -235,11 +237,15 @@ jobs:
     needs: build-desktop
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: package-*
           merge-multiple: true
           path: dist/installers
+      - name: Validate six platform installers
+        shell: bash
+        run: bash packaging/verify-release-assets.sh "$CI_PACKAGE_VERSION" dist/installers
       - name: Generate and verify SHA-256 checksums
         shell: bash
         run: |

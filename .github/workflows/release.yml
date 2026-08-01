@@ -220,13 +220,13 @@ jobs:
             & $signTool.FullName sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /sha1 $env:WINDOWS_SIGNING_THUMBPRINT $_.FullName
             if ($LASTEXITCODE -ne 0) { throw "Signing failed for $($_.Name)." }
           }
-      - name: Create Linux DEB and RPM
+      - name: Create Linux installer bundle
         if: runner.os == 'Linux'
         shell: bash
         env:
           TARGET_ARCH: ${{ matrix.arch }}
         run: packaging/linux/package.sh "$GITHUB_REF_NAME" "$TARGET_ARCH" "dist/stage-linux-${TARGET_ARCH}" dist/release
-      - name: Create macOS PKG and DMG
+      - name: Create macOS DMG
         if: runner.os == 'macOS'
         shell: bash
         env:
@@ -245,11 +245,15 @@ jobs:
     needs: package
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
           merge-multiple: true
           path: release
+      - name: Validate six platform installers
+        shell: bash
+        run: bash packaging/verify-release-assets.sh "$GITHUB_REF_NAME" release
       - name: Generate and verify SHA-256 checksums
         shell: bash
         run: |
@@ -261,9 +265,40 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          generated_notes="$RUNNER_TEMP/generated-notes.md"
+          release_notes="$RUNNER_TEMP/release-notes.md"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$GITHUB_REF_NAME" --jq .body > "$generated_notes"
+          {
+            bash packaging/release-downloads.sh "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY"
+            printf '\n---\n\n'
+            cat "$generated_notes"
+          } > "$release_notes"
+
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            mapfile -t published_assets < <(
+              gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+                --json assets --jq '.assets[].name'
+            )
+            for asset_name in "${published_assets[@]}"; do
+              if [[ ! -f "release/$asset_name" ]]; then
+                gh release delete-asset "$GITHUB_REF_NAME" "$asset_name" --yes --repo "$GITHUB_REPOSITORY"
+              fi
+            done
             gh release upload "$GITHUB_REF_NAME" release/* --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$GITHUB_REF_NAME" --notes-file "$release_notes" --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$GITHUB_REF_NAME" release/* --verify-tag --generate-notes \
+            gh release create "$GITHUB_REF_NAME" release/* --verify-tag --notes-file "$release_notes" \
               --title "CF Optimizer $GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+          fi
+
+          local_assets="$(find release -maxdepth 1 -type f -printf '%f\n' | sort)"
+          remote_assets="$(
+            gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --json assets --jq '.assets[].name' | sort
+          )"
+          if [[ "$remote_assets" != "$local_assets" ]]; then
+            echo "published release assets do not match the verified local set" >&2
+            diff -u <(printf '%s\n' "$local_assets") <(printf '%s\n' "$remote_assets") || true
+            exit 1
           fi
