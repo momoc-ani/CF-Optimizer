@@ -30,7 +30,7 @@ Required design variants
 Global shell and navigation
 - Use a persistent left navigation rail on wide and compact layouts. Width approximately 216 px wide, 72 px collapsed. On narrow layout use a compact icon rail or drawer without turning the app into mobile navigation.
 - Top area contains the current page title, daemon connection state, privilege state, theme control, and a compact overflow menu.
-- Navigation items, in order: 总览, 测速优选, 代理适配, 网络路由, 网段管理, 历史记录, 日志诊断, 设置.
+- Navigation items, in order: 总览, 测速优选, 域名加速, 代理适配, 网络路由, 网段管理, 历史记录, 日志诊断, 设置.
 - Use Lucide icons for navigation and familiar actions. Every icon-only action needs a tooltip and an accessible label.
 - Keep the current run visible across pages through a slim persistent task strip with stage, processed/total, elapsed time, and cancel action. Do not show it when no task exists.
 - The Wails UI is always unprivileged. Any system-changing action must visibly go through the daemon and show permission, apply, verify, and rollback states.
@@ -71,7 +71,15 @@ Screen 2: 测速优选
 - Row details panel shows raw evidence and warnings without exposing sensitive data.
 - Show normal idle, loading, active, cancelling, cancelled, failed, partial success, and complete states.
 
-Screen 3: 代理适配
+Screen 3: 域名加速
+- Header actions: 立即发现 and icon-only 刷新. Show whether acceleration, automatic discovery, and automatic apply are enabled, plus the discovery interval.
+- Summary metrics: current verified optimized IPv4 / IPv6, fully accelerated domain count, pending domain count, physical interface, and gateway.
+- Domain table columns: exact domain, source, optimized IP mappings, Cloudflare ownership, TLS SNI / HTTP Host preflight, verified DIRECT or no-proxy system policy, physical route evidence, last discovery, final state, and error.
+- A domain may show 已加速 only when the applied HTTPS remote IP belongs to the optimized mapping and the managed policy, physical interface, source address, and gateway are all verified. Missing evidence remains 待验证 or 验证失败.
+- Selected-domain evidence shows sanitized adapter names, optimized addresses, SNI / Host, route transaction, interface, source address, gateway, and applied time. Never expose receipt payloads, backups, secrets, or complete third-party configuration.
+- Use ani.momoc.top as the first manual domain. Cover automatic discovery, no optimized IP, policy pending, rollback, disconnected service, and empty states.
+
+Screen 4: 代理适配
 - Show a compact adapter table/list for Generic Route, Mihomo, sing-box, Xray, External JSON-RPC, and optional Windows Hosts.
 - Columns: detected, enabled, capability, apply mechanism, last applied, verification, and action menu.
 - Selected adapter detail uses tabs: 概览, 配置, 变更计划, 验证记录.
@@ -80,28 +88,28 @@ Screen 3: 代理适配
 - Never display secrets, tokens, full third-party configuration files, or authorization headers.
 - Show not detected, needs configuration, validation failure, reload failure with successful rollback, partial success, and verified states.
 
-Screen 4: 网络路由
+Screen 5: 网络路由
 - Physical path summary: interface name/index, type, source addresses, IPv4 gateway, IPv6 gateway, and confidence/warnings.
 - Route table separates temporary benchmark routes and persistent selected-host routes. Columns: target prefix, gateway, interface, metric, transaction, phase, verification, created time.
 - Diagnostic inspector for a target IP shows expected route, observed route, source address, proxy/TUN interfaces detected, and limitations such as Kill Switch.
 - Route management has a clear disabled-by-default control and a permission warning. Enabling it requires explicit confirmation; never imply success before verification.
 - Provide transaction timeline and rollback action for failed or interrupted operations.
 
-Screen 5: 网段管理
+Screen 6: 网段管理
 - Source and freshness header: API source, ETag/hash, fetched time, age, next refresh, status, and refresh action.
 - IPv4 and IPv6 range tables with CIDR, source, inclusion state, and validation result.
 - Difference viewer for current versus previous snapshot: added, removed, unchanged, percentage change, and rejection reason.
 - Include/exclude editor uses validated CIDR rows, not a free-form unstructured text area. Provide add, remove, inline error, and conflict indication.
 - Show loading, offline cache fallback, 304 unchanged, stale cache, rejected abnormal update, and successful refresh states.
 
-Screen 6: 历史记录
+Screen 7: 历史记录
 - Run history table columns: start time, duration, range hash/source, candidates, selected IPv4, selected IPv6, policy result, warnings, final result.
 - Filters for time range, address family, result, and switch/no-switch.
 - Detail drawer/page shows score changes, selection reason, hysteresis/minimum-hold decision, top candidates, and related transaction IDs.
 - Trend chart compares selected score, latency, loss, and throughput over time without mixing incompatible units on one unlabeled axis.
 - Empty history and retention-expired states must be designed.
 
-Screen 7: 日志诊断
+Screen 8: 日志诊断
 - Split workspace with filter toolbar and virtualized-looking log table. Filters: level, component, run ID, transaction ID, time, and search.
 - Log columns: time, level, component, event/message. Expand row for structured fields.
 - Sensitive values appear redacted. Long values wrap or open in a details view; they never overlap adjacent content.
@@ -109,7 +117,7 @@ Screen 7: 日志诊断
 - Export report action uses Download icon and explicitly states that secrets are filtered.
 - Show log loading, no matches, stream disconnected/reconnecting, export success, and export failure.
 
-Screen 8: 设置
+Screen 9: 设置
 - Use unframed sections or tabs: 调度, 测速, 网络, 代理, Hosts, 存储与日志, 关于.
 - Build forms with labels, descriptions only where a safety boundary needs explanation, inline validation, units, and current/default values.
 - Use switches for booleans, segmented controls for small modes, numeric inputs/sliders for bounded numeric values, select menus for option sets, and text inputs for URLs/paths.
@@ -154,7 +162,7 @@ Output expectations
 
 ### 信息架构
 
-- 八个页面在不超过两次操作内可达，当前页面和后台任务状态始终明确。
+- 九个页面在不超过两次操作内可达，当前页面和后台任务状态始终明确。
 - 总览首屏能回答服务是否可用、当前节点是什么、策略是否经过验证、何时再次测速。
 - 高频操作不依赖多层菜单，低频详情不会挤压主工作区。
 

@@ -10,7 +10,7 @@ Design System：`CF Optimizer Design System`（`assets/0f41746fcf384e1689a7de4c6
 
 ## 画板完成度
 
-核心信息架构包含 8 个页面：总览、测速优选、代理适配、网络路由、网段管理、历史记录、日志诊断和设置。
+当前代码信息架构包含 9 个页面：总览、测速优选、域名加速、代理适配、网络路由、网段管理、历史记录、日志诊断和设置。现有 Stitch 核心画板仍覆盖最初的 8 个页面；域名加速页沿用同一 Design System 完成代码实现和三档截图评审。
 
 | 设计矩阵 | Light | Dark | 合计 |
 |---|---:|---:|---:|
@@ -18,6 +18,8 @@ Design System：`CF Optimizer Design System`（`assets/0f41746fcf384e1689a7de4c6
 | 1024px | 8/8 | 8/8 | 16 |
 | 760px | 8/8 | 8/8 | 16 |
 | 核心画板 | 24/24 | 24/24 | 48/48 |
+
+2026-08-02 已在原 Stitch 项目提交域名加速页的 1440px、1024px、760px 及 Light/Dark 六画板生成请求。Stitch 服务端返回当前国家/地区未启用，未创建新增画板；对应完整提示已同步到 `STITCH_UI_PROMPT.md`，不把未生成画板计入上表。代码侧已使用既有令牌和布局规范完成 1440px、1024px、760px Playwright 截图评审。
 
 项目另有 9 个状态和补充画板：任务详情、导出确认、导出成功通知、历史记录 Mobile、日志诊断 Mobile、网段管理 Mobile、网段管理详细版，以及代理适配和设置的两个 `v2` 版本。它们作为交互状态参考，不计入 48 个核心响应式画板。
 
@@ -51,6 +53,7 @@ Design System：`CF Optimizer Design System`（`assets/0f41746fcf384e1689a7de4c6
 |---|---|---|
 | 总览 | `OverviewPage` | `system.status`、`history.list`、`routes.list`、`proxy.detect`、`ranges.get` |
 | 测速优选 | `BenchmarkPage` | `optimizer.run`、`optimizer.cancel`、事件流 |
+| 域名加速 | `AccelerationPage` | `acceleration.domains`、`acceleration.discover`、`system.status`、`routes.list`、`config.get` |
 | 代理适配 | `ProxyPage` | `proxy.detect` |
 | 网络路由 | `RoutesPage` | `routes.list`、`diagnostics.route` |
 | 网段管理 | `RangesPage` | `ranges.get`、`ranges.update` |
