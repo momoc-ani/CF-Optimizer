@@ -43,10 +43,25 @@ test('域名加速页面展示完整的直连验证证据', async ({ page }, tes
   await page.goto('/');
   await page.getByRole('button', { name: '域名加速', exact: true }).click();
   await expect(page.getByRole('heading', { name: '域名加速', exact: true })).toBeVisible();
+  await expect(page.getByText('加速策略', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('启用 Cloudflare 域名加速')).toBeChecked();
   await expect(page.getByText('ani.momoc.top').first()).toBeVisible();
   await expect(page.getByText('Mihomo DIRECT').first()).toBeVisible();
   await expect(page.getByText('HTTPS 与物理直连证据完整')).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('acceleration-page.png'), fullPage: false });
+});
+
+test('域名加速配置只在独立页面编辑', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: '域名加速', exact: true }).click();
+  await page.getByLabel('排除域名').fill('skip.example.com');
+  await page.getByRole('button', { name: '保存策略' }).click();
+  await expect(page.getByText('加速策略已保存')).toBeVisible();
+
+  await page.getByRole('button', { name: '设置', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '设置', exact: true })).toBeVisible();
+  await expect(page.getByText('加速域名', { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel('启用 Cloudflare 域名加速')).toHaveCount(0);
 });
 
 test('一键优选先展示影响确认再执行', async ({ page }) => {

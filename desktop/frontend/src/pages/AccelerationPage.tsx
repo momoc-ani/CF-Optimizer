@@ -1,18 +1,33 @@
-import { ActionIcon, Alert, Button, Group, SimpleGrid, Stack, Text, Tooltip } from '@mantine/core';
+import { ActionIcon, Alert, Button, Group, SimpleGrid, Stack, Switch, Text, Textarea, TextInput, Tooltip } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { zodResolver } from '@hookform/resolvers/zod';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ColumnDef } from '@tanstack/react-table';
-import { RefreshCw, ScanSearch, Settings2, ShieldAlert, ShieldCheck } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { RefreshCw, Save, ScanSearch, ShieldAlert, ShieldCheck } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Controller, useForm } from 'react-hook-form';
+import { z } from 'zod';
 import { request } from '../api/client';
 import { queryKeys, useAccelerationDomains, useConfig, useRoutes, useStatus } from '../api/hooks';
-import type { DomainDiscovery, DomainDiscoveryResult, RouteTransaction } from '../api/types';
+import type { AppConfig, DomainDiscovery, DomainDiscoveryResult, RouteTransaction } from '../api/types';
 import { DataTable } from '../components/DataTable';
 import { ErrorState, LoadingState, Metric, PageHeader, Section } from '../components/Page';
 import { StatusBadge } from '../components/StatusBadge';
+import { joinConfigLines, parseDomainLines } from '../lib/configCollections';
 import { findVerifiedDomainRoute, isDomainAccelerated } from '../lib/domainAcceleration';
 import { formatDate } from '../lib/format';
-import { useUIStore } from '../state/ui';
+
+const durationPattern = /^\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h)$/;
+const accelerationSettingsSchema = z.object({
+  enabled: z.boolean(),
+  manualDomains: z.string(),
+  excludedDomains: z.string(),
+  autoDiscover: z.boolean(),
+  autoApply: z.boolean(),
+  discoveryInterval: z.string().regex(durationPattern, '请输入带单位的发现间隔，例如 15s'),
+});
+
+type AccelerationSettingsForm = z.infer<typeof accelerationSettingsSchema>;
 
 const adapterLabels: Record<string, string> = {
   'generic-route': 'Generic Route',
@@ -38,6 +53,34 @@ function describePolicy(adapters: string[] = []): string {
   return adapters.includes('generic-route') ? '系统直连' : '域名映射';
 }
 
+/** accelerationFormFromConfig 将域名加速配置投影为独立页面表单。 */
+function accelerationFormFromConfig(config: AppConfig['acceleration']): AccelerationSettingsForm {
+  return {
+    enabled: config.enabled,
+    manualDomains: joinConfigLines(config.manual_domains),
+    excludedDomains: joinConfigLines(config.excluded_domains),
+    autoDiscover: config.auto_discover,
+    autoApply: config.auto_apply,
+    discoveryInterval: config.discovery_interval,
+  };
+}
+
+/** mergeAccelerationConfig 仅更新域名加速字段并保留完整后台配置。 */
+function mergeAccelerationConfig(config: AppConfig, form: AccelerationSettingsForm): AppConfig {
+  return {
+    ...config,
+    acceleration: {
+      ...config.acceleration,
+      enabled: form.enabled,
+      manual_domains: parseDomainLines(form.manualDomains),
+      excluded_domains: parseDomainLines(form.excludedDomains),
+      auto_discover: form.autoDiscover,
+      auto_apply: form.autoApply,
+      discovery_interval: form.discoveryInterval,
+    },
+  };
+}
+
 /** AccelerationPage 展示域名映射及经物理出口验证的最终加速状态。 */
 export function AccelerationPage() {
   const domains = useAccelerationDomains();
@@ -45,8 +88,21 @@ export function AccelerationPage() {
   const status = useStatus();
   const config = useConfig();
   const queryClient = useQueryClient();
-  const setPage = useUIStore((state) => state.setPage);
   const [selectedDomain, setSelectedDomain] = useState<string>();
+  const form = useForm<AccelerationSettingsForm>({
+    resolver: zodResolver(accelerationSettingsSchema),
+    defaultValues: {
+      enabled: true,
+      manualDomains: 'ani.momoc.top',
+      excludedDomains: '',
+      autoDiscover: true,
+      autoApply: true,
+      discoveryInterval: '15s',
+    },
+  });
+  useEffect(() => {
+    if (config.data) form.reset(accelerationFormFromConfig(config.data.acceleration));
+  }, [config.data, form]);
 
   const rows = useMemo<DomainRow[]>(() => (domains.data?.domains ?? []).map((domain) => {
     const addresses = domain.accelerated_addresses ?? [];
@@ -90,15 +146,30 @@ export function AccelerationPage() {
     onError: (error: Error) => notifications.show({ color: 'red', title: '发现失败', message: error.message }),
   });
 
+  const savePolicy = useMutation({
+    mutationFn: (next: AppConfig) => request<{ saved: boolean; restart_required: boolean }>('config.update', { config: next }),
+    onSuccess: async (result) => {
+      notifications.show({ color: 'green', title: '加速策略已保存', message: result.restart_required ? '后台服务重启后应用全部更改。' : '更改已经应用。' });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.config }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.accelerationDomains }),
+      ]);
+    },
+    onError: (error: Error) => notifications.show({ color: 'red', title: '保存失败', message: error.message }),
+  });
+
   const refreshAll = () => void Promise.all([domains.refetch(), routes.refetch(), status.refetch(), config.refetch()]);
   const isLoading = domains.isLoading || routes.isLoading || status.isLoading || config.isLoading;
   const readError = domains.error ?? routes.error ?? status.error ?? config.error;
   if (isLoading) return <LoadingState rows={8} />;
   if (readError) return <ErrorState message={readError.message} onRetry={refreshAll} />;
+  if (!config.data) return <ErrorState message="后台未返回域名加速配置" onRetry={refreshAll} />;
 
   const currentIPv4 = status.data?.state.current_ipv4?.policy_verified ? status.data.state.current_ipv4.ip : '—';
   const currentIPv6 = status.data?.state.current_ipv6?.policy_verified ? status.data.state.current_ipv6.ip : '—';
   const physicalPath = status.data?.physical_path;
+  const errors = form.formState.errors;
+  const submitPolicy = form.handleSubmit((values) => savePolicy.mutate(mergeAccelerationConfig(config.data, values)));
   return (
     <Stack gap="lg">
       <PageHeader
@@ -111,11 +182,28 @@ export function AccelerationPage() {
       />
 
       <Alert color={isAutomatic ? 'green' : 'yellow'} icon={isAutomatic ? <ShieldCheck size={18} /> : <ShieldAlert size={18} />} title={isAutomatic ? '自动加速已开启' : '自动加速未完全开启'}>
-        <Group justify="space-between" align="center" wrap="wrap">
-          <Text size="sm">域名加速 {accelerationConfig?.enabled ? '开启' : '关闭'} · 自动发现 {accelerationConfig?.auto_discover ? '开启' : '关闭'} · 自动应用 {accelerationConfig?.auto_apply ? '开启' : '关闭'} · 周期 {accelerationConfig?.discovery_interval ?? '—'}</Text>
-          {!isAutomatic && <Button size="compact-xs" variant="light" color="yellow" leftSection={<Settings2 size={14} />} onClick={() => setPage('settings')}>打开设置</Button>}
-        </Group>
+        <Text size="sm">域名加速 {accelerationConfig?.enabled ? '开启' : '关闭'} · 自动发现 {accelerationConfig?.auto_discover ? '开启' : '关闭'} · 自动应用 {accelerationConfig?.auto_apply ? '开启' : '关闭'} · 周期 {accelerationConfig?.discovery_interval ?? '—'}</Text>
       </Alert>
+
+      <form onSubmit={submitPolicy}>
+        <Section
+          title="加速策略"
+          aside={<Button type="submit" size="compact-sm" leftSection={<Save size={15} />} loading={savePolicy.isPending} disabled={!form.formState.isDirty}>保存策略</Button>}
+        >
+          <Stack gap="md">
+            <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="md">
+              <Controller control={form.control} name="enabled" render={({ field }) => <Switch label="启用 Cloudflare 域名加速" checked={field.value} onChange={field.onChange} />} />
+              <Controller control={form.control} name="autoDiscover" render={({ field }) => <Switch label="自动发现 Cloudflare 域名" checked={field.value} onChange={field.onChange} />} />
+              <Controller control={form.control} name="autoApply" render={({ field }) => <Switch color="orange" label="自动应用已验证域名" checked={field.value} onChange={field.onChange} />} />
+              <Controller control={form.control} name="discoveryInterval" render={({ field }) => <TextInput {...field} label="发现间隔" error={errors.discoveryInterval?.message} />} />
+            </SimpleGrid>
+            <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
+              <Controller control={form.control} name="manualDomains" render={({ field }) => <Textarea {...field} label="手动域名" autosize minRows={3} ff="monospace" placeholder="每行一个精确域名" />} />
+              <Controller control={form.control} name="excludedDomains" render={({ field }) => <Textarea {...field} label="排除域名" autosize minRows={3} ff="monospace" placeholder="每行一个精确域名" />} />
+            </SimpleGrid>
+          </Stack>
+        </Section>
+      </form>
 
       <SimpleGrid cols={{ base: 2, md: 4 }} spacing="sm">
         <Metric label="优选 IPv4" value={<Text ff="monospace" inherit>{currentIPv4}</Text>} detail="策略已验证的当前节点" accent="#1677a6" />
