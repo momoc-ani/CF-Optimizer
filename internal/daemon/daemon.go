@@ -100,11 +100,13 @@ func (s *Service) observeDomains(ctx context.Context) error {
 func (s *Service) schedule(ctx context.Context) error {
 	initialConfig := s.runtime.View().Config
 	if !initialConfig.Schedule.Enabled {
+		s.setScheduleStatus(false, initialConfig.Schedule.Interval.Duration(), time.Time{}, "disabled")
 		<-ctx.Done()
 		return nil
 	}
 	optimizationTimer := time.NewTimer(initialRunDelay)
 	defer optimizationTimer.Stop()
+	s.setScheduleStatus(true, initialConfig.Schedule.Interval.Duration(), time.Now().UTC().Add(initialRunDelay), "startup")
 	networkTicker := time.NewTicker(initialConfig.Schedule.NetworkPoll.Duration())
 	defer networkTicker.Stop()
 	fingerprint, _ := cfnetwork.NetworkFingerprint(ctx, initialConfig.Network.CommandTimeout.Duration())
@@ -114,19 +116,24 @@ func (s *Service) schedule(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-optimizationTimer.C:
+			s.setScheduleStatus(true, s.runtime.View().Config.Schedule.Interval.Duration(), time.Time{}, "running")
 			err := s.runScheduled(ctx)
 			currentConfig := s.runtime.View().Config
 			delay := currentConfig.Schedule.Interval.Duration()
+			trigger := "interval"
 			if errors.Is(err, optimizer.ErrAlreadyRunning) {
 				delay = minimumRetryDelay
+				trigger = "retry"
 			} else if err != nil {
 				failureCount++
 				delay = exponentialDelay(failureCount, currentConfig.Schedule.Interval.Duration())
+				trigger = "retry"
 				s.logger.Warn("计划优选失败，将按退避重试", "error", err, "retry_in", delay)
 			} else {
 				failureCount = 0
 			}
 			optimizationTimer.Reset(delay)
+			s.setScheduleStatus(true, currentConfig.Schedule.Interval.Duration(), time.Now().UTC().Add(delay), trigger)
 		case <-networkTicker.C:
 			currentConfig := s.runtime.View().Config
 			if !currentConfig.Schedule.RunOnNetworkChange {
@@ -145,11 +152,22 @@ func (s *Service) schedule(ctx context.Context) error {
 					}
 				}
 				optimizationTimer.Reset(networkChangeDebounce)
+				s.setScheduleStatus(true, currentConfig.Schedule.Interval.Duration(), time.Now().UTC().Add(networkChangeDebounce), "network_change")
 				s.logger.Info("检测到默认网络路径变化", "action", "schedule_retest")
 			}
 			fingerprint = current
 		}
 	}
+}
+
+// setScheduleStatus 将真实计时器承诺同步到只读状态接口。
+func (s *Service) setScheduleStatus(enabled bool, interval time.Duration, next time.Time, trigger string) {
+	status := application.ScheduleStatus{Enabled: enabled, Interval: interval.String(), Trigger: trigger}
+	if !next.IsZero() {
+		next = next.UTC()
+		status.NextScheduledAt = &next
+	}
+	s.api.SetScheduleStatus(status)
 }
 
 func (s *Service) runScheduled(ctx context.Context) error {

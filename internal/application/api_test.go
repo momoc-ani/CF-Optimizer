@@ -90,3 +90,32 @@ func TestSystemStatusExcludesLargeInternalState(t *testing.T) {
 		t.Fatal("system.status omitted the current verified selection")
 	}
 }
+
+func TestSystemStatusIncludesIsolatedSchedulePromise(t *testing.T) {
+	stateStore, err := store.Open(t.TempDir(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api, err := NewAPI(&Runtime{Store: stateStore})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := time.Date(2026, time.August, 2, 18, 30, 0, 0, time.UTC)
+	api.SetScheduleStatus(ScheduleStatus{
+		Enabled: true, Interval: "6h0m0s", NextScheduledAt: &next, Trigger: "interval",
+	})
+	next = next.Add(time.Hour)
+
+	response := api.systemStatus()
+	status, ok := response["schedule"].(ScheduleStatus)
+	if !ok {
+		t.Fatalf("unexpected schedule response: %#v", response["schedule"])
+	}
+	if !status.Enabled || status.Interval != "6h0m0s" || status.Trigger != "interval" {
+		t.Fatalf("unexpected schedule status: %#v", status)
+	}
+	want := time.Date(2026, time.August, 2, 18, 30, 0, 0, time.UTC)
+	if status.NextScheduledAt == nil || !status.NextScheduledAt.Equal(want) {
+		t.Fatalf("unexpected next scheduled time: %#v", status.NextScheduledAt)
+	}
+}

@@ -29,6 +29,8 @@ type API struct {
 	activeMutex           sync.Mutex
 	activeCancel          context.CancelFunc
 	activeEvent           *optimizer.Event
+	scheduleMutex         sync.RWMutex
+	scheduleStatus        ScheduleStatus
 	configurationMutex    sync.Mutex
 	quickStartMutex       sync.Mutex
 	quickStartPlan        *quickStartPlanRecord
@@ -38,6 +40,14 @@ type API struct {
 	buildManagedSession   managedSessionBuilder
 	saveConfig            func(string, config.Config) error
 	now                   func() time.Time
+}
+
+// ScheduleStatus 描述调度器当前承诺的下一次执行时间，不包含内部计时器细节。
+type ScheduleStatus struct {
+	Enabled         bool       `json:"enabled"`
+	Interval        string     `json:"interval"`
+	NextScheduledAt *time.Time `json:"next_scheduled_at,omitempty"`
+	Trigger         string     `json:"trigger,omitempty"`
 }
 
 // statusState 仅包含普通状态轮询所需字段，避免通过 IPC 暴露节点明细和策略回滚收据。
@@ -57,8 +67,10 @@ func NewAPI(runtime *Runtime) (*API, error) {
 	if runtime == nil {
 		return nil, errors.New("application runtime is required")
 	}
+	schedule := runtime.View().Config.Schedule
 	return &API{
 		runtime: runtime, discoverPhysicalPath: cfnetwork.DiscoverPhysicalPath,
+		scheduleStatus:        ScheduleStatus{Enabled: schedule.Enabled, Interval: schedule.Interval.String()},
 		networkFingerprint:    cfnetwork.NetworkFingerprint,
 		detectManagedAdapters: runtime.DetectManagedAdapters,
 		buildManagedSession:   runtime.BuildManagedSession,
@@ -112,6 +124,9 @@ func (a *API) systemStatus() map[string]any {
 	a.activeMutex.Lock()
 	activeEvent := cloneEvent(a.activeEvent)
 	a.activeMutex.Unlock()
+	a.scheduleMutex.RLock()
+	scheduleStatus := cloneScheduleStatus(a.scheduleStatus)
+	a.scheduleMutex.RUnlock()
 	view := a.runtime.View()
 	state := a.runtime.Store.Snapshot()
 	return map[string]any{
@@ -124,7 +139,24 @@ func (a *API) systemStatus() map[string]any {
 		},
 		"physical_path": view.PhysicalPath,
 		"active_event":  activeEvent,
+		"schedule":      scheduleStatus,
 	}
+}
+
+// SetScheduleStatus 原子更新供 system.status 读取的调度承诺。
+func (a *API) SetScheduleStatus(status ScheduleStatus) {
+	a.scheduleMutex.Lock()
+	a.scheduleStatus = cloneScheduleStatus(status)
+	a.scheduleMutex.Unlock()
+}
+
+// cloneScheduleStatus 隔离时间指针，避免调度器与状态轮询共享可变数据。
+func cloneScheduleStatus(status ScheduleStatus) ScheduleStatus {
+	if status.NextScheduledAt != nil {
+		next := *status.NextScheduledAt
+		status.NextScheduledAt = &next
+	}
+	return status
 }
 
 func (a *API) runOptimizer(ctx context.Context, raw json.RawMessage, emit func(any) error) (optimizer.RunReport, error) {

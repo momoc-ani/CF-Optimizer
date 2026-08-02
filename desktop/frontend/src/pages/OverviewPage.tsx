@@ -13,6 +13,7 @@ import { useRun } from '../hooks/useRun';
 import { QuickStartDialog } from '../components/QuickStartDialog';
 import { useUIStore } from '../state/ui';
 import { countCurrentVerifiedRoutes } from '../lib/routeSummary';
+import { formatRunEventDetail, formatRunEventTitle, presentSchedule } from '../lib/overview';
 
 function SelectionRow({ title, selection, interfaceName }: { title: string; selection?: Selection; interfaceName?: string }) {
   if (!selection) return <div className="selection-row"><Text fw={650}>{title}</Text><Text c="dimmed" size="sm">尚未选择节点</Text><StatusBadge label="未验证" /></div>;
@@ -104,6 +105,7 @@ export function OverviewPage() {
   const path = status.data?.physical_path;
   const detected = Object.values(proxies.data ?? {}).filter((item) => item.present).length;
   const verifiedRoutes = countCurrentVerifiedRoutes(state);
+  const schedule = presentSchedule(status.data?.schedule, Boolean(state?.running), formatDate);
   return (
     <Stack gap="lg">
       <PageHeader title="总览" description="后台服务、当前节点与已验证直连策略" actions={<Button leftSection={<Play size={16} />} loading={planMutation.isPending || run.running} onClick={() => void prepareQuickStart()}>一键优选</Button>} />
@@ -114,7 +116,7 @@ export function OverviewPage() {
       {state?.last_error && <Alert color="red" title="上次任务失败">{state.last_error}</Alert>}
       <SimpleGrid cols={{ base: 2, md: 4 }} spacing="sm">
         <Metric label="后台服务" value={<Group gap={7}><ThemeIcon size="sm" color={state ? 'green' : 'red'} variant="light"><Activity size={14} /></ThemeIcon>{state?.running ? '优选运行中' : '运行正常'}</Group>} detail={`协议 v${status.data?.protocol_version ?? '—'}`} accent="#2b8a5a" />
-        <Metric label="下次周期" value="约 5 小时 54 分" detail="周期 6 小时 · 网络变化触发" accent="#1677a6" />
+        <Metric label="下次周期" value={schedule.value} detail={schedule.detail} accent="#1677a6" />
         <Metric label="代理适配" value={`${detected} 个已检测`} detail="仅显示可验证的适配器状态" accent="#7a59a8" />
         <Metric label="Cloudflare 网段" value={`${(ranges.data?.ipv4.length ?? 0) + (ranges.data?.ipv6.length ?? 0)} 条`} detail={`${ranges.data?.source ?? '读取中'} · ${formatDate(ranges.data?.fetched_at)}`} accent="#c47a12" />
       </SimpleGrid>
@@ -142,7 +144,7 @@ export function OverviewPage() {
       </div>
 
       <Section title="最近事件">
-        {(history.data ?? []).slice(0, 4).map((item) => <div className="event-row" key={item.id}><span className={`event-severity ${item.error ? 'warning' : 'success'}`} /><Text size="sm" className="event-time tabular">{formatDate(item.finished_at)}</Text><Text size="sm" fw={550}>{item.error ? '优选部分完成' : '优选任务完成'}</Text><Text size="sm" c="dimmed" lineClamp={1}>{item.switch_reason || '未发生节点切换'}</Text></div>)}
+        {(history.data ?? []).slice(0, 4).map((item) => <div className="event-row" key={item.id}><span className={`event-severity ${item.error ? 'warning' : 'success'}`} /><Text size="sm" className="event-time tabular">{formatDate(item.finished_at)}</Text><Text size="sm" fw={550}>{formatRunEventTitle(item)}</Text><Text size="sm" c="dimmed" lineClamp={1}>{formatRunEventDetail(item)}</Text></div>)}
       </Section>
       <QuickStartDialog
         opened={isConfirming}

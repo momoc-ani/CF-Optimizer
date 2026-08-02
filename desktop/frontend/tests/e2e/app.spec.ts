@@ -27,6 +27,15 @@ test('九个核心页面可导航且保持在工作区内', async ({ page }, tes
   await page.screenshot({ path: testInfo.outputPath('core-pages-final.png'), fullPage: false });
 });
 
+test('总览展示后台调度时间和真实运行摘要', async ({ page }, testInfo) => {
+  await page.goto('/');
+  await expect(page.getByText('下次周期', { exact: true })).toBeVisible();
+  await expect(page.getByText('周期 6h0m0s · 周期执行', { exact: true })).toBeVisible();
+  await expect(page.getByText('约 5 小时 54 分', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('已完成 · 27/1000 合格', { exact: true })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('overview-schedule.png'), fullPage: false });
+});
+
 test('主题切换和优选任务状态可操作', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: '切换主题' }).click();

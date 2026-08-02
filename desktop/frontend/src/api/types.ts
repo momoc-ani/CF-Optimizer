@@ -98,12 +98,20 @@ export interface PhysicalPath {
   gateway_ipv6?: string;
 }
 
+export interface ScheduleStatus {
+  enabled: boolean;
+  interval: string;
+  next_scheduled_at?: string;
+  trigger?: 'startup' | 'interval' | 'network_change' | 'retry' | 'running' | 'disabled';
+}
+
 export interface SystemStatus {
   build: BuildMetadata;
   protocol_version: number;
   state: ServiceState;
   physical_path: PhysicalPath;
   active_event?: OptimizerEvent;
+  schedule: ScheduleStatus;
 }
 
 export interface BenchmarkResult {

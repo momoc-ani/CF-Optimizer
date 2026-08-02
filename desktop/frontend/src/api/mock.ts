@@ -48,6 +48,7 @@ const baseStatus = (): SystemStatus => ({
     last_ended_at: iso(-3),
     running,
   },
+  schedule: { enabled: true, interval: '6h0m0s', next_scheduled_at: iso(354), trigger: 'interval' },
   physical_path: { interface: 'Ethernet 2', interface_index: 12, source_ipv4: ['192.168.50.24'], source_ipv6: ['2408:8214:1320::24'], gateway_ipv4: '192.168.50.1', gateway_ipv6: 'fe80::1' },
   active_event: activeEvent,
 });
