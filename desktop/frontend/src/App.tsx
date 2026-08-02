@@ -11,6 +11,7 @@ import { useRun } from './hooks/useRun';
 
 const OverviewPage = lazy(() => import('./pages/OverviewPage').then((module) => ({ default: module.OverviewPage })));
 const BenchmarkPage = lazy(() => import('./pages/BenchmarkPage').then((module) => ({ default: module.BenchmarkPage })));
+const AccelerationPage = lazy(() => import('./pages/AccelerationPage').then((module) => ({ default: module.AccelerationPage })));
 const ProxyPage = lazy(() => import('./pages/ProxyPage').then((module) => ({ default: module.ProxyPage })));
 const RoutesPage = lazy(() => import('./pages/RoutesPage').then((module) => ({ default: module.RoutesPage })));
 const RangesPage = lazy(() => import('./pages/RangesPage').then((module) => ({ default: module.RangesPage })));
@@ -18,7 +19,7 @@ const HistoryPage = lazy(() => import('./pages/HistoryPage').then((module) => ({
 const LogsPage = lazy(() => import('./pages/LogsPage').then((module) => ({ default: module.LogsPage })));
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((module) => ({ default: module.SettingsPage })));
 
-const pages = { overview: OverviewPage, benchmark: BenchmarkPage, proxy: ProxyPage, routes: RoutesPage, ranges: RangesPage, history: HistoryPage, logs: LogsPage, settings: SettingsPage };
+const pages = { overview: OverviewPage, benchmark: BenchmarkPage, acceleration: AccelerationPage, proxy: ProxyPage, routes: RoutesPage, ranges: RangesPage, history: HistoryPage, logs: LogsPage, settings: SettingsPage };
 
 function Workspace() {
   const status = useStatus();

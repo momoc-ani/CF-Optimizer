@@ -127,7 +127,7 @@ export function SettingsPage() {
   const queryClient = useQueryClient();
   const { colorScheme, setColorScheme } = useMantineColorScheme();
   const form = useForm<SettingsForm>({ resolver: zodResolver(settingsSchema), defaultValues: {
-    scheduleEnabled: true, scheduleInterval: '6h', runOnNetworkChange: true, ipv4: true, ipv6: true, candidates: 1000, concurrency: 200, connectAttempts: 4, lossLimitPercent: 25, switchImprovementPercent: 15, downloadURL: '', tlsServerName: '', rangeRefreshInterval: '24h', rangeInclude: '', rangeExclude: '', proxyAutoDetect: true, accelerationEnabled: true, accelerationManualDomains: 'ani.momoc.top', accelerationExcludedDomains: '', accelerationAutoDiscover: true, accelerationAutoApply: false, accelerationDiscoveryInterval: '15s', networkInterface: '', gatewayIPv4: '', gatewayIPv6: '', manageRoutes: false,
+    scheduleEnabled: true, scheduleInterval: '6h', runOnNetworkChange: true, ipv4: true, ipv6: true, candidates: 1000, concurrency: 200, connectAttempts: 4, lossLimitPercent: 25, switchImprovementPercent: 15, downloadURL: '', tlsServerName: '', rangeRefreshInterval: '24h', rangeInclude: '', rangeExclude: '', proxyAutoDetect: true, accelerationEnabled: true, accelerationManualDomains: 'ani.momoc.top', accelerationExcludedDomains: '', accelerationAutoDiscover: true, accelerationAutoApply: true, accelerationDiscoveryInterval: '15s', networkInterface: '', gatewayIPv4: '', gatewayIPv6: '', manageRoutes: false,
   } });
   useEffect(() => { if (config.data) form.reset(formFromConfig(config.data)); }, [config.data, form]);
   const save = useMutation({

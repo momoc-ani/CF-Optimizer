@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/netip"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,5 +92,49 @@ func TestTrimDiscoveredDomainsPreservesActiveAndNewestRecords(t *testing.T) {
 	}
 	if _, exists := domains["active.example"]; !exists {
 		t.Fatalf("active discovery was evicted: %#v", domains)
+	}
+}
+
+func TestDomainDiscoverySnapshotReturnsSanitizedPolicyEvidence(t *testing.T) {
+	stateStore, err := store.Open(t.TempDir(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appliedAt := time.Now().UTC().Truncate(time.Second)
+	receipts, err := json.Marshal(proxy.ApplyResult{Receipts: []proxy.Receipt{
+		{Adapter: cleanupAdapterMihomo, Payload: json.RawMessage(`{"secret_backup":"do-not-expose"}`)},
+		{Adapter: cleanupAdapterGeneric},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Update(func(state *store.State) error {
+		state.Policy = &store.PolicySnapshot{
+			DomainMappings: []store.DomainMappingSnapshot{{Domain: "ani.momoc.top", Addresses: []string{"104.21.94.176"}}},
+			Receipts:       receipts,
+			AppliedAt:      appliedAt,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runtimeState := &Runtime{Config: config.Default(), Store: stateStore}
+	result := runtimeState.domainDiscoverySnapshot()
+	if len(result.Domains) != 1 {
+		t.Fatalf("unexpected acceleration domains: %#v", result.Domains)
+	}
+	domain := result.Domains[0]
+	if domain.Domain != "ani.momoc.top" || !domain.Active || len(domain.AcceleratedAddresses) != 1 || domain.AcceleratedAddresses[0] != "104.21.94.176" {
+		t.Fatalf("active domain mapping evidence is incomplete: %#v", domain)
+	}
+	if len(domain.VerifiedAdapters) != 2 || domain.VerifiedAdapters[0] != cleanupAdapterGeneric || domain.VerifiedAdapters[1] != cleanupAdapterMihomo || !domain.AppliedAt.Equal(appliedAt) {
+		t.Fatalf("verified adapter evidence is incomplete: %#v", domain)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "do-not-expose") || strings.Contains(string(encoded), "secret_backup") {
+		t.Fatal("domain snapshot exposed receipt payload")
 	}
 }

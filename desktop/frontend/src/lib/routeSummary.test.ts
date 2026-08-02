@@ -15,7 +15,6 @@ const selection = (policyVerified: boolean): Selection => ({
 const serviceState = (overrides: Partial<ServiceState>): ServiceState => ({
   version: 1,
   updated_at: '2026-08-01T23:08:18Z',
-  history: [],
   running: false,
   ...overrides,
 });

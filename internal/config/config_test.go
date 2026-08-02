@@ -27,6 +27,9 @@ func TestLoadMergesDefaults(t *testing.T) {
 	if cfg.Schedule.Interval.Duration() != 6*time.Hour {
 		t.Fatalf("unexpected interval: %s", cfg.Schedule.Interval)
 	}
+	if !cfg.Acceleration.Enabled || !cfg.Acceleration.AutoDiscover || !cfg.Acceleration.AutoApply {
+		t.Fatalf("域名加速默认值未启用自动发现和自动应用：%#v", cfg.Acceleration)
+	}
 	if got := cfg.AccelerationDomains(); len(got) != 1 || got[0] != "ani.momoc.top" {
 		t.Fatalf("unexpected default acceleration domains: %#v", got)
 	}

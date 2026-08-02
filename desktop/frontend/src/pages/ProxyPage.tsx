@@ -1,12 +1,9 @@
 import { Alert, Button, Group, SimpleGrid, Stack, Text } from '@mantine/core';
-import { notifications } from '@mantine/notifications';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ColumnDef } from '@tanstack/react-table';
-import { Cable, RefreshCw, ScanSearch, ShieldCheck, ShieldQuestion } from 'lucide-react';
+import { Cable, RefreshCw, ShieldCheck, ShieldQuestion } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { request } from '../api/client';
-import { queryKeys, useAccelerationDomains, useProxies } from '../api/hooks';
-import type { DomainDiscovery, DomainDiscoveryResult, ProxyDetection } from '../api/types';
+import { useProxies } from '../api/hooks';
+import type { ProxyDetection } from '../api/types';
 import { DataTable } from '../components/DataTable';
 import { ErrorState, LoadingState, Metric, PageHeader, Section } from '../components/Page';
 import { StatusBadge } from '../components/StatusBadge';
@@ -40,8 +37,6 @@ function buildAdapterRows(detections: Record<string, ProxyDetection>): AdapterRo
 /** ProxyPage 展示代理内核检测结果和可审计的验证边界。 */
 export function ProxyPage() {
   const proxies = useProxies();
-  const domains = useAccelerationDomains();
-  const queryClient = useQueryClient();
   const rows = useMemo(() => buildAdapterRows(proxies.data ?? {}), [proxies.data]);
   const [selectedID, setSelectedID] = useState<string>();
   const selected = rows.find((row) => row.id === selectedID) ?? rows[0];
@@ -53,23 +48,6 @@ export function ProxyPage() {
     { accessorKey: 'verification', header: '验证依据', size: 180 },
     { accessorKey: 'message', header: '后台结果', size: 300, cell: ({ getValue }) => <Text size="sm" c="dimmed">{String(getValue() ?? '无附加信息')}</Text> },
   ], []);
-  const domainColumns = useMemo<ColumnDef<DomainDiscovery>[]>(() => [
-    { accessorKey: 'domain', header: '精确域名', size: 240, cell: ({ getValue }) => <Text ff="monospace" size="sm">{String(getValue())}</Text> },
-    { accessorKey: 'source', header: '来源', size: 100 },
-    { accessorKey: 'cloudflare_verified', header: 'Cloudflare', size: 120, cell: ({ getValue }) => <StatusBadge label={getValue<boolean>() ? '已确认' : '待确认'} tone={getValue<boolean>() ? 'verified' : 'neutral'} /> },
-    { accessorKey: 'preflight_verified', header: 'SNI 预检', size: 110, cell: ({ getValue }) => <StatusBadge label={getValue<boolean>() ? '通过' : '未通过'} tone={getValue<boolean>() ? 'verified' : 'warning'} /> },
-    { accessorKey: 'active', header: '策略', size: 100, cell: ({ getValue }) => <StatusBadge label={getValue<boolean>() ? '已激活' : '仅记录'} tone={getValue<boolean>() ? 'verified' : 'neutral'} /> },
-    { accessorKey: 'last_error', header: '结果', size: 300, cell: ({ getValue }) => <Text size="sm" c="dimmed">{String(getValue() ?? '验证通过')}</Text> },
-  ], []);
-  const discover = useMutation({
-    mutationFn: () => request<DomainDiscoveryResult>('acceleration.discover'),
-    onSuccess: async (result) => {
-      notifications.show({ color: 'green', title: '发现完成', message: `观察 ${result.observed} 个连接，确认 ${result.verified} 个 Cloudflare 域名` });
-      await queryClient.invalidateQueries({ queryKey: queryKeys.accelerationDomains });
-    },
-    onError: (error: Error) => notifications.show({ color: 'red', title: '发现失败', message: error.message }),
-  });
-
   if (proxies.isLoading) return <LoadingState rows={7} />;
   if (proxies.isError) return <ErrorState message={proxies.error.message} onRetry={() => proxies.refetch()} />;
   const detected = rows.filter((row) => row.present).length;
@@ -115,14 +93,6 @@ export function ProxyPage() {
           ) : <Text c="dimmed">选择一个适配器查看详情。</Text>}
         </Section>
       </div>
-      <Section
-        title="自动发现的加速域名"
-        aside={<Button variant="light" leftSection={<ScanSearch size={16} />} loading={discover.isPending} onClick={() => discover.mutate()}>立即发现</Button>}
-      >
-        {domains.isError ? <ErrorState message={domains.error.message} onRetry={() => domains.refetch()} /> : (
-          <DataTable columns={domainColumns} data={domains.data?.domains ?? []} minWidth={920} rowKey={(row) => row.domain} emptyTitle="尚无自动发现域名" emptyDetail="发现记录仅保存在本机。" />
-        )}
-      </Section>
     </Stack>
   );
 }

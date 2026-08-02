@@ -27,8 +27,9 @@ func TestEffectiveDomainsMergesManualAuthorizedAndExcluded(t *testing.T) {
 	}
 }
 
-func TestEffectiveDomainsKeepsDiscoveriesInactiveByDefault(t *testing.T) {
+func TestEffectiveDomainsKeepsDiscoveriesInactiveWhenAutoApplyIsDisabled(t *testing.T) {
 	cfg := config.Default()
+	cfg.Acceleration.AutoApply = false
 	state := store.State{DiscoveredDomains: map[string]store.DomainDiscovery{
 		"auto.example": {Domain: "auto.example", CloudflareVerified: true, PreflightVerified: true, Active: true},
 	}}

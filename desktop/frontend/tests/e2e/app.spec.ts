@@ -1,8 +1,8 @@
 import { expect, test } from '@playwright/test';
 
-const pages = ['总览', '测速优选', '代理适配', '网络路由', '网段管理', '历史记录', '日志诊断', '设置'];
+const pages = ['总览', '测速优选', '域名加速', '代理适配', '网络路由', '网段管理', '历史记录', '日志诊断', '设置'];
 
-test('八个核心页面可导航且保持在工作区内', async ({ page }, testInfo) => {
+test('九个核心页面可导航且保持在工作区内', async ({ page }, testInfo) => {
   await page.goto('/');
   for (const name of pages) {
     await page.getByRole('button', { name, exact: true }).click();
@@ -37,6 +37,16 @@ test('主题切换和优选任务状态可操作', async ({ page }) => {
   await expect(page.getByText(/TCP 初筛|下载复筛|选择节点|更新网段/).first()).toBeVisible();
   await page.getByRole('button', { name: '取消当前任务' }).click();
   await expect(page.getByText('任务已取消').first()).toBeVisible();
+});
+
+test('域名加速页面展示完整的直连验证证据', async ({ page }, testInfo) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: '域名加速', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '域名加速', exact: true })).toBeVisible();
+  await expect(page.getByText('ani.momoc.top').first()).toBeVisible();
+  await expect(page.getByText('Mihomo DIRECT').first()).toBeVisible();
+  await expect(page.getByText('HTTPS 与物理直连证据完整')).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('acceleration-page.png'), fullPage: false });
 });
 
 test('一键优选先展示影响确认再执行', async ({ page }) => {

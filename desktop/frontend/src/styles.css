@@ -406,6 +406,7 @@ select {
 }
 
 .proxy-layout,
+.acceleration-layout,
 .routes-layout,
 .history-layout {
   grid-template-columns: minmax(0, 1fr) 340px;
@@ -538,6 +539,7 @@ select {
   .overview-grid,
   .split-layout,
   .proxy-layout,
+  .acceleration-layout,
   .routes-layout,
   .history-layout,
   .ranges-grid,

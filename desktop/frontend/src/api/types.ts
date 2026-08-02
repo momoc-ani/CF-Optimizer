@@ -42,8 +42,6 @@ export interface ServiceState {
   updated_at: string;
   current_ipv4?: Selection;
   current_ipv6?: Selection;
-  history: RunSummary[];
-  discovered_domains?: Record<string, DomainDiscovery>;
   last_error?: string;
   last_started_at?: string;
   last_ended_at?: string;
@@ -59,6 +57,9 @@ export interface DomainDiscovery {
   preflight_verified: boolean;
   active: boolean;
   last_resolved_addresses?: string[];
+  accelerated_addresses?: string[];
+  verified_adapters?: string[];
+  applied_at?: string;
   last_error?: string;
 }
 

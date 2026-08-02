@@ -197,11 +197,19 @@ func (r *Runtime) DetectProxyAdapters(ctx context.Context) map[string]proxy.Dete
 
 // DomainDiscoveryResult 汇总一次只读连接观察及可能触发的策略刷新。
 type DomainDiscoveryResult struct {
-	Observed        int                     `json:"observed"`
-	Verified        int                     `json:"verified"`
-	Activated       int                     `json:"activated"`
-	PolicyRefreshed bool                    `json:"policy_refreshed"`
-	Domains         []store.DomainDiscovery `json:"domains"`
+	Observed        int                        `json:"observed"`
+	Verified        int                        `json:"verified"`
+	Activated       int                        `json:"activated"`
+	PolicyRefreshed bool                       `json:"policy_refreshed"`
+	Domains         []DomainAccelerationStatus `json:"domains"`
+}
+
+// DomainAccelerationStatus 提供域名发现状态和不含回滚正文的已验证策略证据。
+type DomainAccelerationStatus struct {
+	store.DomainDiscovery
+	AcceleratedAddresses []string  `json:"accelerated_addresses,omitempty"`
+	VerifiedAdapters     []string  `json:"verified_adapters,omitempty"`
+	AppliedAt            time.Time `json:"applied_at,omitempty"`
 }
 
 // DiscoverAccelerationDomains 从 Mihomo 活动连接发现精确域名，并用物理 DNS 与 HTTPS 预检确认。
@@ -346,9 +354,25 @@ func (r *Runtime) domainDiscoverySnapshot() DomainDiscoveryResult {
 		records[domain] = record
 	}
 	activeMappings := map[string][]string{}
+	var verifiedAdapters []string
+	var policyAppliedAt time.Time
 	if state.Policy != nil {
+		policyAppliedAt = state.Policy.AppliedAt
 		for _, mapping := range state.Policy.DomainMappings {
 			activeMappings[mapping.Domain] = append([]string(nil), mapping.Addresses...)
+		}
+		var applied proxy.ApplyResult
+		if err := json.Unmarshal(state.Policy.Receipts, &applied); err == nil {
+			seenAdapters := map[string]struct{}{}
+			for _, receipt := range applied.Receipts {
+				if receipt.Adapter != "" {
+					seenAdapters[receipt.Adapter] = struct{}{}
+				}
+			}
+			for adapter := range seenAdapters {
+				verifiedAdapters = append(verifiedAdapters, adapter)
+			}
+			sort.Strings(verifiedAdapters)
 		}
 	}
 	for _, domain := range view.Config.AccelerationDomains() {
@@ -362,9 +386,15 @@ func (r *Runtime) domainDiscoverySnapshot() DomainDiscoveryResult {
 		}
 		records[domain] = record
 	}
-	result := DomainDiscoveryResult{Domains: make([]store.DomainDiscovery, 0, len(records))}
+	result := DomainDiscoveryResult{Domains: make([]DomainAccelerationStatus, 0, len(records))}
 	for _, record := range records {
-		result.Domains = append(result.Domains, record)
+		status := DomainAccelerationStatus{DomainDiscovery: record}
+		if addresses, active := activeMappings[record.Domain]; active {
+			status.AcceleratedAddresses = append([]string(nil), addresses...)
+			status.VerifiedAdapters = append([]string(nil), verifiedAdapters...)
+			status.AppliedAt = policyAppliedAt
+		}
+		result.Domains = append(result.Domains, status)
 	}
 	sort.Slice(result.Domains, func(i, j int) bool {
 		if result.Domains[i].Source != result.Domains[j].Source {

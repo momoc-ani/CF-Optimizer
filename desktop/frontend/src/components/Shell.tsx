@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { ActionIcon, Group, Text, Tooltip, useMantineColorScheme } from '@mantine/core';
-import { Activity, Cable, ChartNoAxesCombined, Gauge, History, ListTree, Moon, Network, Route, Settings, Sun, TestTubeDiagonal } from 'lucide-react';
+import { Activity, Cable, ChartNoAxesCombined, Gauge, Globe2, History, ListTree, Moon, Network, Route, Settings, Sun, TestTubeDiagonal } from 'lucide-react';
 import type { SystemStatus } from '../api/types';
 import { type PageKey, useUIStore } from '../state/ui';
 import { StatusBadge } from './StatusBadge';
@@ -8,6 +8,7 @@ import { StatusBadge } from './StatusBadge';
 const navigation: Array<{ key: PageKey; label: string; icon: typeof Gauge }> = [
   { key: 'overview', label: '总览', icon: Gauge },
   { key: 'benchmark', label: '测速优选', icon: Activity },
+  { key: 'acceleration', label: '域名加速', icon: Globe2 },
   { key: 'proxy', label: '代理适配', icon: Cable },
   { key: 'routes', label: '网络路由', icon: Route },
   { key: 'ranges', label: '网段管理', icon: Network },

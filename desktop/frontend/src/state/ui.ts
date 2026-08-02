@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-export type PageKey = 'overview' | 'benchmark' | 'proxy' | 'routes' | 'ranges' | 'history' | 'logs' | 'settings';
+export type PageKey = 'overview' | 'benchmark' | 'acceleration' | 'proxy' | 'routes' | 'ranges' | 'history' | 'logs' | 'settings';
 
 interface UIState {
   page: PageKey;
