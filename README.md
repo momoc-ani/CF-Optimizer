@@ -17,7 +17,7 @@ CF Optimizer 是面向 Windows、Linux 和 macOS 的 Cloudflare 节点测速、�
 - 支持 Generic Route、Mihomo、sing-box、Xray、版本化 External JSON-RPC 与可选 Windows Hosts 适配。
 - 将手动或已验证自动发现的 Cloudflare 精确域名映射到当前优选 IP，同时保留 TLS SNI 与 HTTP Host；Mihomo 可自动发现活动控制端口和配置，其他内核使用同一领域策略生成受管片段。
 - 通过 Windows Service、systemd 或 LaunchDaemon 运行后台服务；关闭桌面窗口会隐藏到系统托盘，退出 UI 不会停止服务或正在运行的任务。
-- 提供总览、测速优选、代理适配、网络路由、网段管理、历史、日志诊断和设置八个桌面页面。
+- 提供总览、测速优选、域名加速、代理适配、网络路由、网段管理、历史、日志诊断和设置九个桌面页面。
 
 ### 进程与权限边界
 
@@ -51,6 +51,10 @@ Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix
 2. 打开 CF Optimizer，等待总览连接后台并自动完成只读物理出口预检。
 3. 点击“一键优选”，在一个确认框内核对接口、网关和影响范围，选择“仅本次应用”或“以后自动维护”，然后开始。
 
+完成第三步后无需额外操作：后台会把已验证的优选 IP 用于域名加速，默认管理 `ani.momoc.top`，并自动发现和应用其他已验证的 Cloudflare 域名。独立“域名加速”页用于查看 TLS SNI、HTTP Host、代理 `DIRECT`、物理接口和网关等证据，也可在此维护手动域名、排除域名和自动策略；“设置”页不再重复这些选项。
+
+自动发现不等于无条件接管所有访问域名。只有通过 Cloudflare 身份、TLS/Host 预检、策略应用和物理出口验证的域名才会显示“已加速”；未通过的域名保留为待验证或失败状态。
+
 确认前不会修改路由、Hosts、代理策略或持续维护配置。后台负责网段更新、测速、策略应用、实际选路验证和失败回滚；界面只显示“已验证”“仅测速完成”“部分完成”或“已回滚”，不会把配置写入描述为直连成功。
 
 自动预检失败时仍可选择“仅测速”。只有此时才需要进入高级设置手工填写物理接口/网关，或使用网络路由页和 CLI 收集更多诊断证据。
@@ -61,7 +65,7 @@ Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix
 
 - `network.manage_routes: false`：默认不修改系统路由。
 - `benchmark.download_url: ""`：默认不产生下载测速流量。
-- `acceleration.manual_domains: [ani.momoc.top]`：首个手动加速域名；自动发现默认开启但自动应用默认关闭，发现结果只保存在本机。
+- `acceleration.manual_domains: [ani.momoc.top]`：首个手动加速域名；自动发现和自动应用默认开启，发现周期为 `15s`，但只有完整验证通过后才显示“已加速”。
 - 测速 Dialer 不读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `ALL_PROXY`。
 - `ranges.max_change_percent` 限制远程网段异常变化。
 - 代理密钥不会写入诊断导出；日志和导出还会再次脱敏。
@@ -131,7 +135,7 @@ The project does not treat a successful configuration write as proof that traffi
 - Integrate with Generic Route, Mihomo, sing-box, Xray, versioned External JSON-RPC, and optional Windows Hosts adapters.
 - Map manually configured or verified auto-discovered Cloudflare hostnames to the selected IP while preserving TLS SNI and HTTP Host. Mihomo can discover its active controller and configuration; other cores consume the same domain policy through managed fragments.
 - Run under Windows Service, systemd, or LaunchDaemon. Closing the desktop window hides it to the system tray; quitting the UI does not stop the service or an active task.
-- Provide eight operational views: overview, benchmark, proxy adapters, routes, ranges, history, logs/diagnostics, and settings.
+- Provide nine operational views: overview, benchmark, domain acceleration, proxy adapters, routes, ranges, history, logs/diagnostics, and settings.
 
 ### Process and privilege boundary
 
@@ -165,6 +169,10 @@ Do not install the Linux service under WSL to manage Windows host networking. In
 2. Open CF Optimizer and wait for the Overview to connect to the service and finish its read-only physical-egress preflight.
 3. Select One-click Optimize, review the interface, gateway, and effects in one confirmation dialog, choose Apply once or Maintain automatically, and start.
 
+No additional step is required after step 3. The service uses the verified selected IP for domain acceleration, manages `ani.momoc.top` by default, and automatically discovers and applies other verified Cloudflare hostnames. Use the dedicated Domain Acceleration view to inspect TLS SNI, HTTP Host, proxy `DIRECT`, physical interface, and gateway evidence, or to manage manual domains, exclusions, and automatic behavior. These controls are no longer duplicated in Settings.
+
+Automatic discovery does not unconditionally take over every visited hostname. A hostname is shown as Accelerated only after Cloudflare identity, TLS/Host preflight, policy application, and physical-egress verification succeed; other observations remain pending or failed.
+
 Before confirmation, the application does not change routes, Hosts, proxy policy, or persistent maintenance settings. The service owns range refresh, benchmarking, policy application, effective-route verification, and rollback. The UI reports only Verified, Benchmark only, Partially completed, or Rolled back; a configuration write is never presented as proof of direct traffic.
 
 When automatic preflight fails, Benchmark remains available. Only then is it necessary to enter manual interface/gateway overrides in Advanced settings or collect more evidence from Routes diagnostics and the CLI.
@@ -175,7 +183,7 @@ See [config.example.yaml](config.example.yaml) for every field. Important defaul
 
 - `network.manage_routes: false`: the default configuration does not change system routes.
 - `benchmark.download_url: ""`: download benchmark traffic is disabled by default.
-- `acceleration.manual_domains: [ani.momoc.top]`: the first manual acceleration hostname. Discovery is enabled by default, automatic activation is disabled, and observations remain local.
+- `acceleration.manual_domains: [ani.momoc.top]`: the first manual acceleration hostname. Discovery and automatic activation are enabled by default with a `15s` interval, but a hostname is shown as Accelerated only after complete verification.
 - Benchmark dialers do not read `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY`.
 - `ranges.max_change_percent` limits abnormal remote range changes.
 - Proxy secrets are excluded from diagnostics, and exported logs are redacted again.
