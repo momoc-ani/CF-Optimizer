@@ -1,8 +1,8 @@
-import { Alert, Button, Checkbox, Group, NumberInput, SegmentedControl, SimpleGrid, Stack, Switch, Text, TextInput, Textarea, useMantineColorScheme } from '@mantine/core';
+import { ActionIcon, Alert, Button, Checkbox, Group, NumberInput, SegmentedControl, SimpleGrid, Stack, Switch, Text, TextInput, Textarea, Tooltip, useMantineColorScheme } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Save, ShieldAlert } from 'lucide-react';
+import { Github, Save, ShieldAlert } from 'lucide-react';
 import { Controller, useForm } from 'react-hook-form';
 import { useEffect } from 'react';
 import { z } from 'zod';
@@ -11,6 +11,19 @@ import { queryKeys, useConfig } from '../api/hooks';
 import type { AppConfig } from '../api/types';
 import { ErrorState, LoadingState, PageHeader, Section } from '../components/Page';
 import { joinConfigLines } from '../lib/configCollections';
+import { BrowserOpenURL } from '../wailsjs/wailsjs/runtime/runtime';
+
+const sourceRepositoryURL = 'https://github.com/momoc-ani/CF-Optimizer';
+const projectCopyright = 'Copyright (c) 2026 CF Optimizer Contributors';
+
+/** openSourceRepository 使用 Wails 打开外部仓库，开发预览时回退到浏览器标签页。 */
+function openSourceRepository() {
+  if (!('runtime' in window)) {
+    window.open(sourceRepositoryURL, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  BrowserOpenURL(sourceRepositoryURL);
+}
 
 const durationPattern = /^\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h)$/;
 const settingsSchema = z.object({
@@ -175,6 +188,18 @@ export function SettingsPage() {
             </Section>
             <Section title="界面主题" className="inspector-section">
               <SegmentedControl fullWidth value={colorScheme} onChange={(value) => setColorScheme(value as 'light' | 'dark' | 'auto')} data={[{ label: '浅色', value: 'light' }, { label: '深色', value: 'dark' }, { label: '跟随系统', value: 'auto' }]} />
+            </Section>
+            <Section title="关于" className="inspector-section">
+              <Group justify="space-between" align="flex-start" wrap="nowrap">
+                <Stack gap={3}>
+                  <Text fw={650}>CF Optimizer</Text>
+                  <Text size="xs" c="dimmed">{projectCopyright}</Text>
+                  <Text size="xs" c="dimmed">MIT License · 使用、修改和分发时须保留版权及许可声明</Text>
+                </Stack>
+                <Tooltip label="在 GitHub 打开源码仓库">
+                  <ActionIcon aria-label="打开 GitHub 源码仓库" variant="light" onClick={openSourceRepository}><Github size={18} /></ActionIcon>
+                </Tooltip>
+              </Group>
             </Section>
             <Section title="配置位置" className="inspector-section">
               <div className="property-grid"><Text c="dimmed">数据目录</Text><Text ff="monospace">{config.data.data_dir}</Text><Text c="dimmed">IPC 端点</Text><Text ff="monospace">{config.data.ipc.endpoint}</Text><Text c="dimmed">配置版本</Text><Text>v{config.data.version}</Text></div>

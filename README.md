@@ -72,6 +72,10 @@ Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix
 
 一键优选会先自动发现物理接口和网关，并在确认框中显示影响范围；自动发现失败时才需要手工覆盖。不要尝试绕过 VPN Kill Switch；无法验证物理出口时应保持路由管理关闭。
 
+### 开源许可
+
+CF Optimizer 采用 [MIT License](LICENSE) 开源。任何人均可使用、复制、修改、发布、分发、再许可或商业使用，但必须在副本或软件的重要部分中保留版权和许可声明。源码仓库：[GitHub](https://github.com/momoc-ani/CF-Optimizer)。
+
 ### 从源码开发
 
 需要 Go 1.23+、Node.js 22+。桌面构建还需要 Wails CLI；Linux 额外需要 `libgtk-3-dev` 和 `libwebkit2gtk-4.1-dev`。
@@ -189,6 +193,10 @@ See [config.example.yaml](config.example.yaml) for every field. Important defaul
 - Proxy secrets are excluded from diagnostics, and exported logs are redacted again.
 
 One-click Optimize discovers the physical interface and gateway first and shows the effects for confirmation. Manual overrides are needed only when automatic discovery fails. Do not try to bypass a VPN Kill Switch; keep route management disabled when physical egress cannot be verified.
+
+### Open-source license
+
+CF Optimizer is released under the [MIT License](LICENSE). Anyone may use, copy, modify, publish, distribute, sublicense, or sell the software, provided that the copyright and permission notices are retained in all copies or substantial portions. Source repository: [GitHub](https://github.com/momoc-ani/CF-Optimizer).
 
 ### Development from source
 

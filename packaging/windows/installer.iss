@@ -22,7 +22,7 @@ AppId={{4F32CB57-870E-4BBA-A75C-0A5E5FEAB48D}
 AppName=CF Optimizer
 AppVersion={#MyVersion}
 AppPublisher=CF Optimizer Contributors
-AppPublisherURL=https://gitee.com/aurora-momoc/cf-optimizer
+AppPublisherURL=https://github.com/momoc-ani/CF-Optimizer
 DefaultDirName={autopf}\CF Optimizer
 DefaultGroupName=CF Optimizer
 ArchitecturesAllowed={#AllowedArchitecture}
@@ -32,6 +32,7 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 SetupIconFile=..\wails\windows\icon.ico
+LicenseFile=..\..\LICENSE
 UninstallDisplayIcon={app}\cf-optimizer-ui.exe
 OutputDir={#OutputDir}
 OutputBaseFilename=cf-optimizer-{#MyVersion}-windows-{#MyArch}-setup
@@ -43,6 +44,7 @@ RestartApplications=no
 Source: "{#SourceDir}\cf-optimizer.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\cf-optimizerd.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\cf-optimizer-ui.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\MicrosoftEdgeWebview2Setup.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall skipifsourcedoesntexist
 
 [Icons]
