@@ -227,8 +227,9 @@ jobs:
         shell: pwsh
         env:
           TARGET_ARCH: ${{ matrix.arch }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          $version = $env:RELEASE_TAG -replace '^v', ''
           $stage = (Resolve-Path "dist/stage-windows-$env:TARGET_ARCH").Path
           $output = (Resolve-Path "dist/release").Path
           $webviewInstaller = Join-Path $stage "MicrosoftEdgeWebview2Setup.exe"
