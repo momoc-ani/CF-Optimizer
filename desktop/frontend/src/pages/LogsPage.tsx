@@ -9,6 +9,7 @@ import type { DiagnosticReport } from '../api/types';
 import { DataTable } from '../components/DataTable';
 import { ErrorState, LoadingState, PageHeader, Section } from '../components/Page';
 import { StatusBadge } from '../components/StatusBadge';
+import { routeDiagnosticPresentation } from '../lib/diagnostics';
 import { formatDate } from '../lib/format';
 import { redactLogLine } from '../lib/redact';
 import { useUIStore } from '../state/ui';
@@ -75,6 +76,7 @@ export function LogsPage() {
   if (logs.isLoading) return <LoadingState rows={7} />;
   if (logs.isError) return <ErrorState message={logs.error.message} onRetry={() => logs.refetch()} />;
   const report = diagnostic.data;
+  const presentation = report ? routeDiagnosticPresentation(report) : undefined;
   return (
     <Stack gap="lg">
       <PageHeader title="日志诊断" description="结构化运行日志、关联事务和按目标直连诊断" actions={<Group gap="xs"><Button variant="light" leftSection={<RefreshCw size={16} />} loading={logs.isFetching} onClick={() => logs.refetch()}>刷新</Button><Button variant="light" leftSection={<Download size={16} />} disabled={!filtered.length} onClick={exportLogs}>导出日志</Button></Group>} />
@@ -84,7 +86,7 @@ export function LogsPage() {
             <TextInput label="Cloudflare 目标 IP" value={target} onChange={(event) => { setTarget(event.currentTarget.value); diagnostic.reset(); }} ff="monospace" />
             <Button leftSection={<ScanSearch size={16} />} loading={diagnostic.isPending} disabled={!target.trim()} onClick={() => diagnostic.mutate()}>运行诊断</Button>
             {diagnostic.isError && <Alert color="red" title="诊断失败">{diagnostic.error.message}</Alert>}
-            {report && <Alert color={report.verified ? 'green' : 'yellow'} icon={report.verified ? <ShieldCheck size={17} /> : <ShieldAlert size={17} />} title={report.verified ? '证据已验证' : '证据不足'}>{report.verified ? `${report.direct_connection?.local_address ?? '未知本地地址'} -> ${report.direct_connection?.remote_address ?? report.target}` : report.direct_connection?.error ?? '未能验证路由与连接。'}</Alert>}
+            {presentation && <Alert color={presentation.verified ? 'green' : 'yellow'} icon={presentation.verified ? <ShieldCheck size={17} /> : <ShieldAlert size={17} />} title={presentation.verified ? '证据已验证' : '证据不足'}>{presentation.detail}</Alert>}
             {(report?.warnings ?? []).map((warning) => <Text key={warning} size="xs" c="orange">{warning}</Text>)}
           </Stack>
         </Section>

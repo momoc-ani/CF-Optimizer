@@ -180,11 +180,16 @@ export async function mockRequest<T>(method: string, parameters: Record<string, 
       JSON.stringify({ time: iso(-6), level: 'INFO', component: 'benchmark', msg: '候选连接质量测试完成', run_id: 'run-20260801-0930', candidates: 1000, qualified: 27 }),
     ] as T;
     case 'diagnostics.route': return {
-      target: String(parameters.target ?? ''), physical_path: baseStatus().physical_path,
-      expected_route: routes[0].route, observed_route: routes[0].verification,
-      direct_connection: { local_address: '192.168.50.24:52413', remote_address: `${parameters.target}:443` },
-      virtual_interfaces: ['Mihomo Tun'], proxy_processes: ['mihomo.exe'],
-      warnings: ['检测到 TUN 接口；主机路由优先级已验证，但无法证明第三方 Kill Switch 未在更低层过滤。'], verified: true,
+      generated_at: iso(0), platform: 'windows', physical_path: baseStatus().physical_path,
+      route: {
+        target: String(parameters.target ?? ''),
+        resolved: routes[0].verification,
+        socket_source: '192.168.50.24', socket_connected: true,
+        interface_matches: true, gateway_matches: true, source_matches: true, verified_direct: true,
+      },
+      virtual_interfaces: ['Mihomo Tun'], detected_proxy_processes: ['mihomo.exe'],
+      proxy_environment_set: false, direct_policy_verified: true,
+      warnings: ['已验证系统选路和 Socket 源地址；透明代理仍需结合代理 DIRECT 策略验证。'],
     } as DiagnosticReport as T;
     default: throw new Error(`mock method ${method} is not implemented`);
   }

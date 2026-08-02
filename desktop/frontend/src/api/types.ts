@@ -198,6 +198,10 @@ export interface RouteSpec {
   metric: number;
 }
 
+export interface ResolvedRoute extends RouteSpec {
+  source_address?: string;
+}
+
 export interface RouteTransaction {
   id: string;
   operation: string;
@@ -286,13 +290,23 @@ export interface AppConfig {
 }
 
 export interface DiagnosticReport {
-  target: string;
+  generated_at: string;
+  platform: string;
   physical_path: PhysicalPath;
-  expected_route?: RouteSpec;
-  observed_route?: RouteSpec & { source_address?: string };
-  direct_connection?: { local_address?: string; remote_address?: string; error?: string };
-  virtual_interfaces?: string[];
-  proxy_processes?: string[];
-  warnings?: string[];
-  verified: boolean;
+  route: {
+    target: string;
+    resolved: ResolvedRoute;
+    socket_source?: string;
+    socket_connected: boolean;
+    interface_matches: boolean;
+    gateway_matches: boolean;
+    source_matches: boolean;
+    verified_direct: boolean;
+    error?: string;
+  };
+  virtual_interfaces: string[] | null;
+  detected_proxy_processes: string[] | null;
+  proxy_environment_set: boolean;
+  direct_policy_verified: boolean;
+  warnings: string[];
 }

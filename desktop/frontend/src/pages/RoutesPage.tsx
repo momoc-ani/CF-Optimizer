@@ -9,6 +9,7 @@ import type { DiagnosticReport, RouteTransaction } from '../api/types';
 import { DataTable } from '../components/DataTable';
 import { ErrorState, LoadingState, Metric, PageHeader, Section } from '../components/Page';
 import { StatusBadge } from '../components/StatusBadge';
+import { routeDiagnosticPresentation } from '../lib/diagnostics';
 import { formatDate } from '../lib/format';
 import { countCurrentVerifiedRoutes, countTemporaryRoutesRequiringCleanup } from '../lib/routeSummary';
 import { useUIStore } from '../state/ui';
@@ -53,6 +54,7 @@ export function RoutesPage() {
   const temporary = countTemporaryRoutesRequiringCleanup(rows);
   const path = status.data?.physical_path;
   const report = diagnostic.data;
+  const presentation = report ? routeDiagnosticPresentation(report) : undefined;
   return (
     <Stack gap="lg">
       <PageHeader title="网络路由" description="物理出口、路由事务与直连诊断证据" actions={<Button variant="light" leftSection={<RefreshCw size={16} />} loading={routes.isFetching} onClick={() => Promise.all([routes.refetch(), status.refetch()])}>刷新状态</Button>} />
@@ -83,10 +85,10 @@ export function RoutesPage() {
               </div>
               <Button leftSection={<ScanSearch size={16} />} loading={diagnostic.isPending} onClick={() => diagnostic.mutate(routeTarget(selected))}>运行直连诊断</Button>
               {diagnostic.isError && <Alert color="red" title="诊断失败">{diagnostic.error.message}</Alert>}
-              {report && (
+              {report && presentation && (
                 <Stack gap="sm">
-                  <Alert color={report.verified ? 'green' : 'yellow'} icon={report.verified ? <ShieldCheck size={17} /> : <ShieldAlert size={17} />} title={report.verified ? '路由与连接证据已验证' : '未能验证直连路径'}>
-                    {report.verified ? `本地地址 ${report.direct_connection?.local_address ?? '未知'}；远端 ${report.direct_connection?.remote_address ?? report.target}` : report.direct_connection?.error ?? '后台未返回完整证据。'}
+                  <Alert color={presentation.verified ? 'green' : 'yellow'} icon={presentation.verified ? <ShieldCheck size={17} /> : <ShieldAlert size={17} />} title={presentation.verified ? '路由与连接证据已验证' : '未能验证直连路径'}>
+                    {presentation.detail}
                   </Alert>
                   {(report.warnings ?? []).map((warning) => <Text key={warning} size="sm" c="orange">{warning}</Text>)}
                 </Stack>
