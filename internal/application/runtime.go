@@ -271,6 +271,7 @@ func (r *Runtime) DiscoverAccelerationDomains(ctx context.Context) (DomainDiscov
 			record.LastSeenAt = now
 			if view.Config.Acceleration.AutoApply && !record.Active {
 				record.Active = true
+				record.LastError = ""
 				activatedDomains[domain] = struct{}{}
 			}
 			updates[domain] = record
@@ -390,6 +391,7 @@ func (r *Runtime) domainDiscoverySnapshot() DomainDiscoveryResult {
 	for _, record := range records {
 		status := DomainAccelerationStatus{DomainDiscovery: record}
 		if addresses, active := activeMappings[record.Domain]; active {
+			status.LastError = ""
 			status.AcceleratedAddresses = append([]string(nil), addresses...)
 			status.VerifiedAdapters = append([]string(nil), verifiedAdapters...)
 			status.AppliedAt = policyAppliedAt

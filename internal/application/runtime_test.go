@@ -109,6 +109,10 @@ func TestDomainDiscoverySnapshotReturnsSanitizedPolicyEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := stateStore.Update(func(state *store.State) error {
+		state.DiscoveredDomains["ani.momoc.top"] = store.DomainDiscovery{
+			Domain: "ani.momoc.top", CloudflareVerified: true, PreflightVerified: true,
+			LastError: "自动应用失败: an optimization run is already active",
+		}
 		state.Policy = &store.PolicySnapshot{
 			DomainMappings: []store.DomainMappingSnapshot{{Domain: "ani.momoc.top", Addresses: []string{"104.21.94.176"}}},
 			Receipts:       receipts,
@@ -124,7 +128,7 @@ func TestDomainDiscoverySnapshotReturnsSanitizedPolicyEvidence(t *testing.T) {
 		t.Fatalf("unexpected acceleration domains: %#v", result.Domains)
 	}
 	domain := result.Domains[0]
-	if domain.Domain != "ani.momoc.top" || !domain.Active || len(domain.AcceleratedAddresses) != 1 || domain.AcceleratedAddresses[0] != "104.21.94.176" {
+	if domain.Domain != "ani.momoc.top" || !domain.Active || domain.LastError != "" || len(domain.AcceleratedAddresses) != 1 || domain.AcceleratedAddresses[0] != "104.21.94.176" {
 		t.Fatalf("active domain mapping evidence is incomplete: %#v", domain)
 	}
 	if len(domain.VerifiedAdapters) != 2 || domain.VerifiedAdapters[0] != cleanupAdapterGeneric || domain.VerifiedAdapters[1] != cleanupAdapterMihomo || !domain.AppliedAt.Equal(appliedAt) {
