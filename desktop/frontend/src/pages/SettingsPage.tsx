@@ -11,18 +11,17 @@ import { queryKeys, useConfig } from '../api/hooks';
 import type { AppConfig } from '../api/types';
 import { ErrorState, LoadingState, PageHeader, Section } from '../components/Page';
 import { joinConfigLines } from '../lib/configCollections';
-import { BrowserOpenURL } from '../wailsjs/wailsjs/runtime/runtime';
 
 const sourceRepositoryURL = 'https://github.com/momoc-ani/CF-Optimizer';
 const projectCopyright = 'Copyright (c) 2026 CF Optimizer Contributors';
 
 /** openSourceRepository 使用 Wails 打开外部仓库，开发预览时回退到浏览器标签页。 */
 function openSourceRepository() {
-  if (!('runtime' in window)) {
+  if (!window.runtime?.BrowserOpenURL) {
     window.open(sourceRepositoryURL, '_blank', 'noopener,noreferrer');
     return;
   }
-  BrowserOpenURL(sourceRepositoryURL);
+  window.runtime.BrowserOpenURL(sourceRepositoryURL);
 }
 
 const durationPattern = /^\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h)$/;

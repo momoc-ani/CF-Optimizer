@@ -4,7 +4,10 @@ import type { OptimizerEvent } from './types';
 declare global {
   interface Window {
     go?: { desktop?: { Bridge?: { Request(method: string, parameters: Record<string, unknown>): Promise<string> } } };
-    runtime?: { EventsOn(name: string, callback: (payload: string) => void): () => void };
+    runtime?: {
+      BrowserOpenURL?(url: string): void;
+      EventsOn(name: string, callback: (payload: string) => void): () => void;
+    };
   }
 }
 
