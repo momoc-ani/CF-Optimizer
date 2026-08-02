@@ -19,6 +19,7 @@ import (
 	"github.com/cf-optimizer/cf-optimizer/internal/ipc"
 	cfnetwork "github.com/cf-optimizer/cf-optimizer/internal/network"
 	"github.com/cf-optimizer/cf-optimizer/internal/optimizer"
+	"github.com/cf-optimizer/cf-optimizer/internal/store"
 	"github.com/cf-optimizer/cf-optimizer/internal/version"
 )
 
@@ -37,6 +38,18 @@ type API struct {
 	buildManagedSession   managedSessionBuilder
 	saveConfig            func(string, config.Config) error
 	now                   func() time.Time
+}
+
+// statusState 仅包含普通状态轮询所需字段，避免通过 IPC 暴露节点明细和策略回滚收据。
+type statusState struct {
+	Version       int              `json:"version"`
+	UpdatedAt     time.Time        `json:"updated_at"`
+	CurrentIPv4   *store.Selection `json:"current_ipv4,omitempty"`
+	CurrentIPv6   *store.Selection `json:"current_ipv6,omitempty"`
+	LastError     string           `json:"last_error,omitempty"`
+	LastStartedAt time.Time        `json:"last_started_at,omitempty"`
+	LastEndedAt   time.Time        `json:"last_ended_at,omitempty"`
+	Running       bool             `json:"running"`
 }
 
 // NewAPI 创建后台服务业务处理器。
@@ -94,15 +107,23 @@ func (a *API) Handle(ctx context.Context, request ipc.Request, emit func(any) er
 	}
 }
 
+// systemStatus 返回可高频轮询的精简状态，历史和领域明细由各自的只读接口提供。
 func (a *API) systemStatus() map[string]any {
 	a.activeMutex.Lock()
 	activeEvent := cloneEvent(a.activeEvent)
 	a.activeMutex.Unlock()
 	view := a.runtime.View()
+	state := a.runtime.Store.Snapshot()
 	return map[string]any{
 		"build": version.Metadata(), "protocol_version": ipc.ProtocolVersion,
-		"state": a.runtime.Store.Snapshot(), "physical_path": view.PhysicalPath,
-		"active_event": activeEvent,
+		"state": statusState{
+			Version: state.Version, UpdatedAt: state.UpdatedAt,
+			CurrentIPv4: state.CurrentIPv4, CurrentIPv6: state.CurrentIPv6,
+			LastError: state.LastError, LastStartedAt: state.LastStartedAt,
+			LastEndedAt: state.LastEndedAt, Running: state.Running,
+		},
+		"physical_path": view.PhysicalPath,
+		"active_event":  activeEvent,
 	}
 }
 
