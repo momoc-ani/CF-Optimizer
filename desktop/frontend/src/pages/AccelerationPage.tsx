@@ -124,7 +124,7 @@ export function AccelerationPage() {
   const columns = useMemo<ColumnDef<DomainRow>[]>(() => [
     { accessorKey: 'domain', header: '域名', size: 220, cell: ({ getValue }) => <Text ff="monospace" size="sm" fw={650}>{String(getValue())}</Text> },
     { accessorKey: 'source', header: '来源', size: 105, cell: ({ getValue }) => String(getValue()) === 'manual' ? '手动' : '自动发现' },
-    { id: 'mapping', header: '优选 IP 映射', size: 220, accessorFn: (row) => row.accelerated_addresses?.join(', '), cell: ({ row }) => <Stack gap={2}>{(row.original.accelerated_addresses ?? []).map((address) => <Text key={address} ff="monospace" size="sm">{address}</Text>)}{!row.original.accelerated_addresses?.length && <Text c="dimmed" size="sm">待映射</Text>}</Stack> },
+    { id: 'mapping', header: '优选 IP 分配', size: 220, accessorFn: (row) => row.accelerated_addresses?.join(', '), cell: ({ row }) => <Stack gap={2}>{(row.original.accelerated_addresses ?? []).map((address) => <Text key={address} ff="monospace" size="sm">{address}</Text>)}{!row.original.accelerated_addresses?.length && <Text c="dimmed" size="sm">待分配</Text>}</Stack> },
     { accessorKey: 'cloudflare_verified', header: 'Cloudflare', size: 118, cell: ({ getValue }) => <StatusBadge label={getValue<boolean>() ? '已确认' : '待确认'} tone={getValue<boolean>() ? 'verified' : 'neutral'} /> },
     { accessorKey: 'preflight_verified', header: 'SNI / Host', size: 115, cell: ({ getValue }) => <StatusBadge label={getValue<boolean>() ? '已验证' : '待验证'} tone={getValue<boolean>() ? 'verified' : 'neutral'} /> },
     { accessorKey: 'policyLabel', header: '直连策略', size: 180, cell: ({ row }) => <StatusBadge label={row.original.policyLabel} tone={row.original.active ? 'verified' : 'neutral'} /> },
@@ -174,7 +174,7 @@ export function AccelerationPage() {
     <Stack gap="lg">
       <PageHeader
         title="域名加速"
-        description="Cloudflare 域名发现、优选 IP 映射与直连验证"
+        description="手动域名优先、自动发现域名继续消费剩余优选 IP"
         actions={<>
           <Tooltip label="刷新域名、路由与状态"><ActionIcon aria-label="刷新域名加速状态" variant="light" loading={domains.isFetching || routes.isFetching || status.isFetching} onClick={refreshAll}><RefreshCw size={17} /></ActionIcon></Tooltip>
           <Button leftSection={<ScanSearch size={16} />} loading={discover.isPending} disabled={!accelerationConfig?.enabled || !accelerationConfig.auto_discover} onClick={() => discover.mutate()}>立即发现</Button>
@@ -198,7 +198,7 @@ export function AccelerationPage() {
               <Controller control={form.control} name="discoveryInterval" render={({ field }) => <TextInput {...field} label="发现间隔" error={errors.discoveryInterval?.message} />} />
             </SimpleGrid>
             <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
-              <Controller control={form.control} name="manualDomains" render={({ field }) => <Textarea {...field} label="手动域名" autosize minRows={3} ff="monospace" placeholder="每行一个精确域名" />} />
+              <Controller control={form.control} name="manualDomains" render={({ field }) => <Textarea {...field} label="手动域名（越靠前优先级越高）" autosize minRows={3} ff="monospace" placeholder="每行一个精确域名" />} />
               <Controller control={form.control} name="excludedDomains" render={({ field }) => <Textarea {...field} label="排除域名" autosize minRows={3} ff="monospace" placeholder="每行一个精确域名" />} />
             </SimpleGrid>
           </Stack>
@@ -223,7 +223,7 @@ export function AccelerationPage() {
               <div className="property-grid">
                 <Text c="dimmed">来源</Text><Text>{selected.source === 'manual' ? '手动域名' : 'Mihomo 自动发现'}</Text>
                 <Text c="dimmed">物理 DNS</Text><Text ff="monospace">{selected.last_resolved_addresses?.join(', ') || '—'}</Text>
-                <Text c="dimmed">优选映射</Text><Text ff="monospace">{selected.accelerated_addresses?.join(', ') || '—'}</Text>
+                <Text c="dimmed">优选 IP</Text><Text ff="monospace">{selected.accelerated_addresses?.join(', ') || '—'}</Text>
                 <Text c="dimmed">TLS SNI</Text><Text ff="monospace">{selected.domain}</Text>
                 <Text c="dimmed">HTTP Host</Text><Text ff="monospace">{selected.domain}</Text>
                 <Text c="dimmed">已验证策略</Text><Text>{selected.verified_adapters?.map((adapter) => adapterLabels[adapter] ?? adapter).join(', ') || '—'}</Text>

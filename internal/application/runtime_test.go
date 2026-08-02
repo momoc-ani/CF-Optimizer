@@ -95,6 +95,45 @@ func TestTrimDiscoveredDomainsPreservesActiveAndNewestRecords(t *testing.T) {
 	}
 }
 
+func TestDomainPolicyNeedsRefreshFollowsAutomaticAllocationSwitches(t *testing.T) {
+	cfg := config.Default()
+	cfg.Acceleration.Enabled = true
+	cfg.Acceleration.AutoDiscover = true
+	cfg.Acceleration.AutoApply = true
+	cfg.Acceleration.ManualDomains = []string{"manual.example"}
+	state := store.State{
+		DiscoveredDomains: map[string]store.DomainDiscovery{
+			"auto.example": {
+				Domain: "auto.example", CloudflareVerified: true, PreflightVerified: true, Active: true,
+				LastResolvedAddresses: []string{"104.18.1.10"},
+			},
+		},
+		Policy: &store.PolicySnapshot{DomainMappings: []store.DomainMappingSnapshot{
+			{Domain: "manual.example", Addresses: []string{"1.1.1.1"}},
+		}},
+	}
+	if domainPolicyNeedsRefresh(cfg, state) {
+		t.Fatal("an exhausted pool may leave an automatic domain unassigned without repeated refresh")
+	}
+	state.Policy.DomainMappings = append(state.Policy.DomainMappings, store.DomainMappingSnapshot{Domain: "auto.example", Addresses: []string{"1.1.1.2"}})
+	if domainPolicyNeedsRefresh(cfg, state) {
+		t.Fatal("matching manual and automatic allocations should not refresh")
+	}
+	state.Policy.DomainMappings[1].Addresses = []string{"1.1.1.1"}
+	if !domainPolicyNeedsRefresh(cfg, state) {
+		t.Fatal("shared legacy domain address should force a new allocation")
+	}
+	state.Policy.DomainMappings[1].Addresses = []string{"1.1.1.2"}
+	cfg.Acceleration.AutoDiscover = false
+	if !domainPolicyNeedsRefresh(cfg, state) {
+		t.Fatal("disabling automatic discovery should remove an old automatic allocation")
+	}
+	state.Policy.DomainMappings = state.Policy.DomainMappings[:1]
+	if domainPolicyNeedsRefresh(cfg, state) {
+		t.Fatal("manual-only allocation should remain valid when automatic discovery is disabled")
+	}
+}
+
 func TestDomainDiscoverySnapshotReturnsSanitizedPolicyEvidence(t *testing.T) {
 	stateStore, err := store.Open(t.TempDir(), 10)
 	if err != nil {

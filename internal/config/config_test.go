@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +45,18 @@ func TestAccelerationDomainsMergesLegacyAndHonorsExclusions(t *testing.T) {
 	got := cfg.AccelerationDomains()
 	if len(got) != 2 || got[0] != "ani.momoc.top" || got[1] != "legacy.example" {
 		t.Fatalf("AccelerationDomains() = %#v", got)
+	}
+}
+
+func TestAccelerationDomainsPreservesManualPriorityOrder(t *testing.T) {
+	cfg := Default()
+	cfg.Acceleration.ManualDomains = []string{"z-priority.example", "a-second.example", "z-priority.example"}
+	cfg.Hosts.Domains = []string{"legacy-third.example"}
+
+	got := cfg.AccelerationDomains()
+	want := []string{"z-priority.example", "a-second.example", "legacy-third.example"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("AccelerationDomains() = %#v, want %#v", got, want)
 	}
 }
 

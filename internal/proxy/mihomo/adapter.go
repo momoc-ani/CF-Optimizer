@@ -132,10 +132,10 @@ func (a *Adapter) Plan(_ context.Context, policy proxy.DirectPolicy) (proxy.Plan
 		expectedHash = contentHash(existing)
 	}
 	payloadDocument := planPayload{Content: content, ExpectedHash: expectedHash, Rules: rules}
-	if len(policy.DomainMappings) > 0 {
-		if a.config.ReloadConfig == "" {
-			return proxy.Plan{}, errors.New("Mihomo active config path is required for domain mappings")
-		}
+	if len(policy.DomainMappings) > 0 && a.config.ReloadConfig == "" {
+		return proxy.Plan{}, errors.New("Mihomo active config path is required for domain mappings")
+	}
+	if a.config.ReloadConfig != "" {
 		configContent, configExists, readErr := readOptionalFile(a.config.ReloadConfig)
 		if readErr != nil {
 			return proxy.Plan{}, fmt.Errorf("read Mihomo active config: %w", readErr)

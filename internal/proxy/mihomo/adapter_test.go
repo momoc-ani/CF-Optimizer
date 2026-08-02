@@ -136,6 +136,57 @@ func TestAdapterApplyVerifyRollbackAndIdempotency(t *testing.T) {
 	}
 }
 
+func TestPlanRemovesPreviouslyManagedHostsWhenMappingsBecomeEmpty(t *testing.T) {
+	directory := t.TempDir()
+	providerPath := filepath.Join(directory, "cf-optimizer.yaml")
+	activeConfigPath := filepath.Join(directory, "config.yaml")
+	if err := os.WriteFile(providerPath, []byte("payload: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	activeConfig := []byte("hosts:\n  dash.cloudflare.com: 172.66.2.98\nrules:\n  - DOMAIN,dash.cloudflare.com,DIRECT\n  - MATCH,proxy\n")
+	if err := os.WriteFile(activeConfigPath, activeConfig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	metadata := managedMetadata{
+		Version:        managedMetadataVersion,
+		ManagedDomains: []string{"dash.cloudflare.com"},
+		OriginalHosts:  map[string]originalHostValue{"dash.cloudflare.com": {Exists: false}},
+		ManagedRules:   []string{"DOMAIN,dash.cloudflare.com,DIRECT"},
+		OriginalRules:  map[string]bool{"DOMAIN,dash.cloudflare.com,DIRECT": false},
+	}
+	metadataContent, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(managedMetadataPath(providerPath), metadataContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default().Proxy.Mihomo
+	cfg.Enabled = true
+	cfg.Controller = "http://127.0.0.1:9090"
+	cfg.ProviderFile = providerPath
+	cfg.ReloadConfig = activeConfigPath
+	adapter, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := (proxy.DirectPolicy{IPv4CIDRs: []string{"172.66.2.98/32"}, Domains: []string{"dash.cloudflare.com"}}).Normalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := adapter.Plan(context.Background(), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload planPayload
+	if err := json.Unmarshal(plan.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.ConfigContent) == 0 || strings.Contains(string(payload.ConfigContent), "dash.cloudflare.com: 172.66.2.98") {
+		t.Fatalf("stale managed host was not removed: %s", payload.ConfigContent)
+	}
+}
+
 func splitRule(rule string) []string {
 	for index := 0; index < len(rule); index++ {
 		if rule[index] == ',' {

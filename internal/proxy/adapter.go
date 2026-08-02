@@ -65,6 +65,28 @@ type ApplyResult struct {
 	Skipped  []string  `json:"skipped"`
 }
 
+// DomainVerificationError 标识真实连接验证失败的精确域名，供策略层隔离单个自动发现项。
+type DomainVerificationError struct {
+	Domain string
+	Err    error
+}
+
+// Error 返回包含失败域名的验证错误。
+func (e *DomainVerificationError) Error() string {
+	if e == nil {
+		return "domain connection verification failed"
+	}
+	return fmt.Sprintf("verify domain %s connection: %v", e.Domain, e.Err)
+}
+
+// Unwrap 保留底层网络错误链。
+func (e *DomainVerificationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 // Coordinator 按顺序应用适配器，并在任一步失败时逆序回滚。
 type Coordinator struct {
 	adapters []Adapter

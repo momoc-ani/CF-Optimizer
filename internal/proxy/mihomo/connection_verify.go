@@ -32,7 +32,7 @@ func (a *Adapter) verifyMappedConnections(ctx context.Context, mappings []proxy.
 		err := a.verifyMappedConnection(verifyContext, proxyAddress, mapping)
 		cancel()
 		if err != nil {
-			return err
+			return &proxy.DomainVerificationError{Domain: mapping.Domain, Err: err}
 		}
 	}
 	return nil

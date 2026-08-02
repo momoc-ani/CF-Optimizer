@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/netip"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,8 +44,37 @@ func (staticBenchmark) Run(_ context.Context, addresses []netip.Addr, progress f
 }
 
 type recordingPolicy struct {
-	policies  []proxy.DirectPolicy
-	rollbacks []proxy.ApplyResult
+	capabilities   proxy.Capabilities
+	rejectedDomain string
+	policies       []proxy.DirectPolicy
+	rollbacks      []proxy.ApplyResult
+}
+
+type staticDomainResolver struct {
+	addresses []netip.Addr
+}
+
+func (r staticDomainResolver) Resolve(context.Context, string) ([]netip.Addr, error) {
+	return append([]netip.Addr(nil), r.addresses...), nil
+}
+
+type selectiveDomainVerifier struct {
+	rejected map[string]map[string]bool
+}
+
+func (v *selectiveDomainVerifier) VerifyPreflight(_ context.Context, mappings []proxy.DomainMapping) error {
+	for _, mapping := range mappings {
+		for _, address := range mapping.Addresses {
+			if v.rejected[mapping.Domain][address] {
+				return errors.New("incompatible domain address")
+			}
+		}
+	}
+	return nil
+}
+
+func (*selectiveDomainVerifier) VerifyApplied(context.Context, []proxy.DomainMapping) error {
+	return nil
 }
 
 type delayedRouteBackend struct {
@@ -85,12 +117,20 @@ func (b *delayedRouteBackend) Resolve(_ context.Context, target netip.Addr) (cfn
 	return cfnetwork.ResolvedRoute{}, cfnetwork.ErrRouteNotFound
 }
 
-func (*recordingPolicy) Capabilities() proxy.Capabilities {
-	return proxy.Capabilities{IPv4: true}
+func (p *recordingPolicy) Capabilities() proxy.Capabilities {
+	if p.capabilities == (proxy.Capabilities{}) {
+		return proxy.Capabilities{IPv4: true}
+	}
+	return p.capabilities
 }
 
 func (p *recordingPolicy) Apply(_ context.Context, policy proxy.DirectPolicy) (proxy.ApplyResult, error) {
 	p.policies = append(p.policies, policy)
+	for _, mapping := range policy.DomainMappings {
+		if mapping.Domain == p.rejectedDomain {
+			return proxy.ApplyResult{}, fmt.Errorf("adapter verification: %w", &proxy.DomainVerificationError{Domain: mapping.Domain, Err: errors.New("connection evidence mismatch")})
+		}
+	}
 	payload, _ := json.Marshal(policy)
 	return proxy.ApplyResult{Receipts: []proxy.Receipt{{ID: "test", Adapter: "test", Changed: true, Payload: payload}}}, nil
 }
@@ -134,6 +174,131 @@ func TestRunnerAppliesAndPersistsVerifiedSelection(t *testing.T) {
 	}
 }
 
+func TestAllocateDomainMappingsUsesManualConfigurationAndRankingOrder(t *testing.T) {
+	policyApplier := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
+	runner, _ := newTestRunner(t, policyApplier)
+	runner.config.Acceleration.ManualDomains = []string{"priority.example", "second.example", "unassigned.example"}
+	runner.domainResolver = staticDomainResolver{addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{
+		"priority.example": {"1.1.1.1": true},
+	}}
+	snapshot := ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}
+	results := []benchmark.Result{
+		{IP: netip.MustParseAddr("1.1.1.1"), Qualified: true, TLSVerified: true, Score: 99},
+		{IP: netip.MustParseAddr("1.1.1.2"), Qualified: true, TLSVerified: true, Score: 98},
+		{IP: netip.MustParseAddr("1.1.1.3"), Qualified: true, TLSVerified: true, Score: 97},
+	}
+
+	mappings, warnings := runner.allocateDomainMappings(context.Background(), snapshot, results, store.State{})
+	if len(warnings) != 1 || len(mappings) != 2 {
+		t.Fatalf("unexpected allocation result: mappings=%#v warnings=%#v", mappings, warnings)
+	}
+	if mappings[0].Domain != "priority.example" || mappings[0].Addresses[0] != "1.1.1.2" {
+		t.Fatalf("first manual domain did not consume ranked candidates in order: %#v", mappings)
+	}
+	if mappings[1].Domain != "second.example" || mappings[1].Addresses[0] != "1.1.1.3" {
+		t.Fatalf("second manual domain did not receive the next address: %#v", mappings)
+	}
+}
+
+func TestAllocateDomainMappingsGivesRemainingPoolToAutomaticDomains(t *testing.T) {
+	policyApplier := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
+	runner, stateStore := newTestRunner(t, policyApplier)
+	runner.config.Acceleration.Enabled = true
+	runner.config.Acceleration.AutoDiscover = true
+	runner.config.Acceleration.AutoApply = true
+	runner.config.Acceleration.ManualDomains = []string{"first.example", "second.example"}
+	runner.domainResolver = staticDomainResolver{addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	if err := stateStore.Update(func(state *store.State) error {
+		for _, domain := range []string{"auto-b.example", "auto-a.example"} {
+			state.DiscoveredDomains[domain] = store.DomainDiscovery{
+				Domain: domain, CloudflareVerified: true, PreflightVerified: true, Active: true,
+				LastResolvedAddresses: []string{"1.1.1.1"},
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	results := []benchmark.Result{
+		{IP: netip.MustParseAddr("1.1.1.1"), Qualified: true, Score: 99},
+		{IP: netip.MustParseAddr("1.1.1.2"), Qualified: true, Score: 98},
+		{IP: netip.MustParseAddr("1.1.1.3"), Qualified: true, Score: 97},
+		{IP: netip.MustParseAddr("1.1.1.4"), Qualified: true, Score: 96},
+	}
+
+	mappings, warnings := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, stateStore.Snapshot())
+	if len(warnings) != 0 || len(mappings) != 4 {
+		t.Fatalf("unexpected combined allocation: mappings=%#v warnings=%#v", mappings, warnings)
+	}
+	wantDomains := []string{"first.example", "second.example", "auto-a.example", "auto-b.example"}
+	for index, mapping := range mappings {
+		if mapping.Domain != wantDomains[index] || mapping.Addresses[0] != results[index].IP.String() {
+			t.Fatalf("combined pool allocation order is incorrect: %#v", mappings)
+		}
+	}
+}
+
+func TestAllocateDomainMappingsIgnoresAutomaticDomainsWithoutAllSwitches(t *testing.T) {
+	policyApplier := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
+	runner, stateStore := newTestRunner(t, policyApplier)
+	runner.config.Acceleration.Enabled = true
+	runner.config.Acceleration.AutoDiscover = false
+	runner.config.Acceleration.AutoApply = true
+	runner.config.Acceleration.ManualDomains = []string{"manual.example"}
+	runner.domainResolver = staticDomainResolver{addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	if err := stateStore.Update(func(state *store.State) error {
+		state.DiscoveredDomains["auto.example"] = store.DomainDiscovery{
+			Domain: "auto.example", CloudflareVerified: true, PreflightVerified: true, Active: true,
+			LastResolvedAddresses: []string{"1.1.1.1"},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	results := []benchmark.Result{
+		{IP: netip.MustParseAddr("1.1.1.1"), Qualified: true, Score: 99},
+		{IP: netip.MustParseAddr("1.1.1.2"), Qualified: true, Score: 98},
+	}
+
+	mappings, warnings := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, stateStore.Snapshot())
+	if len(warnings) != 0 || len(mappings) != 1 || mappings[0].Domain != "manual.example" || mappings[0].Addresses[0] != "1.1.1.1" {
+		t.Fatalf("automatic domain consumed the pool without all switches: mappings=%#v warnings=%#v", mappings, warnings)
+	}
+}
+
+func TestPolicyForDecisionsMapsAllocatedManualAndAutomaticDomains(t *testing.T) {
+	policyApplier := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, IPv6: true, Domains: true, DomainMappings: true}}
+	runner, stateStore := newTestRunner(t, policyApplier)
+	if err := stateStore.Update(func(state *store.State) error {
+		state.CurrentIPv4 = &store.Selection{IP: "1.1.1.1", Family: 4, PolicyVerified: true}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	report := RunReport{domainAllocationCompleted: true, domainMappings: []proxy.DomainMapping{
+		{Domain: "manual.example", Addresses: []string{"1.1.1.2"}},
+		{Domain: "auto.example", Addresses: []string{"1.1.1.3"}},
+	}}
+	policy, err := runner.policyForDecisions(stateStore.Snapshot(), report, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.DomainMappings) != 2 || policy.DomainMappings[0].Domain != "auto.example" || policy.DomainMappings[0].Addresses[0] != "1.1.1.3" || policy.DomainMappings[1].Domain != "manual.example" || policy.DomainMappings[1].Addresses[0] != "1.1.1.2" {
+		t.Fatalf("allocated domain mappings were not applied: %#v", policy.DomainMappings)
+	}
+	wantIPv4 := map[string]bool{"1.1.1.1/32": true, "1.1.1.2/32": true, "1.1.1.3/32": true}
+	for _, prefix := range policy.IPv4CIDRs {
+		delete(wantIPv4, prefix)
+	}
+	if len(wantIPv4) != 0 || len(policy.IPv6CIDRs) != 0 {
+		t.Fatalf("allocated addresses were not converted to host routes: %#v %#v", policy.IPv4CIDRs, policy.IPv6CIDRs)
+	}
+}
+
 func TestRunnerAccumulatesReceiptsAndCleansManagedPolicy(t *testing.T) {
 	policy := &recordingPolicy{}
 	runner, stateStore := newTestRunner(t, policy)
@@ -158,6 +323,53 @@ func TestRunnerAccumulatesReceiptsAndCleansManagedPolicy(t *testing.T) {
 	}
 	if err := runner.CleanupManagedPolicy(context.Background()); err != nil {
 		t.Fatalf("cleanup should be idempotent: %v", err)
+	}
+}
+
+func TestRunnerClearsUnsafeLegacyMappingsBeforeFailedReplacement(t *testing.T) {
+	policy := &recordingPolicy{
+		capabilities:   proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true},
+		rejectedDomain: "second.example",
+	}
+	runner, stateStore := newTestRunner(t, policy)
+	runner.config.Acceleration.Enabled = true
+	runner.config.Acceleration.ManualDomains = []string{"first.example", "second.example"}
+	runner.domainResolver = staticDomainResolver{addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	storedReceipts, err := json.Marshal(proxy.ApplyResult{Receipts: []proxy.Receipt{{ID: "legacy", Adapter: "test", Changed: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Update(func(state *store.State) error {
+		state.CurrentIPv4 = &store.Selection{IP: "1.1.1.1", Family: 4, PolicyVerified: true}
+		state.Policy = &store.PolicySnapshot{
+			DomainMappings: []store.DomainMappingSnapshot{
+				{Domain: "first.example", Addresses: []string{"1.1.1.1"}},
+				{Domain: "second.example", Addresses: []string{"1.1.1.1"}},
+			},
+			Receipts: storedReceipts,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runner.Run(context.Background(), RunOptions{ApplyPolicy: true}, nil); err == nil {
+		t.Fatal("replacement policy must fail its simulated connection verification")
+	}
+	state := stateStore.Snapshot()
+	if state.Policy == nil || len(state.Policy.DomainMappings) != 0 || state.CurrentIPv4 == nil {
+		t.Fatalf("replacement failure did not preserve the safe DNS policy: %#v", state.Policy)
+	}
+	if len(policy.policies) < 2 || len(policy.policies[0].DomainMappings) != 0 {
+		t.Fatalf("safe policy was not applied before the replacement attempt: %#v", policy.policies)
+	}
+	var currentReceipts proxy.ApplyResult
+	if err := json.Unmarshal(state.Policy.Receipts, &currentReceipts); err != nil {
+		t.Fatal(err)
+	}
+	if len(currentReceipts.Receipts) != 1 || currentReceipts.Receipts[0].ID == "legacy" {
+		t.Fatalf("broken legacy receipt chain was retained: %#v", currentReceipts)
 	}
 }
 
@@ -219,6 +431,101 @@ func TestRollbackRoutesUsesIndependentCleanupTimeouts(t *testing.T) {
 	}
 	if !errors.Is(canceledContext.Err(), context.Canceled) {
 		t.Fatal("test context should remain canceled")
+	}
+}
+
+func TestObsoletePolicyPrefixesReturnsOnlyRemovedHostRoutes(t *testing.T) {
+	previous := &store.PolicySnapshot{
+		IPv4CIDRs: []string{"1.1.1.1/32", "1.1.1.2/32"},
+		IPv6CIDRs: []string{"2606:4700::1/128"},
+	}
+	next := proxy.DirectPolicy{IPv4CIDRs: []string{"1.1.1.2/32", "1.1.1.3/32"}}
+	want := []string{"1.1.1.1/32", "2606:4700::1/128"}
+	if got := obsoletePolicyPrefixes(previous, next); !slices.Equal(got, want) {
+		t.Fatalf("obsoletePolicyPrefixes() = %#v, want %#v", got, want)
+	}
+}
+
+func TestRemoveObsoletePolicyRoutesHandlesDomainAllocationAddressChange(t *testing.T) {
+	oldRoute := cfnetwork.RouteSpec{Prefix: "104.18.1.10/32", Gateway: "192.0.2.1", Interface: "eth0", InterfaceIndex: 2, Metric: 5}
+	backend := &delayedRouteBackend{routes: map[string]cfnetwork.RouteSpec{oldRoute.Prefix: oldRoute}}
+	controller, err := cfnetwork.NewRouteController(t.TempDir(), backend, true, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Network.ManageRoutes = true
+	runner := &Runner{
+		config: cfg, routes: controller,
+		physicalPath: cfnetwork.PhysicalPath{Interface: "eth0", InterfaceIndex: 2, GatewayIPv4: "192.0.2.1"},
+	}
+	previous := &store.PolicySnapshot{IPv4CIDRs: []string{oldRoute.Prefix}}
+	next := proxy.DirectPolicy{IPv4CIDRs: []string{"104.18.1.12/32"}}
+
+	transactionIDs, err := runner.removeObsoletePolicyRoutes(context.Background(), previous, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(transactionIDs) != 1 {
+		t.Fatalf("obsolete domain allocation route did not create a removal transaction: %#v", transactionIDs)
+	}
+	if _, exists := backend.routes[oldRoute.Prefix]; exists {
+		t.Fatalf("obsolete domain allocation route remains: %#v", backend.routes)
+	}
+	if err := runner.rollbackRoutes(context.Background(), transactionIDs); err != nil {
+		t.Fatal(err)
+	}
+	if backend.routes[oldRoute.Prefix] != oldRoute {
+		t.Fatalf("removed domain allocation route was not restored by rollback: %#v", backend.routes)
+	}
+}
+
+func TestRefreshPolicyIsolatesFailedAutomaticDomainAndRetries(t *testing.T) {
+	policyApplier := &recordingPolicy{
+		capabilities:   proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true},
+		rejectedDomain: "bad.example",
+	}
+	runner, stateStore := newTestRunner(t, policyApplier)
+	runner.config.Acceleration.Enabled = true
+	runner.config.Acceleration.AutoDiscover = true
+	runner.config.Acceleration.AutoApply = true
+	runner.config.Acceleration.ManualDomains = nil
+	runner.domainResolver = staticDomainResolver{addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	if err := stateStore.Update(func(state *store.State) error {
+		state.CurrentIPv4 = &store.Selection{IP: "1.1.1.1", Family: 4, PolicyVerified: true}
+		state.Nodes["1.1.1.1"] = store.NodeStats{Successes: 2, AverageScore: 99}
+		state.Nodes["1.1.1.2"] = store.NodeStats{Successes: 2, AverageScore: 98}
+		state.DiscoveredDomains["bad.example"] = store.DomainDiscovery{
+			Domain: "bad.example", CloudflareVerified: true, PreflightVerified: true, Active: true,
+			LastResolvedAddresses: []string{"1.1.1.1"},
+		}
+		state.DiscoveredDomains["good.example"] = store.DomainDiscovery{
+			Domain: "good.example", CloudflareVerified: true, PreflightVerified: true, Active: true,
+			LastResolvedAddresses: []string{"1.1.1.1"},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runner.RefreshPolicy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(policyApplier.policies) != 2 {
+		t.Fatalf("policy was not retried after isolating one domain: %#v", policyApplier.policies)
+	}
+	finalPolicy := policyApplier.policies[1]
+	if len(finalPolicy.DomainMappings) != 1 || finalPolicy.DomainMappings[0].Domain != "good.example" || finalPolicy.DomainMappings[0].Addresses[0] != "1.1.1.1" {
+		t.Fatalf("failed automatic domain remained in retried policy or its IP was not reused: %#v", finalPolicy.DomainMappings)
+	}
+	state := stateStore.Snapshot()
+	failed := state.DiscoveredDomains["bad.example"]
+	if failed.Active || failed.PreflightVerified || !strings.Contains(failed.LastError, "connection evidence mismatch") {
+		t.Fatalf("failed automatic domain was not isolated: %#v", failed)
+	}
+	if !state.DiscoveredDomains["good.example"].Active {
+		t.Fatalf("healthy automatic domain was disabled: %#v", state.DiscoveredDomains["good.example"])
 	}
 }
 

@@ -36,14 +36,42 @@ func EffectiveDomains(cfg config.Config, state store.State) []string {
 	for _, domain := range cfg.AccelerationDomains() {
 		appendDomain(domain)
 	}
-	if cfg.Acceleration.AutoApply {
-		for _, discovery := range state.DiscoveredDomains {
-			if discovery.CloudflareVerified && discovery.PreflightVerified && discovery.Active {
-				appendDomain(discovery.Domain)
-			}
-		}
+	for _, discovery := range EffectiveDiscoveries(cfg, state) {
+		appendDomain(discovery.Domain)
 	}
 	sort.Strings(result)
+	return result
+}
+
+// EffectiveDiscoveries 仅在三项开关同时开启时返回可消费剩余优选 IP 的稳定发现记录。
+func EffectiveDiscoveries(cfg config.Config, state store.State) []store.DomainDiscovery {
+	if !cfg.Acceleration.Enabled || !cfg.Acceleration.AutoDiscover || !cfg.Acceleration.AutoApply {
+		return nil
+	}
+	excluded := make(map[string]struct{}, len(cfg.Acceleration.ExcludedDomains))
+	for _, domain := range cfg.Acceleration.ExcludedDomains {
+		excluded[normalizeDomain(domain)] = struct{}{}
+	}
+	manual := make(map[string]struct{}, len(cfg.AccelerationDomains()))
+	for _, domain := range cfg.AccelerationDomains() {
+		manual[normalizeDomain(domain)] = struct{}{}
+	}
+	result := make([]store.DomainDiscovery, 0, len(state.DiscoveredDomains))
+	for _, discovery := range state.DiscoveredDomains {
+		domain := normalizeDomain(discovery.Domain)
+		if domain == "" || !discovery.CloudflareVerified || !discovery.PreflightVerified || !discovery.Active || len(discovery.LastResolvedAddresses) == 0 {
+			continue
+		}
+		if _, blocked := excluded[domain]; blocked {
+			continue
+		}
+		if _, isManual := manual[domain]; isManual {
+			continue
+		}
+		discovery.Domain = domain
+		result = append(result, discovery)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Domain < result[j].Domain })
 	return result
 }
 

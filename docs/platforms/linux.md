@@ -97,10 +97,10 @@ NetworkManager、策略路由、容器网络、VPN Kill Switch 或代理 TUN 仍
 
 #### 域名加速与代理适配
 
-- `acceleration.manual_domains` 默认包含 `ani.momoc.top`。后台先通过绑定物理接口的 DNS 和保留正确 SNI/Host 的 HTTPS 预检确认它属于 Cloudflare，再将域名映射到当前优选 IP。
+- `acceleration.manual_domains` 默认包含 `ani.momoc.top`。后台按配置顺序优先消费测速排名池，每个手动域名独占一个通过其 SNI/Host 预检的优选 IP。
 - 未使用代理内核时，可启用 Hosts 适配器写入 `/etc/hosts`；系统主机路由仍负责把优选 IP 指向已验证的物理网关。
 - Mihomo/Clash 的控制端口会从本机监听进程自动探测，并在找到活动配置后热加载精确 `hosts` 与 `DIRECT` 规则。sing-box 和 Xray 使用显式配置的受管 JSON 片段与安全重载命令；无法识别的代理可使用 Generic Route 或 External JSON-RPC。
-- 自动发现只观察 Mihomo 活动连接，默认仅展示经 Cloudflare 网段和 HTTPS 预检确认的精确域名；`auto_apply` 默认关闭。订阅刷新、节点切换、失败、清理和卸载均通过累计收据逆序恢复。
+- 自动发现只观察 Mihomo 活动连接。仅当域名加速、自动发现和自动应用三项同时开启时，已验证自动域名才继续消费手动域名后的剩余优选 IP；池耗尽时保持未分配。订阅刷新、节点切换、失败、清理和卸载均通过累计收据逆序恢复。
 
 ### 6. 桌面界面与托盘
 
@@ -305,10 +305,10 @@ NetworkManager, policy routing, container networking, a VPN Kill Switch, or a pr
 
 #### Domain acceleration and proxy adapters
 
-- `acceleration.manual_domains` contains `ani.momoc.top` by default. The daemon first confirms Cloudflare ownership through physical-interface DNS and an HTTPS preflight that preserves SNI and Host, then maps the hostname to the selected IP.
+- `acceleration.manual_domains` contains `ani.momoc.top` by default. The daemon consumes the ranked pool in configuration order, assigning each manual hostname one exclusive optimized IP that passes its SNI and Host preflight.
 - Without a proxy core, enable the Hosts adapter to manage `/etc/hosts`; the verified physical gateway remains responsible for the selected IP host route.
 - Mihomo/Clash controller ports are discovered from local listening processes, and exact `hosts` plus `DIRECT` rules are hot-reloaded after the active configuration is found. sing-box and Xray use explicitly configured managed JSON fragments and reload commands. Unknown clients can use Generic Route or versioned External JSON-RPC.
-- Automatic discovery observes Mihomo connections only and, by default, merely lists exact hostnames that pass Cloudflare-range and HTTPS checks; `auto_apply` remains disabled. Subscription refresh, node switches, failures, cleanup, and uninstall restore cumulative receipts in reverse order.
+- Automatic discovery observes Mihomo connections only. Verified automatic hostnames consume the pool left after manual assignments only when acceleration, automatic discovery, and automatic apply are all enabled; exhausted pools leave later hostnames unassigned. Subscription refresh, node switches, failures, cleanup, and uninstall restore cumulative receipts in reverse order.
 
 ### 6. Desktop and tray
 

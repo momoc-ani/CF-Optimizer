@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -248,7 +249,6 @@ func (r *Runtime) DiscoverAccelerationDomains(ctx context.Context) (DomainDiscov
 		return r.domainDiscoverySnapshot(), err
 	}
 	stateBefore := r.Store.Snapshot()
-	targets := currentSelectionAddresses(stateBefore)
 	excluded := make(map[string]struct{}, len(view.Config.Acceleration.ExcludedDomains))
 	for _, domain := range view.Config.Acceleration.ExcludedDomains {
 		excluded[strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")] = struct{}{}
@@ -256,6 +256,18 @@ func (r *Runtime) DiscoverAccelerationDomains(ctx context.Context) (DomainDiscov
 	now := time.Now().UTC()
 	updates := map[string]store.DomainDiscovery{}
 	activatedDomains := map[string]struct{}{}
+	automaticAllocationEnabled := view.Config.Acceleration.Enabled && view.Config.Acceleration.AutoDiscover && view.Config.Acceleration.AutoApply
+	policyChanged := domainPolicyNeedsRefresh(view.Config, stateBefore)
+	for domain, record := range stateBefore.DiscoveredDomains {
+		_, blocked := excluded[domain]
+		if !record.Active || (automaticAllocationEnabled && !blocked) {
+			continue
+		}
+		record.Active = false
+		record.LastError = "自动应用已关闭或域名已排除"
+		updates[domain] = record
+		policyChanged = true
+	}
 	result := DomainDiscoveryResult{Observed: len(observations)}
 	for _, observation := range observations {
 		normalized, normalizeErr := (proxy.DirectPolicy{Domains: []string{observation.Host}}).Normalize()
@@ -267,19 +279,14 @@ func (r *Runtime) DiscoverAccelerationDomains(ctx context.Context) (DomainDiscov
 			continue
 		}
 		record, exists := stateBefore.DiscoveredDomains[domain]
-		if exists && record.CloudflareVerified && record.PreflightVerified {
-			record.LastSeenAt = now
-			if view.Config.Acceleration.AutoApply && !record.Active {
-				record.Active = true
-				record.LastError = ""
-				activatedDomains[domain] = struct{}{}
-			}
-			updates[domain] = record
-			result.Verified++
-			continue
-		}
+		wasActive := exists && record.Active
 		resolved, resolveErr := resolver.Resolve(ctx, domain)
-		if resolveErr != nil || !allCloudflareAddresses(rangeSnapshot, resolved) {
+		if resolveErr != nil {
+			if exists {
+				record.LastSeenAt = now
+				record.LastError = resolveErr.Error()
+				updates[domain] = record
+			}
 			continue
 		}
 		resolvedStrings := make([]string, 0, len(resolved))
@@ -290,22 +297,41 @@ func (r *Runtime) DiscoverAccelerationDomains(ctx context.Context) (DomainDiscov
 			record = store.DomainDiscovery{Domain: domain, Source: "mihomo", FirstSeenAt: now}
 		}
 		record.LastSeenAt = now
+		if !allCloudflareAddresses(rangeSnapshot, resolved) {
+			record.CloudflareVerified = false
+			record.PreflightVerified = false
+			record.Active = false
+			record.LastResolvedAddresses = resolvedStrings
+			record.LastError = "物理 DNS 地址不完全属于已验证 Cloudflare 网段"
+			updates[domain] = record
+			policyChanged = policyChanged || wasActive
+			continue
+		}
+		if record.CloudflareVerified && record.PreflightVerified && slices.Equal(record.LastResolvedAddresses, resolvedStrings) {
+			record.Active = automaticAllocationEnabled
+			record.LastError = ""
+			updates[domain] = record
+			if record.Active && !wasActive {
+				activatedDomains[domain] = struct{}{}
+				policyChanged = true
+			}
+			result.Verified++
+			continue
+		}
 		record.CloudflareVerified = true
 		record.LastResolvedAddresses = resolvedStrings
 		record.LastError = ""
-		if len(targets) == 0 {
-			record.PreflightVerified = false
-			record.Active = false
-			record.LastError = "尚无已验证优选 IP"
-		} else if verifyErr := verifier.VerifyPreflight(ctx, []proxy.DomainMapping{{Domain: domain, Addresses: targets}}); verifyErr != nil {
+		if verifyErr := verifier.VerifyPreflight(ctx, []proxy.DomainMapping{{Domain: domain, Addresses: resolvedStrings}}); verifyErr != nil {
 			record.PreflightVerified = false
 			record.Active = false
 			record.LastError = verifyErr.Error()
+			policyChanged = policyChanged || wasActive
 		} else {
 			record.PreflightVerified = true
-			record.Active = view.Config.Acceleration.AutoApply
+			record.Active = automaticAllocationEnabled
 			if record.Active {
 				activatedDomains[domain] = struct{}{}
+				policyChanged = true
 			}
 			result.Verified++
 		}
@@ -323,9 +349,9 @@ func (r *Runtime) DiscoverAccelerationDomains(ctx context.Context) (DomainDiscov
 		}
 	}
 	result.Activated = len(activatedDomains)
-	if result.Activated > 0 && view.Config.Acceleration.AutoApply {
+	if policyChanged {
 		if runner == nil {
-			return r.domainDiscoverySnapshot(), errors.New("optimizer runner is unavailable for automatic domain activation")
+			return r.domainDiscoverySnapshot(), errors.New("optimizer runner is unavailable for automatic domain policy refresh")
 		}
 		if err := runner.RefreshPolicy(ctx); err != nil {
 			_ = r.Store.Update(func(state *store.State) error {
@@ -344,6 +370,43 @@ func (r *Runtime) DiscoverAccelerationDomains(ctx context.Context) (DomainDiscov
 	snapshot := r.domainDiscoverySnapshot()
 	result.Domains = snapshot.Domains
 	return result, nil
+}
+
+// domainPolicyNeedsRefresh 检测需清理的自动映射和违反 IP 独占约束的旧策略。
+func domainPolicyNeedsRefresh(cfg config.Config, state store.State) bool {
+	discoveries := acceleration.EffectiveDiscoveries(cfg, state)
+	if state.Policy == nil {
+		return len(discoveries) > 0
+	}
+	manual := make(map[string]struct{}, len(cfg.AccelerationDomains()))
+	for _, domain := range cfg.AccelerationDomains() {
+		manual[domain] = struct{}{}
+	}
+	expected := make(map[string]struct{}, len(discoveries))
+	for _, discovery := range discoveries {
+		expected[discovery.Domain] = struct{}{}
+	}
+	actual := make(map[string]struct{}, len(state.Policy.DomainMappings))
+	assignedAddresses := make(map[string]string, len(state.Policy.DomainMappings))
+	for _, mapping := range state.Policy.DomainMappings {
+		if len(mapping.Addresses) != 1 {
+			return true
+		}
+		address := mapping.Addresses[0]
+		if owner, duplicate := assignedAddresses[address]; duplicate && owner != mapping.Domain {
+			return true
+		}
+		assignedAddresses[address] = mapping.Domain
+		if _, isManual := manual[mapping.Domain]; !isManual {
+			actual[mapping.Domain] = struct{}{}
+		}
+	}
+	for domain := range actual {
+		if _, exists := expected[domain]; !exists {
+			return true
+		}
+	}
+	return false
 }
 
 // domainDiscoverySnapshot 合并持久化发现记录、手动域名和当前生效映射，供 IPC 只读展示。
@@ -404,20 +467,6 @@ func (r *Runtime) domainDiscoverySnapshot() DomainDiscoveryResult {
 		}
 		return result.Domains[i].Domain < result.Domains[j].Domain
 	})
-	return result
-}
-
-// currentSelectionAddresses 返回当前已经完成策略验证的 IPv4/IPv6 优选地址。
-func currentSelectionAddresses(state store.State) []string {
-	var result []string
-	for _, selection := range []*store.Selection{state.CurrentIPv4, state.CurrentIPv6} {
-		if selection == nil || !selection.PolicyVerified {
-			continue
-		}
-		if address, err := netip.ParseAddr(selection.IP); err == nil {
-			result = append(result, address.Unmap().String())
-		}
-	}
 	return result
 }
 

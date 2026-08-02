@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"time"
 
@@ -407,7 +406,6 @@ func (c Config) AccelerationDomains() []string {
 		seen[domain] = struct{}{}
 		result = append(result, domain)
 	}
-	sort.Strings(result)
 	return result
 }
 
