@@ -35,7 +35,7 @@ Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix
 
 ### 平台使用指南
 
-正式版本的发布页按 Windows、Linux、macOS 和处理器架构列出六个安装包，并另附 `SHA256SUMS`。普通 CI 成功后也会提供内容相同的 `installers` artifact，文件版本为 `0.0.<run_number>`，用于提交验证且未签名。下载后按目标系统指南操作。
+可直接从 [GitHub Releases](https://github.com/momoc-ani/CF-Optimizer/releases) 按 Windows、Linux、macOS 和处理器架构下载安装包，并使用随附的 `SHA256SUMS` 校验。普通 CI 成功后也会提供内容相同的未签名 `installers` artifact，用于提交验证。
 
 | 平台 | 发布产物 | 最低运行要求 | 完整指南 |
 |---|---|---|---|
@@ -116,7 +116,7 @@ Linux 使用 WebKitGTK 4.1 时增加 `-tags webkit2_41`。打包资源见 [packa
 - `package-manifest`：聚合六个平台安装包，生成并验证 `SHA256SUMS`，上传 `installers` artifact。
 - `e2e`：Linux 普通用户环境中的三窗口 Playwright 测试，不修改路由、Hosts、代理或系统服务。
 
-推送 `v<major>.<minor>.<patch>` 标签会运行发布工作流，严格校验并发布六个安装包和 `SHA256SUMS`，同时在 Release 正文生成分平台下载表。签名、公证需要在发布环境中单独配置证书和 Secrets。
+在 GitHub Actions 的 `Release` 工作流中输入 `v<major>.<minor>.<patch>` 可手动发布；推送同格式标签也会自动发布。工作流严格校验并上传六个安装包和 `SHA256SUMS`，同时生成分平台下载表。签名、公证需要在发布环境中单独配置证书和 Secrets。
 
 ### 当前验证边界
 
@@ -157,7 +157,7 @@ Windows uses an ACL-protected Named Pipe; Linux and macOS use a permission-prote
 
 ### Platform guides
 
-A formal release lists six installers by Windows, Linux, macOS, and processor architecture, plus `SHA256SUMS`. Every successful regular CI run also provides an unsigned `installers` artifact with the same layout using version `0.0.<run_number>` for commit validation. Then follow the corresponding platform guide.
+Download installers for Windows, Linux, and macOS directly from [GitHub Releases](https://github.com/momoc-ani/CF-Optimizer/releases), then verify them with the included `SHA256SUMS`. Every successful regular CI run also provides an unsigned `installers` artifact for commit validation.
 
 | Platform | Release asset | Minimum runtime | Full guide |
 |---|---|---|---|
@@ -238,7 +238,7 @@ Add `-tags webkit2_41` on Linux when using WebKitGTK 4.1. See [packaging/README.
 - `package-manifest`: collects all six platform packages, generates and verifies `SHA256SUMS`, and uploads the `installers` artifact.
 - `e2e`: three-window Playwright tests with an unprivileged simulated backend that never edits routes, Hosts, proxy configuration, or services.
 
-Pushing a `v<major>.<minor>.<patch>` tag runs the release workflow. It strictly validates and publishes six installers plus `SHA256SUMS`, and generates a platform download table in the release body. Signing and notarization require certificates and Secrets configured separately in the release environment.
+Run the `Release` workflow manually with a `v<major>.<minor>.<patch>` version, or push a tag in the same format. The workflow validates and publishes six installers plus `SHA256SUMS`, and generates a platform download table in the release body. Signing and notarization require certificates and Secrets configured separately in the release environment.
 
 ### Current verification boundary
 
