@@ -39,7 +39,8 @@ func newTrayController() (*trayController, error) {
 
 // Register 在 Wails 启动其原生事件循环前注册系统托盘。
 func (t *trayController) Register() {
-	t.start, _ = systray.RunWithExternalLoop(t.ready, nil)
+	start, _ := systray.RunWithExternalLoop(t.ready, nil)
+	t.start = prepareTrayStart(start)
 }
 
 // Startup 保存 Wails 运行时上下文，供托盘菜单安全地操作普通权限窗口。
