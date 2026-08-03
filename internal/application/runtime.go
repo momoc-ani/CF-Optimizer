@@ -675,6 +675,11 @@ func (r *Runtime) CleanupManagedPolicy(ctx context.Context) error {
 	return optimizer.CleanupManagedPolicy(ctx, r.Store, r.Routes, r.ProxyCoordinator)
 }
 
+// RecoverPendingPolicy 恢复进程退出前已应用但尚未提交的代理策略事务。
+func (r *Runtime) RecoverPendingPolicy(ctx context.Context) error {
+	return optimizer.RecoverPendingPolicy(ctx, r.Store, r.ProxyCoordinator)
+}
+
 func configForStoredReceipts(cfg config.Config, state store.State) (config.Config, error) {
 	cfg.Network.ManageRoutes = true
 	cfg.Proxy.Generic.Enabled = false
@@ -683,29 +688,38 @@ func configForStoredReceipts(cfg config.Config, state store.State) (config.Confi
 	cfg.Proxy.Xray.Enabled = false
 	cfg.Proxy.External.Enabled = false
 	cfg.Hosts.Enabled = false
-	if state.Policy == nil {
+	if state.Policy == nil && state.PendingPolicy == nil {
 		return cfg, nil
 	}
-	var applied proxy.ApplyResult
-	if err := json.Unmarshal(state.Policy.Receipts, &applied); err != nil {
-		return config.Config{}, fmt.Errorf("decode stored policy receipts: %w", err)
+	var receiptPayloads []json.RawMessage
+	if state.Policy != nil {
+		receiptPayloads = append(receiptPayloads, state.Policy.Receipts)
 	}
-	for _, receipt := range applied.Receipts {
-		switch receipt.Adapter {
-		case cleanupAdapterGeneric:
-			cfg.Proxy.Generic.Enabled = true
-		case cleanupAdapterMihomo:
-			cfg.Proxy.Mihomo.Enabled = true
-		case cleanupAdapterSingBox:
-			cfg.Proxy.SingBox.Enabled = true
-		case cleanupAdapterXray:
-			cfg.Proxy.Xray.Enabled = true
-		case cleanupAdapterExternal:
-			cfg.Proxy.External.Enabled = true
-		case cleanupAdapterHosts:
-			cfg.Hosts.Enabled = true
-		default:
-			return config.Config{}, fmt.Errorf("stored policy references unsupported adapter %q", receipt.Adapter)
+	if state.PendingPolicy != nil {
+		receiptPayloads = append(receiptPayloads, state.PendingPolicy.Receipts)
+	}
+	for _, payload := range receiptPayloads {
+		var applied proxy.ApplyResult
+		if err := json.Unmarshal(payload, &applied); err != nil {
+			return config.Config{}, fmt.Errorf("decode stored policy receipts: %w", err)
+		}
+		for _, receipt := range applied.Receipts {
+			switch receipt.Adapter {
+			case cleanupAdapterGeneric:
+				cfg.Proxy.Generic.Enabled = true
+			case cleanupAdapterMihomo:
+				cfg.Proxy.Mihomo.Enabled = true
+			case cleanupAdapterSingBox:
+				cfg.Proxy.SingBox.Enabled = true
+			case cleanupAdapterXray:
+				cfg.Proxy.Xray.Enabled = true
+			case cleanupAdapterExternal:
+				cfg.Proxy.External.Enabled = true
+			case cleanupAdapterHosts:
+				cfg.Hosts.Enabled = true
+			default:
+				return config.Config{}, fmt.Errorf("stored policy references unsupported adapter %q", receipt.Adapter)
+			}
 		}
 	}
 	return cfg, nil

@@ -44,7 +44,7 @@ RestartApplications=no
 Source: "{#SourceDir}\cf-optimizer.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\cf-optimizerd.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\cf-optimizer-ui.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion; AfterInstall: ConfigureService
 Source: "{#SourceDir}\MicrosoftEdgeWebview2Setup.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall skipifsourcedoesntexist
 
 [Icons]
@@ -56,9 +56,6 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 
 [Run]
 Filename: "{tmp}\MicrosoftEdgeWebview2Setup.exe"; Parameters: "/silent /install"; StatusMsg: "Installing Microsoft Edge WebView2 Runtime..."; Flags: waituntilterminated runhidden skipifdoesntexist; Check: not IsWebView2Installed
-Filename: "{app}\cf-optimizer.exe"; Parameters: "--config ""{commonappdata}\CF Optimizer\config.yaml"" init"; StatusMsg: "Creating the initial configuration..."; Flags: waituntilterminated runhidden; Check: not FileExists(ExpandConstant('{commonappdata}\CF Optimizer\config.yaml'))
-Filename: "{app}\cf-optimizer.exe"; Parameters: "--config ""{commonappdata}\CF Optimizer\config.yaml"" install --daemon ""{app}\cf-optimizerd.exe"""; StatusMsg: "Installing the CF Optimizer service..."; Flags: waituntilterminated runhidden; Check: IsFreshInstall
-Filename: "{app}\cf-optimizer.exe"; Parameters: "--config ""{commonappdata}\CF Optimizer\config.yaml"" start"; StatusMsg: "Starting the CF Optimizer service..."; Flags: waituntilterminated runhidden; Check: IsServiceUpgrade
 Filename: "{app}\cf-optimizer-ui.exe"; Description: "Launch CF Optimizer"; Flags: nowait postinstall skipifsilent
 
 [Code]
@@ -85,20 +82,28 @@ begin
     RegQueryStringValue(HKCU, WebViewClientKey, 'pv', Version);
 end;
 
-function IsFreshInstall: Boolean;
-begin
-  Result := not ServiceExistedBeforeInstall;
-end;
-
-function IsServiceUpgrade: Boolean;
-begin
-  Result := ServiceExistedBeforeInstall;
-end;
-
 function InitializeSetup: Boolean;
 begin
   ServiceExistedBeforeInstall := IsServiceInstalled;
   Result := True;
+end;
+
+procedure ConfigureService;
+var
+  ExitCode: Integer;
+  ConfigPath: String;
+  CliPath: String;
+begin
+  ConfigPath := ExpandConstant('{commonappdata}\CF Optimizer\config.yaml');
+  CliPath := ExpandConstant('{app}\cf-optimizer.exe');
+  if not FileExists(ConfigPath) then
+    if not Exec(CliPath, '--config "' + ConfigPath + '" init', '', SW_HIDE,
+      ewWaitUntilTerminated, ExitCode) or (ExitCode <> 0) then
+      RaiseException('The initial CF Optimizer configuration could not be created.');
+  if not Exec(CliPath,
+    '--config "' + ConfigPath + '" install --daemon "' + ExpandConstant('{app}\cf-optimizerd.exe') + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, ExitCode) or (ExitCode <> 0) then
+    RaiseException('The CF Optimizer service could not be installed or repaired.');
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

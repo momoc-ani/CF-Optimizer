@@ -335,6 +335,27 @@ func TestRunnerAccumulatesReceiptsAndCleansManagedPolicy(t *testing.T) {
 	}
 }
 
+func TestRecoverPendingPolicyRollsBackBeforeClearingJournal(t *testing.T) {
+	policy := &recordingPolicy{}
+	_, stateStore := newTestRunner(t, policy)
+	receipts, err := json.Marshal(proxy.ApplyResult{Receipts: []proxy.Receipt{{ID: "pending", Adapter: "test", Changed: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Update(func(state *store.State) error {
+		state.PendingPolicy = store.NewPolicyTransaction(time.Now(), json.RawMessage(`{}`), receipts)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecoverPendingPolicy(context.Background(), stateStore, policy); err != nil {
+		t.Fatal(err)
+	}
+	if stateStore.Snapshot().PendingPolicy != nil || len(policy.rollbacks) != 1 || policy.rollbacks[0].Receipts[0].ID != "pending" {
+		t.Fatalf("pending policy was not recovered: state=%#v rollbacks=%#v", stateStore.Snapshot(), policy.rollbacks)
+	}
+}
+
 func TestRunnerClearsUnsafeLegacyMappingsBeforeFailedReplacement(t *testing.T) {
 	policy := &recordingPolicy{
 		capabilities:   proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true},

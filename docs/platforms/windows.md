@@ -127,11 +127,11 @@ $cfopt = Join-Path $env:ProgramFiles "CF Optimizer\cf-optimizer.exe"
 & $cfopt cleanup
 ```
 
-`cleanup` 逆序回滚持久化的受管路由、Hosts 和代理策略，不删除配置、日志或历史。如果受管文件被其他程序修改，清理会拒绝覆盖并返回错误，需先人工核对。
+`cleanup` 会先恢复进程中断时已应用但尚未提交的策略事务，再逆序回滚持久化的受管路由、Hosts 和代理策略，不删除配置、日志或历史。Mihomo 控制端未运行时，只要磁盘内容仍可由程序标记和元数据证明为受管内容，就会完成磁盘清理；控制端可达但返回鉴权、配置或 HTTP 错误时仍会中止。如果无法证明文件归属或发现非受管修改，清理会拒绝覆盖并返回错误，需先人工核对。
 
 ### 9. 升级与卸载
 
-升级时运行同架构的新安装包。安装器会停止现有服务、替换程序文件并重新启动服务，同时保留配置、状态和历史。升级前仍建议备份 `%ProgramData%\CF Optimizer`。
+升级时运行同架构的新安装包。安装器会停止现有服务、替换程序文件，并在复制完成后重新检查服务；服务缺失时会重建，已存在但停止时会启动，同时保留配置、状态和历史。服务安装或修复返回非零状态时，安装器会中止而不会把部分完成显示为成功。升级前仍建议备份 `%ProgramData%\CF Optimizer`。
 
 卸载时打开“设置 -> 应用 -> 已安装的应用”，选择 CF Optimizer。卸载器会先停止服务并执行受管策略清理；清理失败时会中止卸载，避免遗留未知网络状态。
 
@@ -281,11 +281,11 @@ To restore managed policy separately while the service is stopped:
 & $cfopt cleanup
 ```
 
-`cleanup` rolls back persisted managed routes, Hosts, and proxy policy in reverse order without deleting configuration, logs, or history. If another program changed a managed file, cleanup refuses to overwrite it and reports an error for manual review.
+`cleanup` first recovers policy changes that were applied but not committed when a process stopped, then rolls back persisted managed routes, Hosts, and proxy policy in reverse order without deleting configuration, logs, or history. When the Mihomo controller is offline, disk cleanup may complete only if ownership markers and metadata still prove that the content is managed. Authentication, configuration, and HTTP errors from a reachable controller still abort cleanup. Unproven or non-managed edits are never overwritten and require manual review.
 
 ### 9. Upgrade and remove
 
-Run the newer installer for the same architecture. It stops the existing service, replaces program files, and restarts the service while preserving configuration, state, and history. Back up `%ProgramData%\CF Optimizer` before a major upgrade.
+Run the newer installer for the same architecture. It stops the existing service, replaces program files, then checks the service again. A missing service is recreated and an installed but stopped service is started while configuration, state, and history are preserved. A nonzero service repair result aborts Setup instead of reporting a partial installation as successful. Back up `%ProgramData%\CF Optimizer` before a major upgrade.
 
 To remove the application, open Settings > Apps > Installed apps and select CF Optimizer. The uninstaller stops the service and cleans managed policy first. It aborts when cleanup fails to avoid leaving an unknown network state.
 

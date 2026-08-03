@@ -36,6 +36,21 @@ func TestConfigForStoredReceiptsEnablesOnlyRequiredAdapters(t *testing.T) {
 	}
 }
 
+func TestConfigForStoredReceiptsIncludesPendingTransactionAdapters(t *testing.T) {
+	receipts, err := json.Marshal(proxy.ApplyResult{Receipts: []proxy.Receipt{{Adapter: cleanupAdapterMihomo}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := store.State{PendingPolicy: store.NewPolicyTransaction(time.Now(), json.RawMessage(`{}`), receipts)}
+	cleanupConfig, err := configForStoredReceipts(config.Default(), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cleanupConfig.Proxy.Mihomo.Enabled || cleanupConfig.Proxy.Generic.Enabled {
+		t.Fatalf("pending transaction adapters were not isolated: %#v", cleanupConfig.Proxy)
+	}
+}
+
 func TestConfigForStoredReceiptsRejectsUnknownAdapter(t *testing.T) {
 	receipts, err := json.Marshal(proxy.ApplyResult{Receipts: []proxy.Receipt{{Adapter: "unknown-adapter"}}})
 	if err != nil {

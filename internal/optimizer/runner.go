@@ -46,6 +46,14 @@ type PolicyApplier interface {
 	Rollback(context.Context, proxy.ApplyResult) error
 }
 
+type policyReceiptJournalSetter interface {
+	SetReceiptJournal(proxy.ReceiptJournal)
+}
+
+type managedPolicyCleaner interface {
+	Cleanup(context.Context, proxy.ApplyResult) error
+}
+
 // DomainMappingVerifier 验证映射应用前后的 HTTPS 连接证据。
 type DomainMappingVerifier interface {
 	VerifyPreflight(context.Context, []proxy.DomainMapping) error
@@ -126,6 +134,9 @@ func NewRunner(cfg config.Config, rangeSource RangeSource, benchmarker Benchmark
 		if policyValue.Kind() == reflect.Pointer && policyValue.IsNil() {
 			policy = nil
 		}
+	}
+	if journaledPolicy, ok := policy.(policyReceiptJournalSetter); ok {
+		journaledPolicy.SetReceiptJournal(newPolicyReceiptJournal(stateStore))
 	}
 	return &Runner{
 		config: cfg, ranges: rangeSource, benchmark: benchmarker, store: stateStore,
@@ -284,6 +295,7 @@ func (r *Runner) replaceUnsafeLegacyDomainMappings(ctx context.Context, before s
 	}
 	if err := r.store.Update(func(state *store.State) error {
 		state.Policy = policySnapshot(safePolicy, receipts, r.now().UTC())
+		state.PendingPolicy = nil
 		return nil
 	}); err != nil {
 		if restoreErr := r.rollbackRoutes(ctx, removedRouteTransactions); restoreErr != nil {
@@ -443,6 +455,7 @@ func (r *Runner) refreshPolicyLocked(ctx context.Context) error {
 		}
 		if persistErr := r.store.Update(func(state *store.State) error {
 			state.Policy = policySnapshot(policy, receipts, r.now().UTC())
+			state.PendingPolicy = nil
 			return nil
 		}); persistErr != nil {
 			if restoreErr := r.rollbackRoutes(ctx, removedRouteTransactions); restoreErr != nil {
@@ -467,6 +480,9 @@ func CleanupManagedPolicy(ctx context.Context, stateStore *store.Store, routes *
 			return fmt.Errorf("recover temporary routes: %w", err)
 		}
 	}
+	if err := RecoverPendingPolicy(ctx, stateStore, policy); err != nil {
+		return err
+	}
 	snapshot := stateStore.Snapshot()
 	if snapshot.Policy == nil {
 		return nil
@@ -478,15 +494,50 @@ func CleanupManagedPolicy(ctx context.Context, stateStore *store.Store, routes *
 	if err := json.Unmarshal(snapshot.Policy.Receipts, &applied); err != nil {
 		return fmt.Errorf("decode stored policy receipts: %w", err)
 	}
-	if err := policy.Rollback(ctx, applied); err != nil {
+	if err := cleanupAppliedPolicy(ctx, policy, applied); err != nil {
 		return fmt.Errorf("rollback stored policy: %w", err)
 	}
 	return stateStore.Update(func(state *store.State) error {
 		state.CurrentIPv4 = nil
 		state.CurrentIPv6 = nil
 		state.Policy = nil
+		state.PendingPolicy = nil
 		return nil
 	})
+}
+
+// RecoverPendingPolicy 回滚尚未提交的适配器收据，并仅在完整成功后清除事务日志。
+func RecoverPendingPolicy(ctx context.Context, stateStore *store.Store, policy PolicyApplier) error {
+	if stateStore == nil {
+		return errors.New("state store is required for pending policy recovery")
+	}
+	pending := stateStore.Snapshot().PendingPolicy
+	if pending == nil {
+		return nil
+	}
+	applied, err := decodeApplyResult(pending.Receipts)
+	if err != nil {
+		return fmt.Errorf("decode pending policy receipts: %w", err)
+	}
+	if len(applied.Receipts) > 0 {
+		if policy == nil {
+			return errors.New("pending policy cannot be recovered because its adapters are disabled")
+		}
+		if err := cleanupAppliedPolicy(ctx, policy, applied); err != nil {
+			return fmt.Errorf("rollback pending policy: %w", err)
+		}
+	}
+	return stateStore.Update(func(state *store.State) error {
+		state.PendingPolicy = nil
+		return nil
+	})
+}
+
+func cleanupAppliedPolicy(ctx context.Context, policy PolicyApplier, applied proxy.ApplyResult) error {
+	if cleaner, ok := policy.(managedPolicyCleaner); ok {
+		return cleaner.Cleanup(ctx, applied)
+	}
+	return policy.Rollback(ctx, applied)
 }
 
 func (r *Runner) generateCandidates(snapshot ranges.Snapshot, state store.State, now time.Time) ([]netip.Addr, error) {
@@ -981,6 +1032,7 @@ func (r *Runner) persistSuccessfulRun(report RunReport, before store.State, appl
 				return err
 			}
 			state.Policy = policySnapshot(policy, receipts, now)
+			state.PendingPolicy = nil
 		}
 		return nil
 	}); err != nil {

@@ -16,6 +16,27 @@ type lifecycleAdapter struct {
 	rolledBack  bool
 }
 
+type recordingReceiptJournal struct {
+	begins   int
+	recorded []Receipt
+	removed  []Receipt
+}
+
+func (j *recordingReceiptJournal) Begin(DirectPolicy) error {
+	j.begins++
+	return nil
+}
+
+func (j *recordingReceiptJournal) Record(receipt Receipt) error {
+	j.recorded = append(j.recorded, receipt)
+	return nil
+}
+
+func (j *recordingReceiptJournal) Remove(receipts []Receipt) error {
+	j.removed = append(j.removed, receipts...)
+	return nil
+}
+
 func (a *lifecycleAdapter) Name() string { return a.name }
 func (a *lifecycleAdapter) Capabilities() Capabilities {
 	return Capabilities{IPv4: true, Rollback: true}
@@ -56,5 +77,21 @@ func TestCoordinatorRejectsUnsupportedPolicyField(t *testing.T) {
 	}
 	if _, err := coordinator.Apply(context.Background(), DirectPolicy{Domains: []string{"example.com"}}); err == nil {
 		t.Fatal("expected unsupported domain policy to be rejected")
+	}
+}
+
+func TestCoordinatorJournalsReceiptBeforeVerificationAndRemovesItAfterRollback(t *testing.T) {
+	adapter := &lifecycleAdapter{name: "journaled", verifyError: errors.New("not active")}
+	journal := &recordingReceiptJournal{}
+	coordinator, err := NewCoordinator([]Adapter{adapter}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator.SetReceiptJournal(journal)
+	if _, err := coordinator.Apply(context.Background(), DirectPolicy{IPv4CIDRs: []string{"1.1.1.1/32"}}); err == nil {
+		t.Fatal("expected verification failure")
+	}
+	if journal.begins != 1 || len(journal.recorded) != 1 || len(journal.removed) != 1 || journal.recorded[0].ID != "journaled" {
+		t.Fatalf("unexpected receipt journal lifecycle: %#v", journal)
 	}
 }

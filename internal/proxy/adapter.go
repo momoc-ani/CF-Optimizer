@@ -59,6 +59,18 @@ type Adapter interface {
 	Rollback(context.Context, Receipt) error
 }
 
+// ReceiptJournal 在策略提交前持久化已应用收据，避免进程退出后失去回滚依据。
+type ReceiptJournal interface {
+	Begin(DirectPolicy) error
+	Record(Receipt) error
+	Remove([]Receipt) error
+}
+
+// ConflictCleaner 仅在常规哈希保护拒绝回滚时清理可证明由适配器管理的残留。
+type ConflictCleaner interface {
+	CleanupConflict(context.Context, []Receipt) error
+}
+
 // ApplyResult 汇总一组适配器成功应用并验证的收据。
 type ApplyResult struct {
 	Receipts []Receipt `json:"receipts"`
@@ -91,6 +103,7 @@ func (e *DomainVerificationError) Unwrap() error {
 type Coordinator struct {
 	adapters []Adapter
 	logger   *slog.Logger
+	journal  ReceiptJournal
 }
 
 // NewCoordinator 创建统一策略协调器；适配器顺序同时决定回滚逆序。
@@ -109,6 +122,11 @@ func NewCoordinator(adapters []Adapter, logger *slog.Logger) (*Coordinator, erro
 		seen[adapter.Name()] = struct{}{}
 	}
 	return &Coordinator{adapters: adapters, logger: logger.With("component", "proxy")}, nil
+}
+
+// SetReceiptJournal 注入与状态存储绑定的待提交收据日志。
+func (c *Coordinator) SetReceiptJournal(journal ReceiptJournal) {
+	c.journal = journal
 }
 
 // Detect 查询所有已注册适配器，不因单个内核不可用而丢弃其他结果。
@@ -169,6 +187,11 @@ func (c *Coordinator) Apply(ctx context.Context, policy DirectPolicy) (ApplyResu
 	if err := ensurePolicyCoverage(normalized, activeAdapters); err != nil {
 		return result, err
 	}
+	if c.journal != nil {
+		if err := c.journal.Begin(normalized); err != nil {
+			return result, fmt.Errorf("begin proxy receipt journal: %w", err)
+		}
+	}
 	for _, adapter := range activeAdapters {
 		plan, planErr := adapter.Plan(ctx, normalized)
 		if planErr != nil {
@@ -180,6 +203,11 @@ func (c *Coordinator) Apply(ctx context.Context, policy DirectPolicy) (ApplyResu
 			return result, c.rollbackAll(ctx, result.Receipts, fmt.Errorf("apply %s: %w", adapter.Name(), applyErr))
 		}
 		result.Receipts = append(result.Receipts, receipt)
+		if c.journal != nil {
+			if journalErr := c.journal.Record(receipt); journalErr != nil {
+				return result, c.rollbackAll(ctx, result.Receipts, fmt.Errorf("persist %s receipt: %w", adapter.Name(), journalErr))
+			}
+		}
 		c.logPhase(adapter.Name(), receipt.ID, "apply", "completed", nil)
 		if verifyErr := adapter.Verify(ctx, normalized, receipt); verifyErr != nil {
 			return result, c.rollbackAll(ctx, result.Receipts, fmt.Errorf("verify %s: %w", adapter.Name(), verifyErr))
@@ -194,7 +222,65 @@ func (c *Coordinator) Rollback(ctx context.Context, result ApplyResult) error {
 	if len(result.Receipts) == 0 {
 		return nil
 	}
-	return errors.Join(c.rollbackReceipts(ctx, result.Receipts)...)
+	rollbackErrors := c.rollbackReceipts(ctx, result.Receipts)
+	if len(rollbackErrors) == 0 && c.journal != nil {
+		if err := c.journal.Remove(result.Receipts); err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("remove rolled back proxy receipts: %w", err))
+		}
+	}
+	return errors.Join(rollbackErrors...)
+}
+
+// Cleanup 逆序回滚收据；常规回滚冲突时仅调用适配器的受管残留清理能力。
+func (c *Coordinator) Cleanup(ctx context.Context, result ApplyResult) error {
+	if len(result.Receipts) == 0 {
+		return nil
+	}
+	cleanedAdapters := map[string]bool{}
+	var cleanupErrors []error
+	for index := len(result.Receipts) - 1; index >= 0; index-- {
+		receipt := result.Receipts[index]
+		if cleanedAdapters[receipt.Adapter] {
+			continue
+		}
+		adapter := c.adapterByName(receipt.Adapter)
+		if adapter == nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("adapter %s is unavailable for cleanup", receipt.Adapter))
+			continue
+		}
+		if err := adapter.Rollback(ctx, receipt); err == nil {
+			c.logPhase(adapter.Name(), receipt.ID, "rollback", "completed", nil)
+			continue
+		} else if cleaner, ok := adapter.(ConflictCleaner); ok {
+			rollbackErr := err
+			if cleanupErr := cleaner.CleanupConflict(ctx, receiptsForAdapter(result.Receipts, receipt.Adapter)); cleanupErr == nil {
+				cleanedAdapters[receipt.Adapter] = true
+				c.logPhase(adapter.Name(), receipt.ID, "cleanup", "completed", nil)
+				continue
+			} else {
+				cleanupErrors = append(cleanupErrors, errors.Join(
+					fmt.Errorf("rollback %s: %w", adapter.Name(), rollbackErr),
+					fmt.Errorf("clean conflicting %s state: %w", adapter.Name(), cleanupErr),
+				))
+				c.logPhase(adapter.Name(), receipt.ID, "cleanup", "failed", cleanupErr)
+				continue
+			}
+		} else {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("rollback %s: %w", adapter.Name(), err))
+			c.logPhase(adapter.Name(), receipt.ID, "rollback", "failed", err)
+		}
+	}
+	return errors.Join(cleanupErrors...)
+}
+
+func receiptsForAdapter(receipts []Receipt, adapter string) []Receipt {
+	selected := make([]Receipt, 0, len(receipts))
+	for _, receipt := range receipts {
+		if receipt.Adapter == adapter {
+			selected = append(selected, receipt)
+		}
+	}
+	return selected
 }
 
 func adapterSupportsAny(policy DirectPolicy, capabilities Capabilities) bool {
@@ -235,7 +321,13 @@ func ensurePolicyCoverage(policy DirectPolicy, adapters []Adapter) error {
 
 func (c *Coordinator) rollbackAll(ctx context.Context, receipts []Receipt, cause error) error {
 	rollbackErrors := []error{cause}
-	rollbackErrors = append(rollbackErrors, c.rollbackReceipts(ctx, receipts)...)
+	receiptErrors := c.rollbackReceipts(ctx, receipts)
+	rollbackErrors = append(rollbackErrors, receiptErrors...)
+	if len(receiptErrors) == 0 && c.journal != nil {
+		if err := c.journal.Remove(receipts); err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("remove rolled back proxy receipts: %w", err))
+		}
+	}
 	return errors.Join(rollbackErrors...)
 }
 

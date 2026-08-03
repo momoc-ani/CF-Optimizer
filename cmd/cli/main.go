@@ -192,8 +192,18 @@ func serviceCommand(ctx context.Context, command string, arguments []string, set
 				return err
 			}
 		}
-		if err := controller.Install(operationContext); err != nil {
+		currentStatus, err := controller.Status(operationContext)
+		if err != nil {
 			return err
+		}
+		if !currentStatus.Installed {
+			if err := controller.Install(operationContext); err != nil {
+				return err
+			}
+		} else if !currentStatus.Running {
+			if err := controller.Start(operationContext); err != nil {
+				return err
+			}
 		}
 	case "uninstall":
 		currentStatus, err := controller.Status(operationContext)

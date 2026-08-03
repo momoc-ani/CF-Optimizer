@@ -49,6 +49,9 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := s.runtime.Routes.Recover(serviceContext); err != nil {
 		return fmt.Errorf("recover route transactions: %w", err)
 	}
+	if err := s.runtime.RecoverPendingPolicy(serviceContext); err != nil {
+		return fmt.Errorf("recover pending policy transaction: %w", err)
+	}
 	serverErrors := make(chan error, 1)
 	go func() { serverErrors <- s.server.Serve(serviceContext) }()
 	schedulerErrors := make(chan error, 1)

@@ -407,6 +407,142 @@ func (a *Adapter) Rollback(ctx context.Context, receipt proxy.Receipt) error {
 	return a.reloadConfig(ctx, configFile)
 }
 
+// CleanupConflict 在常规收据链中断时，仅撤销仍可由受管标记和元数据证明归属本程序的内容。
+func (a *Adapter) CleanupConflict(ctx context.Context, receipts []proxy.Receipt) error {
+	if len(receipts) == 0 {
+		return nil
+	}
+	payloads := make([]receiptPayload, 0, len(receipts))
+	for _, receipt := range receipts {
+		if receipt.Adapter != adapterName || !receipt.Changed {
+			continue
+		}
+		var payload receiptPayload
+		if err := json.Unmarshal(receipt.Payload, &payload); err != nil {
+			return fmt.Errorf("decode Mihomo cleanup receipt: %w", err)
+		}
+		payloads = append(payloads, payload)
+	}
+	if len(payloads) == 0 {
+		return nil
+	}
+	latest := payloads[len(payloads)-1]
+	providerFile := latest.ProviderFile
+	if providerFile == "" {
+		providerFile = a.config.ProviderFile
+	}
+	currentProvider, providerExists, err := readOptionalFile(providerFile)
+	if err != nil {
+		return err
+	}
+	if providerExists && !bytes.HasPrefix(currentProvider, []byte(managedFileHeader)) {
+		return errors.New("Mihomo provider has no CF Optimizer ownership marker; refusing cleanup overwrite")
+	}
+
+	configFile := latest.ConfigFile
+	if configFile == "" {
+		configFile = a.config.ReloadConfig
+	}
+	metadataFile := latest.MetadataFile
+	if metadataFile == "" && providerFile != "" {
+		metadataFile = managedMetadataPath(providerFile)
+	}
+	currentConfig, configExists, currentMetadata, metadataExists := []byte(nil), false, []byte(nil), false
+	cleanedConfig := []byte(nil)
+	if latest.ConfigAppliedHash != "" {
+		currentConfig, configExists, err = readOptionalFile(configFile)
+		if err != nil {
+			return err
+		}
+		if !configExists {
+			return errors.New("Mihomo active config is missing during managed cleanup")
+		}
+		currentMetadata, metadataExists, err = readOptionalFile(metadataFile)
+		if err != nil {
+			return err
+		}
+		if !metadataExists {
+			return errors.New("Mihomo managed metadata is missing during conflict cleanup")
+		}
+		cleanedConfig, err = cleanupManagedConfig(currentConfig, currentMetadata)
+		if err != nil {
+			return err
+		}
+	}
+
+	baselineProvider, baselineProviderExists := managedBaseline(payloads, false)
+	baselineMetadata, baselineMetadataExists := managedBaseline(payloads, true)
+	restoreCurrent := func() {
+		if configExists {
+			_ = fsutil.WriteFileAtomic(configFile, currentConfig, 0o640)
+		}
+		_ = restoreOptionalFile(providerFile, currentProvider, providerExists)
+		if metadataFile != "" {
+			_ = restoreOptionalFile(metadataFile, currentMetadata, metadataExists)
+		}
+	}
+	if configExists && !bytes.Equal(currentConfig, cleanedConfig) {
+		if err := fsutil.WriteFileAtomic(configFile, cleanedConfig, 0o640); err != nil {
+			return fmt.Errorf("write cleaned Mihomo active config: %w", err)
+		}
+	}
+	if err := restoreOptionalFile(providerFile, baselineProvider, baselineProviderExists); err != nil {
+		restoreCurrent()
+		return err
+	}
+	if metadataFile != "" {
+		if err := restoreOptionalFile(metadataFile, baselineMetadata, baselineMetadataExists); err != nil {
+			restoreCurrent()
+			return err
+		}
+	}
+	if err := a.reloadConfig(ctx, configFile); err != nil {
+		if ctx.Err() == nil && controllerUnavailable(err) {
+			return nil
+		}
+		restoreCurrent()
+		_ = a.reloadConfig(ctx, configFile)
+		return err
+	}
+	return nil
+}
+
+// controllerUnavailable 仅识别控制端连接层错误；HTTP、鉴权和配置错误仍必须中止清理。
+func controllerUnavailable(err error) bool {
+	var operationErr *net.OpError
+	if errors.As(err, &operationErr) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr)
+}
+
+// managedBaseline 返回收据链开始前的非受管内容；截断链中的旧受管版本不应被恢复。
+func managedBaseline(payloads []receiptPayload, metadata bool) ([]byte, bool) {
+	if len(payloads) == 0 {
+		return nil, false
+	}
+	oldest := payloads[0]
+	content, exists := oldest.Previous, oldest.PreviousExists
+	if metadata {
+		content, exists = oldest.MetadataPrevious, oldest.MetadataPreviousExists
+	}
+	if !exists {
+		return nil, false
+	}
+	if metadata {
+		var document managedMetadata
+		if json.Unmarshal(content, &document) == nil && (document.Version == legacyManagedMetadataVersion || document.Version == managedMetadataVersion) {
+			return nil, false
+		}
+		return content, true
+	}
+	if bytes.HasPrefix(content, []byte(managedFileHeader)) {
+		return nil, false
+	}
+	return content, true
+}
+
 func (a *Adapter) reload(ctx context.Context) error {
 	return a.reloadConfig(ctx, a.config.ReloadConfig)
 }
