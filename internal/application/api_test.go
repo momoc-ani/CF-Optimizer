@@ -17,6 +17,7 @@ import (
 	"github.com/cf-optimizer/cf-optimizer/internal/ipc"
 	cfnetwork "github.com/cf-optimizer/cf-optimizer/internal/network"
 	"github.com/cf-optimizer/cf-optimizer/internal/optimizer"
+	"github.com/cf-optimizer/cf-optimizer/internal/proxy"
 	"github.com/cf-optimizer/cf-optimizer/internal/ranges"
 	"github.com/cf-optimizer/cf-optimizer/internal/store"
 )
@@ -136,6 +137,34 @@ func TestSystemStatusIncludesIsolatedSchedulePromise(t *testing.T) {
 	want := time.Date(2026, time.August, 2, 18, 30, 0, 0, time.UTC)
 	if status.NextScheduledAt == nil || !status.NextScheduledAt.Equal(want) {
 		t.Fatalf("unexpected next scheduled time: %#v", status.NextScheduledAt)
+	}
+}
+
+func TestSystemStatusReportsPolicyAvailability(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		coordinator *proxy.Coordinator
+		want        bool
+	}{
+		{name: "未激活适配器", want: false},
+		{name: "已激活适配器", coordinator: new(proxy.Coordinator), want: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			stateStore, err := store.Open(t.TempDir(), 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			api, err := NewAPI(&Runtime{Store: stateStore, ProxyCoordinator: testCase.coordinator})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			response := api.systemStatus()
+			available, ok := response["policy_available"].(bool)
+			if !ok || available != testCase.want {
+				t.Fatalf("unexpected policy availability: value=%#v want=%t", response["policy_available"], testCase.want)
+			}
+		})
 	}
 }
 

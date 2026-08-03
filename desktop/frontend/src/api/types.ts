@@ -110,6 +110,7 @@ export interface SystemStatus {
   protocol_version: number;
   state: ServiceState;
   physical_path: PhysicalPath;
+  policy_available: boolean;
   active_event?: OptimizerEvent;
   schedule: ScheduleStatus;
 }

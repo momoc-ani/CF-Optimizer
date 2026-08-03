@@ -139,9 +139,10 @@ func (a *API) systemStatus() map[string]any {
 			LastError: state.LastError, LastStartedAt: state.LastStartedAt,
 			LastEndedAt: state.LastEndedAt, Running: state.Running,
 		},
-		"physical_path": view.PhysicalPath,
-		"active_event":  activeEvent,
-		"schedule":      scheduleStatus,
+		"physical_path":    view.PhysicalPath,
+		"policy_available": view.ProxyCoordinator != nil,
+		"active_event":     activeEvent,
+		"schedule":         scheduleStatus,
 	}
 }
 
