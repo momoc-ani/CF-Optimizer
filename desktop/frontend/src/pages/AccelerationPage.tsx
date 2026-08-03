@@ -14,6 +14,7 @@ import { DataTable } from '../components/DataTable';
 import { ErrorState, LoadingState, Metric, PageHeader, Section } from '../components/Page';
 import { StatusBadge } from '../components/StatusBadge';
 import { joinConfigLines, parseDomainLines } from '../lib/configCollections';
+import { describeConfigUpdateResult, type ConfigUpdateResult } from '../lib/configUpdate';
 import { findVerifiedDomainRoute, isDomainAccelerated } from '../lib/domainAcceleration';
 import { formatDate } from '../lib/format';
 
@@ -147,9 +148,9 @@ export function AccelerationPage() {
   });
 
   const savePolicy = useMutation({
-    mutationFn: (next: AppConfig) => request<{ saved: boolean; restart_required: boolean }>('config.update', { config: next }),
+    mutationFn: (next: AppConfig) => request<ConfigUpdateResult>('config.update', { config: next }),
     onSuccess: async (result) => {
-      notifications.show({ color: 'green', title: '加速策略已保存', message: result.restart_required ? '后台服务重启后应用全部更改。' : '更改已经应用。' });
+      notifications.show({ color: 'green', title: '加速策略已保存', message: describeConfigUpdateResult(result) });
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.config }),
         queryClient.invalidateQueries({ queryKey: queryKeys.accelerationDomains }),

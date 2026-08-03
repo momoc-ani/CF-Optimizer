@@ -394,6 +394,40 @@ func TestRefreshPolicyRollsBackOnlyNewReceiptsWhenPreviousReceiptsAreInvalid(t *
 	}
 }
 
+func TestUpdateAccelerationDomainsRemovesStoredManualMapping(t *testing.T) {
+	policy := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
+	runner, stateStore := newTestRunner(t, policy)
+	runner.config.Acceleration.ManualDomains = []string{"ani.momoc.top"}
+	receipts, err := json.Marshal(proxy.ApplyResult{Receipts: []proxy.Receipt{{ID: "previous", Adapter: "test", Changed: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Update(func(state *store.State) error {
+		state.CurrentIPv4 = &store.Selection{IP: "1.1.1.1", Family: 4, PolicyVerified: true}
+		state.Policy = &store.PolicySnapshot{
+			DomainMappings: []store.DomainMappingSnapshot{{Domain: "ani.momoc.top", Addresses: []string{"1.1.1.1"}}},
+			Receipts:       receipts,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runner.UpdateAccelerationDomains(context.Background(), []string{}, []string{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.config.Acceleration.ManualDomains) != 0 {
+		t.Fatalf("manual domains were not updated: %#v", runner.config.Acceleration.ManualDomains)
+	}
+	state := stateStore.Snapshot()
+	if state.Policy == nil || len(state.Policy.DomainMappings) != 0 {
+		t.Fatalf("stored manual mapping was not removed: %#v", state.Policy)
+	}
+	if len(policy.policies) != 1 || len(policy.policies[0].DomainMappings) != 0 {
+		t.Fatalf("replacement policy retained the removed domain: %#v", policy.policies)
+	}
+}
+
 func TestRollbackRoutesUsesIndependentCleanupTimeouts(t *testing.T) {
 	backend := &delayedRouteBackend{routes: map[string]cfnetwork.RouteSpec{}, delay: 5 * time.Millisecond}
 	controller, err := cfnetwork.NewRouteController(t.TempDir(), backend, true, slog.New(slog.NewTextHandler(io.Discard, nil)))

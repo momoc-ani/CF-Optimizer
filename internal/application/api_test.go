@@ -4,15 +4,34 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
+	"net/netip"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/cf-optimizer/cf-optimizer/internal/benchmark"
+	"github.com/cf-optimizer/cf-optimizer/internal/config"
 	"github.com/cf-optimizer/cf-optimizer/internal/ipc"
+	cfnetwork "github.com/cf-optimizer/cf-optimizer/internal/network"
 	"github.com/cf-optimizer/cf-optimizer/internal/optimizer"
+	"github.com/cf-optimizer/cf-optimizer/internal/ranges"
 	"github.com/cf-optimizer/cf-optimizer/internal/store"
 )
+
+type configUpdateRanges struct{}
+
+func (configUpdateRanges) Update(context.Context, bool) (ranges.UpdateResult, error) {
+	return ranges.UpdateResult{Snapshot: ranges.Snapshot{Version: 1, Source: "test", Hash: "test", IPv4: []string{"1.1.1.0/24"}}}, nil
+}
+
+type configUpdateBenchmark struct{}
+
+func (configUpdateBenchmark) Run(context.Context, []netip.Addr, func(benchmark.Progress)) ([]benchmark.Result, error) {
+	return nil, nil
+}
 
 func TestDecodeStrictRejectsUnknownFieldAndTrailingValue(t *testing.T) {
 	var target struct {
@@ -118,4 +137,123 @@ func TestSystemStatusIncludesIsolatedSchedulePromise(t *testing.T) {
 	if status.NextScheduledAt == nil || !status.NextScheduledAt.Equal(want) {
 		t.Fatalf("unexpected next scheduled time: %#v", status.NextScheduledAt)
 	}
+}
+
+func TestConfigUpdateHotAppliesClearedManualDomains(t *testing.T) {
+	api, runtimeState := newConfigUpdateTestAPI(t)
+	next := runtimeState.View().Config
+	next.Acceleration.ManualDomains = []string{}
+	result := updateConfigForTest(t, api, next)
+	if !result["saved"] || !result["hot_applied"] || result["restart_required"] {
+		t.Fatalf("unexpected update result: %#v", result)
+	}
+	if domains := runtimeState.View().Config.Acceleration.ManualDomains; len(domains) != 0 {
+		t.Fatalf("runtime retained cleared manual domains: %#v", domains)
+	}
+	response, err := api.Handle(context.Background(), ipc.Request{Method: "config.get"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted := response.(config.Config)
+	if len(persisted.Acceleration.ManualDomains) != 0 {
+		t.Fatalf("config.get returned stale manual domains: %#v", persisted.Acceleration.ManualDomains)
+	}
+	domainResponse, err := api.Handle(context.Background(), ipc.Request{Method: "acceleration.domains"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if domains := domainResponse.(DomainDiscoveryResult).Domains; len(domains) != 0 {
+		t.Fatalf("acceleration.domains retained the removed manual domain: %#v", domains)
+	}
+}
+
+func TestConfigGetReturnsSavedSettingsPendingRestart(t *testing.T) {
+	api, runtimeState := newConfigUpdateTestAPI(t)
+	next := runtimeState.View().Config
+	next.Schedule.Interval = config.Duration(7 * time.Hour)
+	result := updateConfigForTest(t, api, next)
+	if !result["saved"] || result["hot_applied"] || !result["restart_required"] {
+		t.Fatalf("unexpected update result: %#v", result)
+	}
+	if runtimeState.View().Config.Schedule.Interval == next.Schedule.Interval {
+		t.Fatal("restart-only setting was incorrectly applied to the active runtime")
+	}
+	response, err := api.Handle(context.Background(), ipc.Request{Method: "config.get"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted := response.(config.Config); persisted.Schedule.Interval != next.Schedule.Interval {
+		t.Fatalf("config.get did not return the saved desired config: %#v", persisted.Schedule)
+	}
+}
+
+func TestConfigUpdateRestoresPersistedDomainsWhenPolicyRefreshFails(t *testing.T) {
+	api, runtimeState := newConfigUpdateTestAPI(t)
+	if err := runtimeState.Store.Update(func(state *store.State) error {
+		state.Policy = &store.PolicySnapshot{}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	next := runtimeState.View().Config
+	next.Acceleration.ManualDomains = []string{}
+	raw, err := json.Marshal(map[string]any{"config": next})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.Handle(context.Background(), ipc.Request{Method: "config.update", Params: raw}, nil); err == nil {
+		t.Fatal("expected policy refresh failure")
+	}
+	if domains := runtimeState.View().Config.Acceleration.ManualDomains; len(domains) != 1 || domains[0] != "ani.momoc.top" {
+		t.Fatalf("runtime config changed after refresh failure: %#v", domains)
+	}
+	persisted, err := config.Load(runtimeState.ConfigPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if domains := persisted.Acceleration.ManualDomains; len(domains) != 1 || domains[0] != "ani.momoc.top" {
+		t.Fatalf("persisted config was not restored: %#v", domains)
+	}
+}
+
+func newConfigUpdateTestAPI(t *testing.T) (*API, *Runtime) {
+	t.Helper()
+	dataDir := t.TempDir()
+	cfg := config.Default()
+	cfg.DataDir = dataDir
+	cfg.Benchmark.IPv4 = true
+	cfg.Benchmark.IPv6 = false
+	cfg.Acceleration.ManualDomains = []string{"ani.momoc.top"}
+	configPath := filepath.Join(dataDir, "config.yaml")
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err := store.Open(dataDir, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	runner, err := optimizer.NewRunner(cfg, configUpdateRanges{}, configUpdateBenchmark{}, stateStore, nil, cfnetwork.PhysicalPath{}, nil, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeState := &Runtime{Config: cfg, ConfigPath: configPath, Store: stateStore, Runner: runner, Logger: logger}
+	api, err := NewAPI(runtimeState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return api, runtimeState
+}
+
+func updateConfigForTest(t *testing.T, api *API, next config.Config) map[string]bool {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"config": next})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := api.Handle(context.Background(), ipc.Request{Method: "config.update", Params: raw}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response.(map[string]bool)
 }

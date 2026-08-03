@@ -183,7 +183,7 @@ func TestConfigUpdateRejectsQuickStartWriteConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	api.configurationMutex.Lock()
-	_, updateErr := api.updateConfig(raw)
+	_, updateErr := api.updateConfig(context.Background(), raw)
 	api.configurationMutex.Unlock()
 	assertQuickStartErrorCode(t, updateErr, "conflict")
 }

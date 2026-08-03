@@ -172,7 +172,7 @@ export async function mockRequest<T>(method: string, parameters: Record<string, 
     case 'acceleration.domains': return { observed: 0, verified: 1, activated: 0, policy_refreshed: false, domains: [{ domain: 'ani.momoc.top', source: 'manual', first_seen_at: iso(-60), last_seen_at: iso(0), cloudflare_verified: true, preflight_verified: true, active: true, last_resolved_addresses: ['104.21.92.119', '172.67.192.253'], accelerated_addresses: ['104.16.132.229'], verified_adapters: ['generic-route', 'mihomo', 'windows-hosts'], applied_at: iso(-3) }] } as T;
     case 'acceleration.discover': return { observed: 12, verified: 1, activated: 0, policy_refreshed: false, domains: [] } as T;
     case 'config.get': return mockConfig as T;
-    case 'config.update': return { saved: true, restart_required: true } as T;
+    case 'config.update': return { saved: true, hot_applied: false, restart_required: true } as T;
     case 'logs.tail': return [
       JSON.stringify({ time: iso(-3), level: 'INFO', component: 'optimizer', msg: '优选任务结束', run_id: 'run-20260801-0930', result: 'completed', duration: '2m41s' }),
       JSON.stringify({ time: iso(-4), level: 'INFO', component: 'proxy', msg: '代理策略验证完成', transaction_id: 'px-41c8b3', adapter: 'mihomo', result: 'verified' }),

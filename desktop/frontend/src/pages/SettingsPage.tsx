@@ -11,6 +11,7 @@ import { queryKeys, useConfig } from '../api/hooks';
 import type { AppConfig } from '../api/types';
 import { ErrorState, LoadingState, PageHeader, Section } from '../components/Page';
 import { joinConfigLines } from '../lib/configCollections';
+import { describeConfigUpdateResult, type ConfigUpdateResult } from '../lib/configUpdate';
 
 const sourceRepositoryURL = 'https://github.com/momoc-ani/CF-Optimizer';
 const projectCopyright = 'Copyright (c) 2026 CF Optimizer Contributors';
@@ -117,9 +118,9 @@ export function SettingsPage() {
   } });
   useEffect(() => { if (config.data) form.reset(formFromConfig(config.data)); }, [config.data, form]);
   const save = useMutation({
-    mutationFn: (next: AppConfig) => request<{ saved: boolean; restart_required: boolean }>('config.update', { config: next }),
+    mutationFn: (next: AppConfig) => request<ConfigUpdateResult>('config.update', { config: next }),
     onSuccess: async (result) => {
-      notifications.show({ color: 'green', title: '配置已保存', message: result.restart_required ? '后台服务重启后应用全部更改。' : '更改已经应用。' });
+      notifications.show({ color: 'green', title: '配置已保存', message: describeConfigUpdateResult(result) });
       await queryClient.invalidateQueries({ queryKey: queryKeys.config });
     },
     onError: (error: Error) => notifications.show({ color: 'red', title: '保存失败', message: error.message }),

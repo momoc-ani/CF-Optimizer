@@ -10,6 +10,8 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -109,9 +111,9 @@ func (a *API) Handle(ctx context.Context, request ipc.Request, emit func(any) er
 	case "diagnostics.route":
 		return a.routeDiagnostics(ctx, request.Params)
 	case "config.get":
-		return a.runtime.View().Config, nil
+		return a.desiredConfig()
 	case "config.update":
-		return a.updateConfig(request.Params)
+		return a.updateConfig(ctx, request.Params)
 	case "logs.tail":
 		return a.tailLogs(request.Params)
 	default:
@@ -269,7 +271,7 @@ func (a *API) routeDiagnostics(ctx context.Context, raw json.RawMessage) (diagno
 	return diagnostics.Generate(ctx, target, view.PhysicalPath, a.runtime.RouteBackend, view.DirectDial, view.Config.Network.CommandTimeout.Duration()), nil
 }
 
-func (a *API) updateConfig(raw json.RawMessage) (map[string]bool, error) {
+func (a *API) updateConfig(ctx context.Context, raw json.RawMessage) (map[string]bool, error) {
 	var parameters struct {
 		Config config.Config `json:"config"`
 	}
@@ -291,10 +293,76 @@ func (a *API) updateConfig(raw json.RawMessage) (map[string]bool, error) {
 	if a.runtime.ConfigPath == "" {
 		return nil, &ipc.Error{Code: "precondition_failed", Message: "daemon has no configured config file path"}
 	}
-	if err := config.Save(a.runtime.ConfigPath, parameters.Config); err != nil {
+	persistedBefore, err := a.desiredConfig()
+	if err != nil {
+		return nil, fmt.Errorf("load persisted config before update: %w", err)
+	}
+	domainsChanged := !slices.Equal(view.Config.Acceleration.ManualDomains, parameters.Config.Acceleration.ManualDomains) ||
+		!slices.Equal(view.Config.Acceleration.ExcludedDomains, parameters.Config.Acceleration.ExcludedDomains)
+	activeAfterUpdate := view.Config
+	activeAfterUpdate.Acceleration.ManualDomains = slices.Clone(parameters.Config.Acceleration.ManualDomains)
+	activeAfterUpdate.Acceleration.ExcludedDomains = slices.Clone(parameters.Config.Acceleration.ExcludedDomains)
+	restartRequired := !reflect.DeepEqual(activeAfterUpdate, parameters.Config)
+
+	updateContext := ctx
+	if domainsChanged {
+		var cancel context.CancelFunc
+		updateContext, cancel = context.WithCancel(ctx)
+		if !a.setActiveCancel(cancel) {
+			cancel()
+			return nil, &ipc.Error{Code: "conflict", Message: optimizer.ErrAlreadyRunning.Error()}
+		}
+		defer func() {
+			cancel()
+			a.clearActiveCancel()
+		}()
+	}
+	if err := a.saveConfig(a.runtime.ConfigPath, parameters.Config); err != nil {
 		return nil, err
 	}
-	return map[string]bool{"saved": true, "restart_required": true}, nil
+	if domainsChanged {
+		if updateErr := a.runtime.UpdateAccelerationDomains(
+			updateContext, parameters.Config.Acceleration.ManualDomains, parameters.Config.Acceleration.ExcludedDomains,
+		); updateErr != nil {
+			restoreErr := a.saveConfig(a.runtime.ConfigPath, persistedBefore)
+			if a.runtime.Logger != nil {
+				result := "rolled_back"
+				if restoreErr != nil {
+					result = "rollback_failed"
+				}
+				a.runtime.Logger.Warn("域名配置热更新失败", "component", "config", "rollback_succeeded", restoreErr == nil, "result", result, "error", updateErr)
+			}
+			if restoreErr == nil && errors.Is(updateErr, optimizer.ErrAlreadyRunning) {
+				return nil, &ipc.Error{Code: "conflict", Message: optimizer.ErrAlreadyRunning.Error()}
+			}
+			if restoreErr != nil {
+				updateErr = errors.Join(updateErr, fmt.Errorf("restore persisted config: %w", restoreErr))
+			}
+			return nil, updateErr
+		}
+	}
+	if a.runtime.Logger != nil {
+		a.runtime.Logger.Info("配置保存完成", "component", "config", "manual_domains", len(parameters.Config.Acceleration.ManualDomains), "excluded_domains", len(parameters.Config.Acceleration.ExcludedDomains), "hot_applied", domainsChanged, "restart_required", restartRequired, "result", "completed")
+	}
+	return map[string]bool{"saved": true, "hot_applied": domainsChanged, "restart_required": restartRequired}, nil
+}
+
+// desiredConfig 返回磁盘中的期望配置；配置文件尚未建立时回退到当前运行时快照。
+func (a *API) desiredConfig() (config.Config, error) {
+	view := a.runtime.View()
+	if a.runtime.ConfigPath == "" {
+		return view.Config, nil
+	}
+	if _, err := os.Stat(a.runtime.ConfigPath); errors.Is(err, os.ErrNotExist) {
+		return view.Config, nil
+	} else if err != nil {
+		return config.Config{}, err
+	}
+	persisted, err := config.Load(a.runtime.ConfigPath, view.Config.DataDir)
+	if err != nil {
+		return config.Config{}, err
+	}
+	return persisted, nil
 }
 
 func (a *API) tailLogs(raw json.RawMessage) ([]string, error) {

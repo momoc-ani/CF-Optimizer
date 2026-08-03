@@ -594,6 +594,22 @@ func (r *Runtime) ActivateSession(session RuntimeSession) {
 	r.mutex.Unlock()
 }
 
+// UpdateAccelerationDomains 刷新 Runner 的当前域名策略，并在成功后同步运行时配置视图。
+func (r *Runtime) UpdateAccelerationDomains(ctx context.Context, manualDomains, excludedDomains []string) error {
+	view := r.View()
+	if view.Runner == nil {
+		return errors.New("optimizer runner is unavailable for acceleration domain update")
+	}
+	if err := view.Runner.UpdateAccelerationDomains(ctx, manualDomains, excludedDomains); err != nil {
+		return err
+	}
+	r.mutex.Lock()
+	r.Config.Acceleration.ManualDomains = slices.Clone(manualDomains)
+	r.Config.Acceleration.ExcludedDomains = slices.Clone(excludedDomains)
+	r.mutex.Unlock()
+	return nil
+}
+
 // validateManagedPath 要求至少一个已启用地址族具备可验证的物理网关。
 func validateManagedPath(cfg config.Config, physicalPath cfnetwork.PhysicalPath) error {
 	if physicalPath.Interface == "" {
