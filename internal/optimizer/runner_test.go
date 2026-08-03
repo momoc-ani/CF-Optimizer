@@ -174,6 +174,15 @@ func TestRunnerAppliesAndPersistsVerifiedSelection(t *testing.T) {
 	}
 }
 
+func TestRunnerRejectsPolicyApplicationWithTypedNilCoordinator(t *testing.T) {
+	var coordinator *proxy.Coordinator
+	runner, _ := newTestRunner(t, coordinator)
+	_, err := runner.Run(context.Background(), RunOptions{ApplyPolicy: true}, nil)
+	if err == nil || !strings.Contains(err.Error(), "no adapter is configured") {
+		t.Fatalf("typed-nil coordinator did not return the expected policy error: %v", err)
+	}
+}
+
 func TestAllocateDomainMappingsUsesManualConfigurationAndRankingOrder(t *testing.T) {
 	policyApplier := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
 	runner, _ := newTestRunner(t, policyApplier)

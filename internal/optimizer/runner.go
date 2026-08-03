@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -118,6 +119,13 @@ func (r *Runner) SetDomainResolver(resolver DomainResolver) {
 func NewRunner(cfg config.Config, rangeSource RangeSource, benchmarker Benchmarker, stateStore *store.Store, routes *cfnetwork.RouteController, physicalPath cfnetwork.PhysicalPath, policy PolicyApplier, logger *slog.Logger) (*Runner, error) {
 	if rangeSource == nil || benchmarker == nil || stateStore == nil || logger == nil {
 		return nil, errors.New("range source, benchmarker, store and logger are required")
+	}
+	// Go 接口可能携带 nil 具体指针；在构造边界归一化，避免无适配器配置被误判为可应用策略。
+	if policy != nil {
+		policyValue := reflect.ValueOf(policy)
+		if policyValue.Kind() == reflect.Pointer && policyValue.IsNil() {
+			policy = nil
+		}
 	}
 	return &Runner{
 		config: cfg, ranges: rangeSource, benchmark: benchmarker, store: stateStore,
