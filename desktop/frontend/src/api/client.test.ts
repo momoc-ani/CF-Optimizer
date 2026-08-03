@@ -22,4 +22,8 @@ describe('desktop bridge client', () => {
     const source = new Error('request failed');
     expect(normalizeBridgeError(source)).toBe(source);
   });
+
+  it('does not silently use mock data when the production bridge is missing', async () => {
+    await expect(request('history.list')).rejects.toThrow('桌面桥接不可用');
+  });
 });

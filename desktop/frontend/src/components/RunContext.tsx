@@ -14,13 +14,18 @@ export function RunProvider({ children }: { children: ReactNode }) {
   const [quickStartResult, setQuickStartResult] = useState<QuickStartResult>();
   const [runError, setRunError] = useState<Error>();
   useEffect(() => subscribeOptimizerEvents((next) => {
+    if (next.type === 'run.finished') {
+      setEvent(undefined);
+      queryClient.setQueryData<SystemStatus>(queryKeys.status, (current) => current ? { ...current, active_event: undefined, state: { ...current.state, running: false } } : current);
+      return;
+    }
     setEvent(next);
     queryClient.setQueryData<SystemStatus>(queryKeys.status, (current) => current ? { ...current, active_event: next, state: { ...current.state, running: true } } : current);
   }), [queryClient]);
 
   const runMutation = useMutation({
     mutationFn: (options: RunOptions) => request<RunReport>('optimizer.run', options),
-    onMutate: () => { setQuickStartResult(undefined); setRunError(undefined); },
+    onMutate: () => { setEvent(undefined); setQuickStartResult(undefined); setRunError(undefined); },
     onSuccess: (nextReport) => {
       setReport(nextReport);
       notifications.show({ color: nextReport.warnings?.length ? 'yellow' : 'green', title: nextReport.policy_applied ? '已验证' : '仅测速完成', message: nextReport.policy_applied ? '后台已完成策略和选路验证' : '测速结果已生成，未修改系统策略' });
@@ -33,7 +38,7 @@ export function RunProvider({ children }: { children: ReactNode }) {
   });
   const quickStartMutation = useMutation({
     mutationFn: (options: QuickStartRunOptions) => request<QuickStartResult>('quickstart.run', options),
-    onMutate: () => { setQuickStartResult(undefined); setRunError(undefined); },
+    onMutate: () => { setEvent(undefined); setQuickStartResult(undefined); setRunError(undefined); },
     onSuccess: (result) => {
       setReport(result.report);
       setQuickStartResult(result);
@@ -58,7 +63,7 @@ export function RunProvider({ children }: { children: ReactNode }) {
     onError: (error: Error) => notifications.show({ color: 'red', title: '取消失败', message: error.message }),
   });
   return (
-    <RunContext.Provider value={{ event, report, quickStartResult, running: runMutation.isPending || quickStartMutation.isPending || Boolean(event), cancelling: cancelMutation.isPending, error: runError, run: runMutation.mutateAsync, runQuickStart: quickStartMutation.mutateAsync, cancel: cancelMutation.mutate }}>
+    <RunContext.Provider value={{ event, report, quickStartResult, running: runMutation.isPending || quickStartMutation.isPending, cancelling: cancelMutation.isPending, error: runError, run: runMutation.mutateAsync, runQuickStart: quickStartMutation.mutateAsync, cancel: cancelMutation.mutate }}>
       {children}
     </RunContext.Provider>
   );

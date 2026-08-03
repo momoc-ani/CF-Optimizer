@@ -11,9 +11,11 @@ import (
 )
 
 type lifecycleAdapter struct {
-	name        string
-	verifyError error
-	rolledBack  bool
+	name                 string
+	verifyError          error
+	cancel               context.CancelFunc
+	rolledBack           bool
+	rollbackContextError error
 }
 
 type recordingReceiptJournal struct {
@@ -50,9 +52,15 @@ func (a *lifecycleAdapter) Plan(_ context.Context, policy DirectPolicy) (Plan, e
 func (a *lifecycleAdapter) Apply(context.Context, Plan) (Receipt, error) {
 	return Receipt{ID: a.name, Adapter: a.name, Changed: true, AppliedAt: time.Now(), Payload: json.RawMessage(`{}`)}, nil
 }
-func (a *lifecycleAdapter) Verify(context.Context, DirectPolicy, Receipt) error { return a.verifyError }
-func (a *lifecycleAdapter) Rollback(context.Context, Receipt) error {
+func (a *lifecycleAdapter) Verify(context.Context, DirectPolicy, Receipt) error {
+	if a.cancel != nil {
+		a.cancel()
+	}
+	return a.verifyError
+}
+func (a *lifecycleAdapter) Rollback(ctx context.Context, _ Receipt) error {
 	a.rolledBack = true
+	a.rollbackContextError = ctx.Err()
 	return nil
 }
 
@@ -66,6 +74,21 @@ func TestCoordinatorRollsBackInScopeOnVerificationFailure(t *testing.T) {
 	_, err = coordinator.Apply(context.Background(), DirectPolicy{IPv4CIDRs: []string{"1.1.1.1/32"}})
 	if err == nil || !first.rolledBack || !second.rolledBack {
 		t.Fatalf("expected both adapters to roll back: first=%v second=%v err=%v", first.rolledBack, second.rolledBack, err)
+	}
+}
+
+func TestCoordinatorRollsBackWithCleanupContextAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	adapter := &lifecycleAdapter{name: "cancelled", verifyError: errors.New("cancelled during verify"), cancel: cancel}
+	coordinator, err := NewCoordinator([]Adapter{adapter}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.Apply(ctx, DirectPolicy{IPv4CIDRs: []string{"1.1.1.1/32"}}); err == nil {
+		t.Fatal("expected verification failure")
+	}
+	if !adapter.rolledBack || adapter.rollbackContextError != nil {
+		t.Fatalf("rollback inherited cancellation: rolled_back=%t context_error=%v", adapter.rolledBack, adapter.rollbackContextError)
 	}
 }
 

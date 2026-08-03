@@ -2,6 +2,7 @@ import type {
   AppConfig,
   BenchmarkResult,
   DiagnosticReport,
+  DomainDiscovery,
   OptimizerEvent,
   ProxyDetections,
   QuickStartPlan,
@@ -29,6 +30,11 @@ const history: RunSummary[] = [
   { id: 'run-20260801-0930', started_at: iso(-6), finished_at: iso(-3), candidates: 1000, qualified: 27, best: results.slice(0, 3).map(({ ip, score, avg_latency, loss, mbps }) => ({ ip, score, avg_latency, loss, mbps: mbps ?? 0 })), selected_ipv4: '104.16.132.229', selected_ipv6: '2606:4700:3037::6815:1d8', switch_reason: 'IPv4 improved 18.4%; IPv6 kept by minimum hold' },
   { id: 'run-20260801-0330', started_at: iso(-366), finished_at: iso(-363), candidates: 1000, qualified: 24, selected_ipv4: '172.66.44.18', selected_ipv6: '2606:4700:3037::6815:1d8', switch_reason: 'current nodes remained stable' },
   { id: 'run-20260731-2130', started_at: iso(-726), finished_at: iso(-723), candidates: 1000, qualified: 19, selected_ipv4: '172.66.44.18', switch_reason: 'IPv6 had no qualified candidate', error: 'IPv6 partial failure' },
+];
+
+const manualDomain: DomainDiscovery = { domain: 'ani.momoc.top', source: 'manual', first_seen_at: iso(-60), last_seen_at: iso(0), cloudflare_verified: true, preflight_verified: true, active: true, last_resolved_addresses: ['104.21.92.119', '172.67.192.253'], accelerated_addresses: ['104.16.132.229'], verified_adapters: ['generic-route', 'mihomo', 'windows-hosts'], applied_at: iso(-3) };
+let discoveredDomains: DomainDiscovery[] = [
+  { domain: 'dash.cloudflare.com', source: 'mihomo', first_seen_at: iso(-45), last_seen_at: iso(-1), cloudflare_verified: true, preflight_verified: true, active: true, last_resolved_addresses: ['104.16.123.96'], accelerated_addresses: ['172.66.44.18'], verified_adapters: ['generic-route', 'mihomo', 'windows-hosts'], applied_at: iso(-3) },
 ];
 
 let cancelled = false;
@@ -170,8 +176,13 @@ export async function mockRequest<T>(method: string, parameters: Record<string, 
     case 'history.list': return history as T;
     case 'routes.list': return routes as T;
     case 'proxy.detect': return proxyDetections as T;
-    case 'acceleration.domains': return { observed: 0, verified: 1, activated: 0, policy_refreshed: false, domains: [{ domain: 'ani.momoc.top', source: 'manual', first_seen_at: iso(-60), last_seen_at: iso(0), cloudflare_verified: true, preflight_verified: true, active: true, last_resolved_addresses: ['104.21.92.119', '172.67.192.253'], accelerated_addresses: ['104.16.132.229'], verified_adapters: ['generic-route', 'mihomo', 'windows-hosts'], applied_at: iso(-3) }] } as T;
-    case 'acceleration.discover': return { observed: 12, verified: 1, activated: 0, policy_refreshed: false, domains: [] } as T;
+    case 'acceleration.domains': return { observed: 0, verified: 1, activated: 0, discovered: discoveredDomains.length, policy_refreshed: false, domains: [manualDomain, ...discoveredDomains] } as T;
+    case 'acceleration.discover': return { observed: 12, verified: 1, activated: 0, discovered: discoveredDomains.length, policy_refreshed: false, domains: [manualDomain, ...discoveredDomains] } as T;
+    case 'acceleration.clear_discovered': {
+      const cleared = discoveredDomains.length;
+      discoveredDomains = [];
+      return { cleared, accelerations_removed: cleared, policy_refreshed: cleared > 0 } as T;
+    }
     case 'config.get': return mockConfig as T;
     case 'config.update': return { saved: true, hot_applied: false, policy_refreshed: false, restart_required: true } as T;
     case 'logs.tail': return [

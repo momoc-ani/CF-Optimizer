@@ -40,20 +40,21 @@ const (
 
 // Runtime 汇总一个进程共享的核心组件和已验证依赖关系。
 type Runtime struct {
-	mutex            sync.RWMutex
-	Config           config.Config
-	ConfigPath       string
-	Store            *store.Store
-	Ranges           *ranges.Catalog
-	Runner           *optimizer.Runner
-	Routes           *cfnetwork.RouteController
-	RouteBackend     cfnetwork.RouteBackend
-	PhysicalPath     cfnetwork.PhysicalPath
-	DirectDial       cfnetwork.DialContextFunc
-	ProxyCoordinator *proxy.Coordinator
-	DomainResolver   *acceleration.PhysicalResolver
-	DomainVerifier   *acceleration.Verifier
-	Logger           *slog.Logger
+	mutex             sync.RWMutex
+	accelerationMutex sync.Mutex
+	Config            config.Config
+	ConfigPath        string
+	Store             *store.Store
+	Ranges            *ranges.Catalog
+	Runner            *optimizer.Runner
+	Routes            *cfnetwork.RouteController
+	RouteBackend      cfnetwork.RouteBackend
+	PhysicalPath      cfnetwork.PhysicalPath
+	DirectDial        cfnetwork.DialContextFunc
+	ProxyCoordinator  *proxy.Coordinator
+	DomainResolver    *acceleration.PhysicalResolver
+	DomainVerifier    *acceleration.Verifier
+	Logger            *slog.Logger
 }
 
 // RuntimeView 提供可并发读取的当前运行配置和执行依赖快照。
@@ -201,6 +202,7 @@ type DomainDiscoveryResult struct {
 	Observed        int                        `json:"observed"`
 	Verified        int                        `json:"verified"`
 	Activated       int                        `json:"activated"`
+	Discovered      int                        `json:"discovered"`
 	PolicyRefreshed bool                       `json:"policy_refreshed"`
 	Domains         []DomainAccelerationStatus `json:"domains"`
 }
@@ -215,6 +217,10 @@ type DomainAccelerationStatus struct {
 
 // DiscoverAccelerationDomains 从 Mihomo 活动连接发现精确域名，并用物理 DNS 与 HTTPS 预检确认。
 func (r *Runtime) DiscoverAccelerationDomains(ctx context.Context) (DomainDiscoveryResult, error) {
+	if !r.accelerationMutex.TryLock() {
+		return r.domainDiscoverySnapshot(), errors.New("domain discovery or cleanup is already active")
+	}
+	defer r.accelerationMutex.Unlock()
 	view := r.View()
 	if !view.Config.Acceleration.Enabled || !view.Config.Acceleration.AutoDiscover || !view.Config.Proxy.AutoDetect {
 		return r.domainDiscoverySnapshot(), nil
@@ -368,6 +374,7 @@ func (r *Runtime) DiscoverAccelerationDomains(ctx context.Context) (DomainDiscov
 		result.PolicyRefreshed = true
 	}
 	snapshot := r.domainDiscoverySnapshot()
+	result.Discovered = snapshot.Discovered
 	result.Domains = snapshot.Domains
 	return result, nil
 }
@@ -450,7 +457,7 @@ func (r *Runtime) domainDiscoverySnapshot() DomainDiscoveryResult {
 		}
 		records[domain] = record
 	}
-	result := DomainDiscoveryResult{Domains: make([]DomainAccelerationStatus, 0, len(records))}
+	result := DomainDiscoveryResult{Discovered: len(state.DiscoveredDomains), Domains: make([]DomainAccelerationStatus, 0, len(records))}
 	for _, record := range records {
 		status := DomainAccelerationStatus{DomainDiscovery: record}
 		if addresses, active := activeMappings[record.Domain]; active {
@@ -609,6 +616,19 @@ func (r *Runtime) UpdateAccelerationDomains(ctx context.Context, manualDomains, 
 	r.Config.Acceleration.ExcludedDomains = slices.Clone(excludedDomains)
 	r.mutex.Unlock()
 	return policyRefreshed, nil
+}
+
+// ClearDiscoveredAccelerationDomains 串行清理自动发现记录及其已验证加速策略。
+func (r *Runtime) ClearDiscoveredAccelerationDomains(ctx context.Context) (optimizer.DiscoveredDomainCleanupResult, error) {
+	if !r.accelerationMutex.TryLock() {
+		return optimizer.DiscoveredDomainCleanupResult{}, errors.New("domain discovery or cleanup is already active")
+	}
+	defer r.accelerationMutex.Unlock()
+	view := r.View()
+	if view.Runner == nil {
+		return optimizer.DiscoveredDomainCleanupResult{}, errors.New("optimizer runner is unavailable for discovered domain cleanup")
+	}
+	return view.Runner.ClearDiscoveredDomains(ctx)
 }
 
 // validateManagedPath 要求至少一个已启用地址族具备可验证的物理网关。

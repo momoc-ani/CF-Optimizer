@@ -51,7 +51,7 @@ Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix
 2. 打开 CF Optimizer，等待总览连接后台并自动完成只读物理出口预检。
 3. 点击“一键优选”，在一个确认框内核对接口、网关和影响范围，选择“仅本次应用”或“以后自动维护”，然后开始。
 
-完成第三步后无需额外操作：后台会把已验证的优选 IP 用于域名加速，默认不预置手动域名，并自动发现和应用通过验证的 Cloudflare 域名。独立“域名加速”页用于查看 TLS SNI、HTTP Host、代理 `DIRECT`、物理接口和网关等证据，也可在此维护手动域名、排除域名和自动策略；“设置”页不再重复这些选项。
+完成第三步后无需额外操作：后台会把已验证的优选 IP 用于域名加速，默认不预置手动域名，并自动发现和应用通过验证的 Cloudflare 域名。独立“域名加速”页用于查看 TLS SNI、HTTP Host、代理 `DIRECT`、物理接口和网关等证据，也可在此维护手动域名、排除域名和自动策略，或清理自动发现记录及其已有加速而保留手动域名；“设置”页不再重复这些选项。
 
 自动发现不等于无条件接管所有访问域名。只有通过 Cloudflare 身份、TLS/Host 预检、策略应用和物理出口验证的域名才会显示“已加速”；未通过的域名保留为待验证或失败状态。
 
@@ -173,7 +173,7 @@ Do not install the Linux service under WSL to manage Windows host networking. In
 2. Open CF Optimizer and wait for the Overview to connect to the service and finish its read-only physical-egress preflight.
 3. Select One-click Optimize, review the interface, gateway, and effects in one confirmation dialog, choose Apply once or Maintain automatically, and start.
 
-No additional step is required after step 3. The service uses the verified selected IP for domain acceleration, starts without a preconfigured manual hostname, and automatically discovers and applies verified Cloudflare hostnames. Use the dedicated Domain Acceleration view to inspect TLS SNI, HTTP Host, proxy `DIRECT`, physical interface, and gateway evidence, or to manage manual domains, exclusions, and automatic behavior. These controls are no longer duplicated in Settings.
+No additional step is required after step 3. The service uses the verified selected IP for domain acceleration, starts without a preconfigured manual hostname, and automatically discovers and applies verified Cloudflare hostnames. Use the dedicated Domain Acceleration view to inspect TLS SNI, HTTP Host, proxy `DIRECT`, physical interface, and gateway evidence, manage manual domains, exclusions, and automatic behavior, or clear discovered records and their acceleration while preserving manual domains. These controls are no longer duplicated in Settings.
 
 Automatic discovery does not unconditionally take over every visited hostname. A hostname is shown as Accelerated only after Cloudflare identity, TLS/Host preflight, policy application, and physical-egress verification succeed; other observations remain pending or failed.
 

@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -46,6 +47,15 @@ func TestDecodeStrictRejectsUnknownFieldAndTrailingValue(t *testing.T) {
 	}
 }
 
+func TestClearDiscoveredDomainsRejectsUnknownParameters(t *testing.T) {
+	api := &API{runtime: &Runtime{}}
+	_, err := api.Handle(context.Background(), ipc.Request{Method: "acceleration.clear_discovered", Params: json.RawMessage(`{"unexpected":true}`)}, nil)
+	var ipcErr *ipc.Error
+	if !errors.As(err, &ipcErr) || ipcErr.Code != "invalid_params" {
+		t.Fatalf("unexpected IPC error: %#v", err)
+	}
+}
+
 func TestActiveEventIsClonedAndClearedWithRun(t *testing.T) {
 	api := &API{}
 	progress := benchmark.Progress{Completed: 4, Total: 12}
@@ -61,6 +71,17 @@ func TestActiveEventIsClonedAndClearedWithRun(t *testing.T) {
 	api.clearActiveCancel()
 	if api.activeEvent != nil {
 		t.Fatal("active event should be cleared after the run finishes")
+	}
+}
+
+func TestNewestHistoryFirstDoesNotMutateStoredOrder(t *testing.T) {
+	history := []store.RunSummary{{ID: "old"}, {ID: "new"}}
+	result := newestHistoryFirst(history)
+	if len(result) != 2 || result[0].ID != "new" || result[1].ID != "old" {
+		t.Fatalf("unexpected history order: %#v", result)
+	}
+	if history[0].ID != "old" || history[1].ID != "new" {
+		t.Fatalf("source history was mutated: %#v", history)
 	}
 }
 

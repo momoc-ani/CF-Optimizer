@@ -196,7 +196,7 @@ func TestDomainDiscoverySnapshotReturnsSanitizedPolicyEvidence(t *testing.T) {
 	cfg.Acceleration.ManualDomains = []string{"ani.momoc.top"}
 	runtimeState := &Runtime{Config: cfg, Store: stateStore}
 	result := runtimeState.domainDiscoverySnapshot()
-	if len(result.Domains) != 1 {
+	if result.Discovered != 1 || len(result.Domains) != 1 {
 		t.Fatalf("unexpected acceleration domains: %#v", result.Domains)
 	}
 	domain := result.Domains[0]

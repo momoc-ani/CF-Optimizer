@@ -222,7 +222,7 @@ func (c *Coordinator) Rollback(ctx context.Context, result ApplyResult) error {
 	if len(result.Receipts) == 0 {
 		return nil
 	}
-	rollbackErrors := c.rollbackReceipts(ctx, result.Receipts)
+	rollbackErrors := c.rollbackReceipts(context.WithoutCancel(ctx), result.Receipts)
 	if len(rollbackErrors) == 0 && c.journal != nil {
 		if err := c.journal.Remove(result.Receipts); err != nil {
 			rollbackErrors = append(rollbackErrors, fmt.Errorf("remove rolled back proxy receipts: %w", err))
@@ -321,7 +321,7 @@ func ensurePolicyCoverage(policy DirectPolicy, adapters []Adapter) error {
 
 func (c *Coordinator) rollbackAll(ctx context.Context, receipts []Receipt, cause error) error {
 	rollbackErrors := []error{cause}
-	receiptErrors := c.rollbackReceipts(ctx, receipts)
+	receiptErrors := c.rollbackReceipts(context.WithoutCancel(ctx), receipts)
 	rollbackErrors = append(rollbackErrors, receiptErrors...)
 	if len(receiptErrors) == 0 && c.journal != nil {
 		if err := c.journal.Remove(receipts); err != nil {

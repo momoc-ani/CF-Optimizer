@@ -63,13 +63,18 @@ func (a *Adapter) Detect(context.Context) (proxy.Detection, error) {
 // Plan 为每个受管 CIDR 生成无副作用的路由变更计划。
 func (a *Adapter) Plan(ctx context.Context, policy proxy.DirectPolicy) (proxy.Plan, error) {
 	payload := routePlanPayload{}
+	eligibleRoutes := 0
 	for _, prefix := range policy.IPv4CIDRs {
 		if a.gatewayIPv4 == "" {
 			continue
 		}
+		eligibleRoutes++
 		plan, err := a.controller.Plan(ctx, a.route(prefix, a.gatewayIPv4), false)
 		if err != nil {
 			return proxy.Plan{}, err
+		}
+		if plan.Previous != nil && !plan.WillReplace {
+			continue
 		}
 		payload.Plans = append(payload.Plans, plan)
 	}
@@ -77,13 +82,17 @@ func (a *Adapter) Plan(ctx context.Context, policy proxy.DirectPolicy) (proxy.Pl
 		if a.gatewayIPv6 == "" {
 			continue
 		}
+		eligibleRoutes++
 		plan, err := a.controller.Plan(ctx, a.route(prefix, a.gatewayIPv6), false)
 		if err != nil {
 			return proxy.Plan{}, err
 		}
+		if plan.Previous != nil && !plan.WillReplace {
+			continue
+		}
 		payload.Plans = append(payload.Plans, plan)
 	}
-	if len(payload.Plans) == 0 {
+	if eligibleRoutes == 0 {
 		return proxy.Plan{}, errors.New("policy has no CIDR with an available physical gateway")
 	}
 	rawPayload, err := json.Marshal(payload)
@@ -109,10 +118,8 @@ func (a *Adapter) Apply(ctx context.Context, plan proxy.Plan) (proxy.Receipt, er
 	for _, routePlan := range payload.Plans {
 		transaction, err := a.controller.Apply(ctx, routePlan)
 		if err != nil {
-			for index := len(receiptPayload.TransactionIDs) - 1; index >= 0; index-- {
-				_ = a.controller.Rollback(ctx, receiptPayload.TransactionIDs[index])
-			}
-			return proxy.Receipt{}, err
+			rollbackErr := a.rollbackTransactions(context.WithoutCancel(ctx), receiptPayload.TransactionIDs)
+			return proxy.Receipt{}, errors.Join(err, rollbackErr)
 		}
 		receiptPayload.TransactionIDs = append(receiptPayload.TransactionIDs, transaction.ID)
 	}
@@ -147,9 +154,14 @@ func (a *Adapter) Rollback(ctx context.Context, receipt proxy.Receipt) error {
 	if err := json.Unmarshal(receipt.Payload, &payload); err != nil {
 		return err
 	}
+	return a.rollbackTransactions(ctx, payload.TransactionIDs)
+}
+
+// rollbackTransactions 逆序恢复已应用的路由事务，供部分失败和正式回滚共用。
+func (a *Adapter) rollbackTransactions(ctx context.Context, transactionIDs []string) error {
 	var rollbackErrors []error
-	for index := len(payload.TransactionIDs) - 1; index >= 0; index-- {
-		if err := a.controller.Rollback(ctx, payload.TransactionIDs[index]); err != nil {
+	for index := len(transactionIDs) - 1; index >= 0; index-- {
+		if err := a.controller.Rollback(ctx, transactionIDs[index]); err != nil {
 			rollbackErrors = append(rollbackErrors, err)
 		}
 	}

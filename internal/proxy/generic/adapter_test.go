@@ -68,3 +68,28 @@ func TestGenericRouteLifecycle(t *testing.T) {
 		t.Fatalf("route remains after rollback: %#v", backend.routes)
 	}
 }
+
+func TestGenericRouteSkipsExactExistingRoute(t *testing.T) {
+	route := cfnetwork.RouteSpec{Prefix: "1.1.1.1/32", Gateway: "192.0.2.1", Interface: "eth0", InterfaceIndex: 2, Metric: 5}
+	backend := &routeBackend{routes: map[string]cfnetwork.RouteSpec{route.Prefix: route}}
+	controller, err := cfnetwork.NewRouteController(t.TempDir(), backend, true, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := New(controller, cfnetwork.PhysicalPath{Interface: "eth0", InterfaceIndex: 2, GatewayIPv4: "192.0.2.1"}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := proxy.DirectPolicy{IPv4CIDRs: []string{route.Prefix}}
+	plan, err := adapter.Plan(context.Background(), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := adapter.Apply(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Changed || len(controller.Transactions()) != 0 {
+		t.Fatalf("exact route was applied again: receipt=%#v transactions=%#v", receipt, controller.Transactions())
+	}
+}
