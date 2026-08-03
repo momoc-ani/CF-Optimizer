@@ -51,12 +51,40 @@ func TestDarwinStartAcceptsTimeoutWhenServiceIsRunning(t *testing.T) {
 	}
 }
 
-func TestDarwinStartRejectsTimeoutWhenServiceIsNotRunning(t *testing.T) {
+func TestDarwinStartWaitsForDelayedLaunchdTransition(t *testing.T) {
+	printCalls := 0
 	controller := newDarwinTestController(func(_ context.Context, arguments ...string) ([]byte, error) {
 		switch arguments[0] {
 		case "kickstart":
 			return nil, context.DeadlineExceeded
 		case "print":
+			printCalls++
+			if printCalls == 1 {
+				return []byte("state = waiting\n"), nil
+			}
+			return []byte("state = running\n"), nil
+		default:
+			t.Fatalf("unexpected launchctl command: %v", arguments)
+			return nil, nil
+		}
+	})
+
+	if err := controller.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if printCalls != 2 {
+		t.Fatalf("launchctl print call count = %d, want 2", printCalls)
+	}
+}
+
+func TestDarwinStartRejectsTimeoutWhenServiceIsNotRunning(t *testing.T) {
+	printCalls := 0
+	controller := newDarwinTestController(func(_ context.Context, arguments ...string) ([]byte, error) {
+		switch arguments[0] {
+		case "kickstart":
+			return nil, context.DeadlineExceeded
+		case "print":
+			printCalls++
 			return []byte("state = waiting\n"), nil
 		default:
 			t.Fatalf("unexpected launchctl command: %v", arguments)
@@ -70,6 +98,34 @@ func TestDarwinStartRejectsTimeoutWhenServiceIsNotRunning(t *testing.T) {
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Start() error = %v, want context deadline exceeded", err)
+	}
+	if printCalls < 2 {
+		t.Fatalf("launchctl print call count = %d, want polling before failure", printCalls)
+	}
+}
+
+func TestDarwinStartReportsRepeatedStateQueryFailure(t *testing.T) {
+	wantErr := errors.New("launchd unavailable")
+	printCalls := 0
+	controller := newDarwinTestController(func(_ context.Context, arguments ...string) ([]byte, error) {
+		switch arguments[0] {
+		case "kickstart":
+			return nil, context.DeadlineExceeded
+		case "print":
+			printCalls++
+			return nil, wantErr
+		default:
+			t.Fatalf("unexpected launchctl command: %v", arguments)
+			return nil, nil
+		}
+	})
+
+	err := controller.Start(context.Background())
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Start() error = %v, want state query error %v", err, wantErr)
+	}
+	if printCalls < 2 {
+		t.Fatalf("launchctl print call count = %d, want bounded retries", printCalls)
 	}
 }
 
@@ -109,7 +165,8 @@ func TestDarwinLaunchctlPreservesCommandTimeout(t *testing.T) {
 // newDarwinTestController 创建使用可控 launchctl 行为的测试控制器。
 func newDarwinTestController(runLaunchctl darwinCommandRunner) *darwinController {
 	return &darwinController{
-		config:       controllerConfig{timeout: time.Second},
-		runLaunchctl: runLaunchctl,
+		config:            controllerConfig{timeout: 25 * time.Millisecond},
+		runLaunchctl:      runLaunchctl,
+		statePollInterval: time.Millisecond,
 	}
 }

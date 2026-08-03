@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/cf-optimizer/cf-optimizer/internal/fsutil"
 )
@@ -17,13 +18,15 @@ const (
 	launchLabel      = "com.cfoptimizer.daemon"
 	launchDaemonPath = "/Library/LaunchDaemons/com.cfoptimizer.daemon.plist"
 	managedPlistMark = "<!-- Managed by CF Optimizer -->"
+	launchdStatePoll = 200 * time.Millisecond
 )
 
 type darwinCommandRunner func(context.Context, ...string) ([]byte, error)
 
 type darwinController struct {
-	config       controllerConfig
-	runLaunchctl darwinCommandRunner
+	config            controllerConfig
+	runLaunchctl      darwinCommandRunner
+	statePollInterval time.Duration
 }
 
 func newPlatformController(cfg controllerConfig) Controller {
@@ -61,7 +64,7 @@ func (c *darwinController) Start(ctx context.Context) error {
 	if ctx.Err() != nil || !errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	running, _, statusErr := c.launchdState(ctx)
+	running, _, statusErr := c.waitForRunning(ctx)
 	if statusErr != nil {
 		return fmt.Errorf("verify service state after launchctl kickstart timeout: %w", errors.Join(err, statusErr))
 	}
@@ -69,6 +72,37 @@ func (c *darwinController) Start(ctx context.Context) error {
 		return fmt.Errorf("service is not running after launchctl kickstart timeout: %w", err)
 	}
 	return nil
+}
+
+// waitForRunning 在单次命令超时后给 launchd 一个有上限的异步启动确认窗口。
+func (c *darwinController) waitForRunning(ctx context.Context) (bool, string, error) {
+	verificationContext, cancel := context.WithTimeout(ctx, c.config.timeout)
+	defer cancel()
+	interval := c.statePollInterval
+	if interval <= 0 {
+		interval = launchdStatePoll
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var lastDetail string
+	var lastErr error
+	for {
+		running, detail, err := c.launchdState(verificationContext)
+		if err == nil {
+			lastDetail = detail
+			lastErr = nil
+			if running {
+				return true, detail, nil
+			}
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-verificationContext.Done():
+			return false, lastDetail, errors.Join(verificationContext.Err(), lastErr)
+		case <-ticker.C:
+		}
+	}
 }
 
 func (c *darwinController) Stop(ctx context.Context) error {
