@@ -73,6 +73,27 @@ begin
     ewWaitUntilTerminated, ExitCode) and (ExitCode = 0);
 end;
 
+function QueryServiceRunning(var Running: Boolean): Boolean;
+var
+  ExitCode: Integer;
+  QueryFile: String;
+  QueryOutput: AnsiString;
+  Command: String;
+begin
+  QueryFile := ExpandConstant('{tmp}\cf-optimizer-service-query.txt');
+  DeleteFile(QueryFile);
+  Command := '/C ""' + ExpandConstant('{sys}\sc.exe') +
+    '" query CFOptimizer > "' + QueryFile + '" 2>&1"';
+  Result := Exec(ExpandConstant('{cmd}'), Command, '', SW_HIDE,
+    ewWaitUntilTerminated, ExitCode) and (ExitCode = 0) and
+    LoadStringFromFile(QueryFile, QueryOutput);
+  if Result then
+    Running := Pos('RUNNING', Uppercase(String(QueryOutput))) > 0
+  else
+    Running := False;
+  DeleteFile(QueryFile);
+end;
+
 function IsWebView2Installed: Boolean;
 var
   Version: String;
@@ -109,13 +130,20 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ExitCode: Integer;
+  ServiceRunning: Boolean;
 begin
   Result := '';
-  if ServiceExistedBeforeInstall and FileExists(ExpandConstant('{app}\cf-optimizer.exe')) then
-    if not Exec(ExpandConstant('{app}\cf-optimizer.exe'),
-      '--config "' + ExpandConstant('{commonappdata}\CF Optimizer\config.yaml') + '" stop',
-      '', SW_HIDE, ewWaitUntilTerminated, ExitCode) or (ExitCode <> 0) then
-      Result := 'Unable to stop the existing CF Optimizer service.';
+  if ServiceExistedBeforeInstall and FileExists(ExpandConstant('{app}\cf-optimizer.exe')) then begin
+    if not QueryServiceRunning(ServiceRunning) then begin
+      Result := 'Unable to query the existing CF Optimizer service.';
+      exit;
+    end;
+    if ServiceRunning then
+      if not Exec(ExpandConstant('{app}\cf-optimizer.exe'),
+        '--config "' + ExpandConstant('{commonappdata}\CF Optimizer\config.yaml') + '" stop',
+        '', SW_HIDE, ewWaitUntilTerminated, ExitCode) or (ExitCode <> 0) then
+        Result := 'Unable to stop the existing CF Optimizer service.';
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurrentStep: TUninstallStep);

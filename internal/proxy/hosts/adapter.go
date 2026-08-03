@@ -217,6 +217,59 @@ func (a *Adapter) Rollback(_ context.Context, receipt proxy.Receipt) error {
 	return restoreOptionalFile(backupPath, payload.BackupPrevious, payload.BackupPreviousExists, 0o600)
 }
 
+// CleanupConflict 在受管区块已消失时保留当前 Hosts，仅恢复可由收据链证明归属程序的备份文件。
+func (a *Adapter) CleanupConflict(_ context.Context, receipts []proxy.Receipt) error {
+	payloads := make([]receiptPayload, 0, len(receipts))
+	for _, receipt := range receipts {
+		if receipt.Adapter != adapterName || !receipt.Changed {
+			continue
+		}
+		var payload receiptPayload
+		if err := json.Unmarshal(receipt.Payload, &payload); err != nil {
+			return fmt.Errorf("decode Hosts cleanup receipt: %w", err)
+		}
+		payloads = append(payloads, payload)
+	}
+	if len(payloads) == 0 {
+		return nil
+	}
+	current, err := os.ReadFile(a.config.Path)
+	if err != nil {
+		return err
+	}
+	if bytes.Contains(current, []byte(beginMarker)) || bytes.Contains(current, []byte(endMarker)) {
+		return errors.New("Hosts still contains a CF Optimizer marker; refusing conflict cleanup")
+	}
+
+	oldest := payloads[0]
+	backupPath := a.config.Path + ".cf-optimizer.backup"
+	backupCurrent, backupExists, err := readOptionalFile(backupPath)
+	if err != nil {
+		return fmt.Errorf("read Hosts backup during conflict cleanup: %w", err)
+	}
+	if optionalFileEquals(backupCurrent, backupExists, oldest.BackupPrevious, oldest.BackupPreviousExists) {
+		return nil
+	}
+	if !matchesAppliedBackup(backupCurrent, backupExists, payloads) {
+		return errors.New("Hosts backup changed after apply; refusing conflict cleanup overwrite")
+	}
+	return restoreOptionalFile(backupPath, oldest.BackupPrevious, oldest.BackupPreviousExists, 0o600)
+}
+
+// matchesAppliedBackup 只接受收据链中某次应用实际写入的备份版本。
+func matchesAppliedBackup(content []byte, exists bool, payloads []receiptPayload) bool {
+	if !exists {
+		return false
+	}
+	currentHash := hash(content)
+	for _, payload := range payloads {
+		if payload.BackupAppliedHash != "" && currentHash == payload.BackupAppliedHash {
+			return true
+		}
+	}
+	return false
+}
+
 // readOptionalFile 区分不存在的可选文件与实际读取失败。
 func readOptionalFile(path string) ([]byte, bool, error) {
 	content, err := os.ReadFile(path)
