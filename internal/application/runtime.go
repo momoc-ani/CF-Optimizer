@@ -374,10 +374,10 @@ func (r *Runtime) DiscoverAccelerationDomains(ctx context.Context) (DomainDiscov
 
 // domainPolicyNeedsRefresh 检测需清理的自动映射和违反 IP 独占约束的旧策略。
 func domainPolicyNeedsRefresh(cfg config.Config, state store.State) bool {
-	discoveries := acceleration.EffectiveDiscoveries(cfg, state)
 	if state.Policy == nil {
-		return len(discoveries) > 0
+		return false
 	}
+	discoveries := acceleration.EffectiveDiscoveries(cfg, state)
 	manual := make(map[string]struct{}, len(cfg.AccelerationDomains()))
 	for _, domain := range cfg.AccelerationDomains() {
 		manual[domain] = struct{}{}

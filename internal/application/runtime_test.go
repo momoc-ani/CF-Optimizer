@@ -149,6 +149,22 @@ func TestDomainPolicyNeedsRefreshFollowsAutomaticAllocationSwitches(t *testing.T
 	}
 }
 
+func TestDomainPolicyNeedsRefreshDoesNotBootstrapMissingPolicy(t *testing.T) {
+	cfg := config.Default()
+	cfg.Acceleration.Enabled = true
+	cfg.Acceleration.AutoDiscover = true
+	cfg.Acceleration.AutoApply = true
+	state := store.State{DiscoveredDomains: map[string]store.DomainDiscovery{
+		"auto.example": {
+			Domain: "auto.example", CloudflareVerified: true, PreflightVerified: true, Active: true,
+			LastResolvedAddresses: []string{"104.18.1.10"},
+		},
+	}}
+	if domainPolicyNeedsRefresh(cfg, state) {
+		t.Fatal("automatic discovery must not bootstrap a policy before a full optimization is verified")
+	}
+}
+
 func TestDomainDiscoverySnapshotReturnsSanitizedPolicyEvidence(t *testing.T) {
 	stateStore, err := store.Open(t.TempDir(), 10)
 	if err != nil {

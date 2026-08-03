@@ -75,6 +75,10 @@ $cfopt = Join-Path $env:ProgramFiles "CF Optimizer\cf-optimizer.exe"
 
 确认前不会修改路由、Hosts、代理策略或持续维护配置。后台会依次更新网段、测速、应用并验证策略；验证失败时回滚。界面只会显示“已验证”“仅测速完成”“部分完成”或“已回滚”，不会把配置写入当作直连证据。
 
+应用域名映射时，Hosts 适配器会临时移除受管区块外的同域名旧记录，避免旧地址覆盖本轮优选地址；同一行的其他主机名保持有效。旧记录包含在事务收据中，策略失败、切换、清理或卸载时会原样恢复。
+
+尚无已验证策略时，自动域名发现只保存候选记录，不在后台单独创建部分策略或占用优选任务锁；候选域名会在下一次完整优选中统一应用和验证。
+
 如果自动预检无法确定可信接口或网关，确认框只提供“仅测速”和“高级设置”。此时再到设置页填写物理接口/网关，并在网络路由页运行诊断；CLI、手工 SHA-256 校验和 YAML 编辑均属于高级路径。
 
 VPN Kill Switch、企业策略或代理内核仍可能阻止物理出口。没有实际接口、网关和连接证据时，不应声称流量已经直连。
@@ -228,6 +232,10 @@ The normal workflow has three steps:
 3. Select One-click Optimize, review the interface, gateway, and effects in one confirmation dialog, then choose Apply once or Maintain automatically and start.
 
 Before confirmation, the application does not change routes, Hosts, proxy policy, or persistent maintenance settings. The service refreshes ranges, benchmarks candidates, applies policy, and verifies it in sequence, rolling back when verification fails. The UI reports only Verified, Benchmark only, Partially completed, or Rolled back; a successful write is never treated as direct-traffic proof.
+
+When applying domain mappings, the Hosts adapter temporarily suppresses same-domain entries outside its managed block so an old address cannot override the selected address; other hostnames on the same line remain active. The transaction receipt restores the original entries after a failed policy, switch, cleanup, or uninstall.
+
+When no verified policy exists, automatic domain discovery records candidates without creating a partial policy or holding the optimization lock in the background. The next full optimization applies and verifies those candidates together.
 
 If preflight cannot identify a trusted interface or gateway, the dialog offers only Benchmark and Advanced settings. Enter manual interface/gateway overrides in Settings and use Routes diagnostics only in that fallback path. CLI use, manual SHA-256 verification, and YAML editing are advanced operations.
 
