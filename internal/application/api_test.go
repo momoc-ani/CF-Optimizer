@@ -173,7 +173,7 @@ func TestConfigUpdateHotAppliesClearedManualDomains(t *testing.T) {
 	next := runtimeState.View().Config
 	next.Acceleration.ManualDomains = []string{}
 	result := updateConfigForTest(t, api, next)
-	if !result["saved"] || !result["hot_applied"] || result["restart_required"] {
+	if !result["saved"] || !result["hot_applied"] || result["policy_refreshed"] || result["restart_required"] {
 		t.Fatalf("unexpected update result: %#v", result)
 	}
 	if domains := runtimeState.View().Config.Acceleration.ManualDomains; len(domains) != 0 {
@@ -216,32 +216,33 @@ func TestConfigGetReturnsSavedSettingsPendingRestart(t *testing.T) {
 	}
 }
 
-func TestConfigUpdateRestoresPersistedDomainsWhenPolicyRefreshFails(t *testing.T) {
+func TestConfigUpdateSavesDomainsWithoutAdapterWhenPolicySnapshotExists(t *testing.T) {
 	api, runtimeState := newConfigUpdateTestAPI(t)
 	if err := runtimeState.Store.Update(func(state *store.State) error {
-		state.Policy = &store.PolicySnapshot{}
+		state.Policy = &store.PolicySnapshot{Domains: []string{"ani.momoc.top"}, Receipts: json.RawMessage(`{"receipts":[]}`)}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	next := runtimeState.View().Config
 	next.Acceleration.ManualDomains = []string{}
-	raw, err := json.Marshal(map[string]any{"config": next})
-	if err != nil {
-		t.Fatal(err)
+	result := updateConfigForTest(t, api, next)
+	if !result["saved"] || !result["hot_applied"] || result["policy_refreshed"] || result["restart_required"] {
+		t.Fatalf("unexpected update result: %#v", result)
 	}
-	if _, err := api.Handle(context.Background(), ipc.Request{Method: "config.update", Params: raw}, nil); err == nil {
-		t.Fatal("expected policy refresh failure")
-	}
-	if domains := runtimeState.View().Config.Acceleration.ManualDomains; len(domains) != 1 || domains[0] != "ani.momoc.top" {
-		t.Fatalf("runtime config changed after refresh failure: %#v", domains)
+	if domains := runtimeState.View().Config.Acceleration.ManualDomains; len(domains) != 0 {
+		t.Fatalf("runtime did not retain saved manual domains: %#v", domains)
 	}
 	persisted, err := config.Load(runtimeState.ConfigPath, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if domains := persisted.Acceleration.ManualDomains; len(domains) != 1 || domains[0] != "ani.momoc.top" {
-		t.Fatalf("persisted config was not restored: %#v", domains)
+	if domains := persisted.Acceleration.ManualDomains; len(domains) != 0 {
+		t.Fatalf("persisted config omitted saved manual domains: %#v", domains)
+	}
+	policy := runtimeState.Store.Snapshot().Policy
+	if policy == nil || len(policy.Domains) != 1 || policy.Domains[0] != "ani.momoc.top" {
+		t.Fatalf("unrefreshable policy snapshot should remain available for cleanup: %#v", policy)
 	}
 }
 

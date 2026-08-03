@@ -340,30 +340,35 @@ func (r *Runner) RefreshPolicy(ctx context.Context) error {
 	return r.refreshPolicyLocked(ctx)
 }
 
-// UpdateAccelerationDomains 在单任务边界内替换域名集合，并刷新已持久化的当前策略。
-func (r *Runner) UpdateAccelerationDomains(ctx context.Context, manualDomains, excludedDomains []string) error {
+// UpdateAccelerationDomains 在单任务边界内替换域名集合，并在活动适配器可用时刷新当前策略。
+func (r *Runner) UpdateAccelerationDomains(ctx context.Context, manualDomains, excludedDomains []string) (bool, error) {
 	if !r.runMutex.TryLock() {
-		return ErrAlreadyRunning
+		return false, ErrAlreadyRunning
 	}
 	defer r.runMutex.Unlock()
 	if slices.Equal(r.config.Acceleration.ManualDomains, manualDomains) && slices.Equal(r.config.Acceleration.ExcludedDomains, excludedDomains) {
-		return nil
+		return false, nil
 	}
 	previousManualDomains := append([]string(nil), r.config.Acceleration.ManualDomains...)
 	previousExcludedDomains := append([]string(nil), r.config.Acceleration.ExcludedDomains...)
 	r.config.Acceleration.ManualDomains = append([]string(nil), manualDomains...)
 	r.config.Acceleration.ExcludedDomains = append([]string(nil), excludedDomains...)
-	if r.store.Snapshot().Policy == nil {
+	policySnapshot := r.store.Snapshot().Policy
+	if policySnapshot == nil {
 		r.logger.Info("域名加速配置已热更新", "manual_domains", len(manualDomains), "excluded_domains", len(excludedDomains), "policy_refreshed", false, "result", "completed")
-		return nil
+		return false, nil
+	}
+	if r.policy == nil {
+		r.logger.Warn("域名加速配置已保存但当前策略未刷新", "manual_domains", len(manualDomains), "excluded_domains", len(excludedDomains), "policy_refreshed", false, "policy_snapshot_present", true, "result", "deferred")
+		return false, nil
 	}
 	if err := r.refreshPolicyLocked(ctx); err != nil {
 		r.config.Acceleration.ManualDomains = previousManualDomains
 		r.config.Acceleration.ExcludedDomains = previousExcludedDomains
-		return fmt.Errorf("refresh policy after acceleration domain update: %w", err)
+		return false, fmt.Errorf("refresh policy after acceleration domain update: %w", err)
 	}
 	r.logger.Info("域名加速配置已热更新", "manual_domains", len(manualDomains), "excluded_domains", len(excludedDomains), "policy_refreshed", true, "result", "completed")
-	return nil
+	return true, nil
 }
 
 // refreshPolicyLocked 使用已持有的单任务锁刷新策略，避免配置切换期间并行运行测速。

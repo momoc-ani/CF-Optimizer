@@ -321,10 +321,13 @@ func (a *API) updateConfig(ctx context.Context, raw json.RawMessage) (map[string
 	if err := a.saveConfig(a.runtime.ConfigPath, parameters.Config); err != nil {
 		return nil, err
 	}
+	policyRefreshed := false
 	if domainsChanged {
-		if updateErr := a.runtime.UpdateAccelerationDomains(
+		var updateErr error
+		policyRefreshed, updateErr = a.runtime.UpdateAccelerationDomains(
 			updateContext, parameters.Config.Acceleration.ManualDomains, parameters.Config.Acceleration.ExcludedDomains,
-		); updateErr != nil {
+		)
+		if updateErr != nil {
 			restoreErr := a.saveConfig(a.runtime.ConfigPath, persistedBefore)
 			if a.runtime.Logger != nil {
 				result := "rolled_back"
@@ -343,9 +346,9 @@ func (a *API) updateConfig(ctx context.Context, raw json.RawMessage) (map[string
 		}
 	}
 	if a.runtime.Logger != nil {
-		a.runtime.Logger.Info("配置保存完成", "component", "config", "manual_domains", len(parameters.Config.Acceleration.ManualDomains), "excluded_domains", len(parameters.Config.Acceleration.ExcludedDomains), "hot_applied", domainsChanged, "restart_required", restartRequired, "result", "completed")
+		a.runtime.Logger.Info("配置保存完成", "component", "config", "manual_domains", len(parameters.Config.Acceleration.ManualDomains), "excluded_domains", len(parameters.Config.Acceleration.ExcludedDomains), "hot_applied", domainsChanged, "policy_refreshed", policyRefreshed, "restart_required", restartRequired, "result", "completed")
 	}
-	return map[string]bool{"saved": true, "hot_applied": domainsChanged, "restart_required": restartRequired}, nil
+	return map[string]bool{"saved": true, "hot_applied": domainsChanged, "policy_refreshed": policyRefreshed, "restart_required": restartRequired}, nil
 }
 
 // desiredConfig 返回磁盘中的期望配置；配置文件尚未建立时回退到当前运行时快照。

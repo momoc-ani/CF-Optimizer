@@ -422,8 +422,12 @@ func TestUpdateAccelerationDomainsRemovesStoredManualMapping(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := runner.UpdateAccelerationDomains(context.Background(), []string{}, []string{}); err != nil {
+	refreshed, err := runner.UpdateAccelerationDomains(context.Background(), []string{}, []string{})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !refreshed {
+		t.Fatal("active policy was not reported as refreshed")
 	}
 	if len(runner.config.Acceleration.ManualDomains) != 0 {
 		t.Fatalf("manual domains were not updated: %#v", runner.config.Acceleration.ManualDomains)
@@ -434,6 +438,32 @@ func TestUpdateAccelerationDomainsRemovesStoredManualMapping(t *testing.T) {
 	}
 	if len(policy.policies) != 1 || len(policy.policies[0].DomainMappings) != 0 {
 		t.Fatalf("replacement policy retained the removed domain: %#v", policy.policies)
+	}
+}
+
+func TestUpdateAccelerationDomainsWithoutAdapterKeepsStalePolicyForCleanup(t *testing.T) {
+	runner, stateStore := newTestRunner(t, nil)
+	runner.config.Acceleration.ManualDomains = []string{"old.example"}
+	if err := stateStore.Update(func(state *store.State) error {
+		state.Policy = &store.PolicySnapshot{Domains: []string{"old.example"}, Receipts: json.RawMessage(`{"receipts":[]}`)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	refreshed, err := runner.UpdateAccelerationDomains(context.Background(), []string{"new.example"}, []string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshed {
+		t.Fatal("domain update without an adapter must not report a policy refresh")
+	}
+	if !slices.Equal(runner.config.Acceleration.ManualDomains, []string{"new.example"}) {
+		t.Fatalf("manual domains were not updated: %#v", runner.config.Acceleration.ManualDomains)
+	}
+	policy := stateStore.Snapshot().Policy
+	if policy == nil || !slices.Equal(policy.Domains, []string{"old.example"}) {
+		t.Fatalf("stale policy receipts were discarded before cleanup: %#v", policy)
 	}
 }
 
