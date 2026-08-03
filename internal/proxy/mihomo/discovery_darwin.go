@@ -6,14 +6,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
 
-// platformControllerCandidates 使用 macOS 自带 lsof 读取 Mihomo/Clash TCP 监听端口。
+// platformControllerCandidates 使用 macOS 自带 lsof 读取 Mihomo/Clash TCP 和 Unix Socket 控制端。
 func platformControllerCandidates(ctx context.Context) ([]controllerCandidate, error) {
-	output, err := exec.CommandContext(ctx, "/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn").CombinedOutput()
+	output, err := exec.CommandContext(ctx, "/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-U", "-Fpcn").CombinedOutput()
 	if err != nil {
 		var exitError *exec.ExitError
 		if errors.As(err, &exitError) && len(output) == 0 {
@@ -39,13 +42,36 @@ func parseDarwinControllerCandidates(output string) []controllerCandidate {
 			if !isMihomoProcess(processName) {
 				continue
 			}
-			controller, ok := darwinControllerURL(strings.TrimSpace(line[1:]))
+			controller, ok := darwinControllerEndpoint(processName, strings.TrimSpace(line[1:]))
 			if ok {
 				candidates = append(candidates, controllerCandidate{Controller: controller, Process: processName})
 			}
 		}
 	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		leftUnix := strings.HasPrefix(candidates[i].Controller, unixControllerScheme+"://")
+		rightUnix := strings.HasPrefix(candidates[j].Controller, unixControllerScheme+"://")
+		return leftUnix && !rightUnix
+	})
 	return candidates
+}
+
+// darwinControllerEndpoint 将 lsof 地址记录转换为受限的本机控制端。
+func darwinControllerEndpoint(processName, listener string) (string, bool) {
+	if filepath.IsAbs(listener) {
+		if !isDarwinUnixControllerProcess(processName, listener) {
+			return "", false
+		}
+		return (&url.URL{Scheme: unixControllerScheme, Path: filepath.Clean(listener)}).String(), true
+	}
+	return darwinControllerURL(listener)
+}
+
+// isDarwinUnixControllerProcess 排除 Clash UI 持有的无关 Socket，仅保留内核或控制端命名 Socket。
+func isDarwinUnixControllerProcess(processName, listener string) bool {
+	process := strings.ToLower(strings.TrimSpace(processName))
+	socketName := strings.ToLower(filepath.Base(listener))
+	return strings.Contains(process, "mihomo") || process == "clash" || strings.HasPrefix(process, "clash-meta") || strings.Contains(socketName, "mihomo") || strings.Contains(socketName, "clash")
 }
 
 // darwinControllerURL 将 lsof 监听地址转换为安全的回环 HTTP 端点。

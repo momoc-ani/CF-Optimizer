@@ -53,6 +53,7 @@ proxy:
     enabled: true
   mihomo:
     enabled: false
+    # Use a loopback HTTP(S) URL, or unix:///absolute/socket/path on macOS/Linux.
     controller: http://127.0.0.1:9090
     secret: ""
     provider_file: ""

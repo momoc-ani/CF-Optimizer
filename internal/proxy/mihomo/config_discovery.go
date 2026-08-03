@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -50,10 +51,7 @@ func discoverActiveConfig(controller string) (string, error) {
 		if err != nil {
 			continue
 		}
-		var header struct {
-			ExternalController string `yaml:"external-controller"`
-		}
-		if yaml.Unmarshal(content, &header) != nil || !sameController(header.ExternalController, controller) {
+		if !activeConfigMatchesController(content, controller) {
 			continue
 		}
 		info, err := os.Stat(candidate)
@@ -72,6 +70,18 @@ func discoverActiveConfig(controller string) (string, error) {
 		return matches[i].modified > matches[j].modified
 	})
 	return matches[0].path, nil
+}
+
+// activeConfigMatchesController 同时匹配 Mihomo 的 TCP 与 Unix Socket 控制端字段。
+func activeConfigMatchesController(content []byte, controller string) bool {
+	var header struct {
+		ExternalController     string `yaml:"external-controller"`
+		ExternalControllerUnix string `yaml:"external-controller-unix"`
+	}
+	if yaml.Unmarshal(content, &header) != nil {
+		return false
+	}
+	return sameController(header.ExternalController, controller) || sameController(header.ExternalControllerUnix, controller)
 }
 
 // activeConfigCandidates 返回三个桌面平台上受支持客户端的去重配置候选路径。
@@ -131,11 +141,32 @@ func sameController(configured, detected string) bool {
 	if configured == "" {
 		return false
 	}
+	detectedURL, detectedErr := url.Parse(detected)
+	if detectedErr != nil {
+		return false
+	}
+	if detectedURL.Scheme == unixControllerScheme {
+		detectedPath, err := unixControllerPath(detectedURL)
+		if err != nil {
+			return false
+		}
+		configuredPath := configured
+		if strings.HasPrefix(configured, unixControllerScheme+"://") {
+			configuredURL, err := url.Parse(configured)
+			if err != nil {
+				return false
+			}
+			configuredPath, err = unixControllerPath(configuredURL)
+			if err != nil {
+				return false
+			}
+		}
+		return path.IsAbs(configuredPath) && path.Clean(configuredPath) == detectedPath
+	}
 	if !strings.Contains(configured, "://") {
 		configured = "http://" + configured
 	}
 	configuredURL, configuredErr := url.Parse(configured)
-	detectedURL, detectedErr := url.Parse(detected)
 	if configuredErr != nil || detectedErr != nil {
 		return false
 	}

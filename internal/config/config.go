@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -16,7 +17,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const SchemaVersion = 1
+const (
+	SchemaVersion              = 1
+	mihomoUnixControllerScheme = "unix"
+)
 
 // Duration 为配置中的可读时间长度提供 YAML 与 JSON 编解码。
 type Duration time.Duration
@@ -409,19 +413,11 @@ func (c Config) AccelerationDomains() []string {
 	return result
 }
 
+// validateProxyConfig 校验各代理适配器启用后的必需字段和本机访问边界。
 func validateProxyConfig(proxy ProxyConfig) error {
 	if proxy.Mihomo.Enabled {
-		controller, err := url.Parse(proxy.Mihomo.Controller)
-		if err != nil || controller.Hostname() == "" || (controller.Scheme != "http" && controller.Scheme != "https") {
-			return errors.New("proxy.mihomo.controller must be an absolute HTTP(S) URL")
-		}
-		host := strings.ToLower(controller.Hostname())
-		address := netip.Addr{}
-		if parsed, err := netip.ParseAddr(host); err == nil {
-			address = parsed
-		}
-		if host != "localhost" && (!address.IsValid() || !address.IsLoopback()) {
-			return errors.New("proxy.mihomo.controller must use a loopback address to protect its secret")
+		if err := validateMihomoController(proxy.Mihomo.Controller); err != nil {
+			return err
 		}
 		if proxy.Mihomo.ProviderFile == "" {
 			return errors.New("proxy.mihomo.provider_file is required when Mihomo is enabled")
@@ -443,6 +439,35 @@ func validateProxyConfig(proxy ProxyConfig) error {
 	}
 	if proxy.External.Enabled && !filepath.IsAbs(proxy.External.Executable) {
 		return errors.New("proxy.external.executable must be an absolute path")
+	}
+	return nil
+}
+
+// validateMihomoController 仅允许本机回环 HTTP(S) 或绝对 Unix Socket 控制端。
+func validateMihomoController(rawController string) error {
+	controller, err := url.Parse(rawController)
+	if err != nil {
+		return errors.New("proxy.mihomo.controller must be a local HTTP(S) or Unix Socket URL")
+	}
+	if controller.Scheme == mihomoUnixControllerScheme {
+		if runtime.GOOS == "windows" {
+			return errors.New("proxy.mihomo.controller does not support Unix Socket URLs on Windows")
+		}
+		if controller.Host != "" || controller.User != nil || controller.RawQuery != "" || controller.Fragment != "" || !path.IsAbs(controller.Path) || controller.Path == "/" {
+			return errors.New("proxy.mihomo.controller must use unix:///absolute/socket/path without credentials or query parameters")
+		}
+		return nil
+	}
+	if controller.Hostname() == "" || (controller.Scheme != "http" && controller.Scheme != "https") {
+		return errors.New("proxy.mihomo.controller must be an absolute HTTP(S) URL or Unix Socket URL")
+	}
+	host := strings.ToLower(controller.Hostname())
+	address := netip.Addr{}
+	if parsed, err := netip.ParseAddr(host); err == nil {
+		address = parsed
+	}
+	if host != "localhost" && (!address.IsValid() || !address.IsLoopback()) {
+		return errors.New("proxy.mihomo.controller must use a loopback address to protect its secret")
 	}
 	return nil
 }

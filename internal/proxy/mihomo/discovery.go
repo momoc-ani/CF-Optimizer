@@ -28,7 +28,7 @@ func AutoDetect(ctx context.Context, cfg config.MihomoConfig) (proxy.Detection, 
 	}
 	discovered, err := platformControllerCandidates(ctx)
 	if err != nil {
-		return proxy.Detection{Present: false}, fmt.Errorf("枚举本机 Mihomo 监听端口: %w", err)
+		return proxy.Detection{Present: false}, fmt.Errorf("枚举本机 Mihomo 控制端: %w", err)
 	}
 	candidates = append(candidates, discovered...)
 	return probeControllerCandidates(ctx, cfg, candidates)
@@ -88,6 +88,11 @@ func uniqueControllerCandidates(candidates []controllerCandidate) []controllerCa
 	if len(result) > 1 {
 		discovered := result[1:]
 		sort.SliceStable(discovered, func(i, j int) bool {
+			leftUnix := strings.HasPrefix(discovered[i].Controller, unixControllerScheme+"://")
+			rightUnix := strings.HasPrefix(discovered[j].Controller, unixControllerScheme+"://")
+			if leftUnix != rightUnix {
+				return leftUnix
+			}
 			return discovered[i].Controller < discovered[j].Controller
 		})
 	}
@@ -97,7 +102,14 @@ func uniqueControllerCandidates(candidates []controllerCandidate) []controllerCa
 // isLoopbackController 只允许自动探测访问本机回环控制端。
 func isLoopbackController(rawController string) bool {
 	controller, err := url.Parse(rawController)
-	if err != nil || controller.Host == "" || (controller.Scheme != "http" && controller.Scheme != "https") {
+	if err != nil {
+		return false
+	}
+	if controller.Scheme == unixControllerScheme {
+		_, err := unixControllerPath(controller)
+		return err == nil
+	}
+	if controller.Host == "" || (controller.Scheme != "http" && controller.Scheme != "https") {
 		return false
 	}
 	host := strings.ToLower(controller.Hostname())

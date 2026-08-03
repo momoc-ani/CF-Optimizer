@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -91,6 +92,41 @@ func TestUnknownConfigFieldRejected(t *testing.T) {
 	}
 	if _, err := Load(path, dir); err == nil {
 		t.Fatal("expected unknown field error")
+	}
+}
+
+func TestValidateMihomoUnixController(t *testing.T) {
+	cfg := Default()
+	cfg.Proxy.Mihomo.Enabled = true
+	cfg.Proxy.Mihomo.Controller = "unix:///tmp/verge/verge-mihomo.sock"
+	cfg.Proxy.Mihomo.ProviderFile = "/tmp/cf-optimizer-mihomo.yaml"
+
+	err := cfg.Validate()
+	if runtime.GOOS == "windows" {
+		if err == nil {
+			t.Fatal("Validate() error = nil, want Unix controller rejection on Windows")
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestValidateRejectsUnsafeMihomoUnixController(t *testing.T) {
+	for _, controller := range []string{
+		"unix://relative/socket",
+		"unix:///tmp/verge/verge-mihomo.sock?token=secret",
+	} {
+		t.Run(controller, func(t *testing.T) {
+			cfg := Default()
+			cfg.Proxy.Mihomo.Enabled = true
+			cfg.Proxy.Mihomo.Controller = controller
+			cfg.Proxy.Mihomo.ProviderFile = "/tmp/cf-optimizer-mihomo.yaml"
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("Validate() error = nil for %q", controller)
+			}
+		})
 	}
 }
 

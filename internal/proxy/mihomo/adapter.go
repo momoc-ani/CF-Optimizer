@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strings"
 	"time"
 
@@ -22,10 +24,12 @@ import (
 )
 
 const (
-	adapterName       = "mihomo"
-	managedFileHeader = "# Managed by CF Optimizer. Manual changes will be replaced.\n"
-	missingFileHash   = "missing"
-	maxAPIResponse    = 8 << 20
+	adapterName          = "mihomo"
+	managedFileHeader    = "# Managed by CF Optimizer. Manual changes will be replaced.\n"
+	missingFileHash      = "missing"
+	maxAPIResponse       = 8 << 20
+	unixControllerScheme = "unix"
+	unixRequestHost      = "localhost"
 )
 
 type planPayload struct {
@@ -58,21 +62,56 @@ type receiptPayload struct {
 type Adapter struct {
 	config             config.MihomoConfig
 	controller         *url.URL
+	endpoint           string
 	client             *http.Client
 	connectionVerifier func(context.Context, []proxy.DomainMapping) error
 }
 
 // New 创建强制禁用系统代理的 Mihomo 控制 API 客户端。
 func New(cfg config.MihomoConfig) (*Adapter, error) {
-	controller, err := url.Parse(cfg.Controller)
-	if err != nil || controller.Host == "" {
-		return nil, errors.New("invalid Mihomo controller URL")
+	controller, endpoint, socketPath, err := parseControllerEndpoint(cfg.Controller)
+	if err != nil {
+		return nil, err
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
-	adapter := &Adapter{config: cfg, controller: controller, client: &http.Client{Transport: transport, Timeout: cfg.Timeout.Duration()}}
+	if socketPath != "" {
+		dialer := &net.Dialer{Timeout: cfg.Timeout.Duration()}
+		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, unixControllerScheme, socketPath)
+		}
+	}
+	adapter := &Adapter{config: cfg, controller: controller, endpoint: endpoint, client: &http.Client{Transport: transport, Timeout: cfg.Timeout.Duration()}}
 	adapter.connectionVerifier = adapter.verifyMappedConnections
 	return adapter, nil
+}
+
+// parseControllerEndpoint 将受支持的控制端转换为 HTTP 请求地址和可选 Unix Socket 路径。
+func parseControllerEndpoint(rawController string) (*url.URL, string, string, error) {
+	controller, err := url.Parse(rawController)
+	if err != nil {
+		return nil, "", "", errors.New("invalid Mihomo controller URL")
+	}
+	if controller.Scheme == unixControllerScheme {
+		socketPath, pathErr := unixControllerPath(controller)
+		if pathErr != nil {
+			return nil, "", "", pathErr
+		}
+		endpoint := (&url.URL{Scheme: unixControllerScheme, Path: socketPath}).String()
+		return &url.URL{Scheme: "http", Host: unixRequestHost}, endpoint, socketPath, nil
+	}
+	if controller.Host == "" || (controller.Scheme != "http" && controller.Scheme != "https") {
+		return nil, "", "", errors.New("invalid Mihomo controller URL")
+	}
+	return controller, controller.String(), "", nil
+}
+
+// unixControllerPath 校验并规范化不携带认证信息的绝对 Unix Socket 路径。
+func unixControllerPath(controller *url.URL) (string, error) {
+	if controller == nil || controller.Scheme != unixControllerScheme || controller.Host != "" || controller.User != nil || controller.RawQuery != "" || controller.Fragment != "" || !path.IsAbs(controller.Path) || controller.Path == "/" {
+		return "", errors.New("invalid Mihomo Unix Socket controller URL")
+	}
+	return path.Clean(controller.Path), nil
 }
 
 // Name 返回稳定的适配器标识。
@@ -104,7 +143,7 @@ func (a *Adapter) Detect(ctx context.Context) (proxy.Detection, error) {
 	return proxy.Detection{
 		Present:    true,
 		Version:    version.Version,
-		Endpoint:   a.controller.String(),
+		Endpoint:   a.endpoint,
 		ConfigPath: a.config.ReloadConfig,
 		Message:    "控制 API 可访问",
 	}, nil
