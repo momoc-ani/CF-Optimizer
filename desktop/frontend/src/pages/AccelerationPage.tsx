@@ -93,7 +93,7 @@ export function AccelerationPage() {
     resolver: zodResolver(accelerationSettingsSchema),
     defaultValues: {
       enabled: true,
-      manualDomains: 'ani.momoc.top',
+      manualDomains: '',
       excludedDomains: '',
       autoDiscover: true,
       autoApply: true,

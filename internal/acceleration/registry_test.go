@@ -34,7 +34,7 @@ func TestEffectiveDomainsKeepsDiscoveriesInactiveWhenAutoApplyIsDisabled(t *test
 		"auto.example": {Domain: "auto.example", CloudflareVerified: true, PreflightVerified: true, Active: true},
 	}}
 
-	if got := EffectiveDomains(cfg, state); !reflect.DeepEqual(got, []string{"ani.momoc.top"}) {
+	if got := EffectiveDomains(cfg, state); len(got) != 0 {
 		t.Fatalf("EffectiveDomains() = %#v", got)
 	}
 }

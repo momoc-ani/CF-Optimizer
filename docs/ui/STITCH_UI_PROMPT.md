@@ -77,7 +77,7 @@ Screen 3: 域名加速
 - Domain table columns: exact domain, source, optimized IP mappings, Cloudflare ownership, TLS SNI / HTTP Host preflight, verified DIRECT or no-proxy system policy, physical route evidence, last discovery, final state, and error.
 - A domain may show 已加速 only when the applied HTTPS remote IP belongs to the optimized mapping and the managed policy, physical interface, source address, and gateway are all verified. Missing evidence remains 待验证 or 验证失败.
 - Selected-domain evidence shows sanitized adapter names, optimized addresses, SNI / Host, route transaction, interface, source address, gateway, and applied time. Never expose receipt payloads, backups, secrets, or complete third-party configuration.
-- Use ani.momoc.top as the first manual domain. Cover automatic discovery, no optimized IP, policy pending, rollback, disconnected service, and empty states.
+- Keep manual domains empty by default. Cover automatic discovery, no optimized IP, policy pending, rollback, disconnected service, and empty states.
 
 Screen 4: 代理适配
 - Show a compact adapter table/list for Generic Route, Mihomo, sing-box, Xray, External JSON-RPC, and optional Windows Hosts.

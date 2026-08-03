@@ -226,7 +226,7 @@ func Default() Config {
 			External: ExternalProxyConfig{Timeout: Duration(15 * time.Second)},
 		},
 		Acceleration: AccelerationConfig{
-			Enabled: true, ManualDomains: []string{"ani.momoc.top"}, ExcludedDomains: []string{}, AutoDiscover: true, AutoApply: true,
+			Enabled: true, ManualDomains: []string{}, ExcludedDomains: []string{}, AutoDiscover: true, AutoApply: true,
 			DiscoveryInterval: Duration(15 * time.Second), MaxDiscoveredDomains: 1000,
 		},
 		Hosts:   HostsConfig{Path: defaultHostsPath()},

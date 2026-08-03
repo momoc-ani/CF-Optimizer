@@ -83,8 +83,7 @@ proxy:
 
 acceleration:
   enabled: true
-  manual_domains:
-    - ani.momoc.top
+  manual_domains: []
   excluded_domains: []
   auto_discover: true
   auto_apply: false
