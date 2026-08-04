@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -25,9 +26,10 @@ const (
 )
 
 type planPayload struct {
-	Content      []byte `json:"content"`
-	ExpectedHash string `json:"expected_hash"`
-	EntryCount   int    `json:"entry_count"`
+	Content              []byte `json:"content"`
+	ExpectedHash         string `json:"expected_hash"`
+	EntryCount           int    `json:"entry_count"`
+	SuppressedEntryCount int    `json:"suppressed_entry_count"`
 }
 
 type receiptPayload struct {
@@ -80,6 +82,11 @@ func (a *Adapter) Plan(_ context.Context, policy proxy.DirectPolicy) (proxy.Plan
 	if err != nil {
 		return proxy.Plan{}, err
 	}
+	domains := make([]string, 0, len(policy.DomainMappings))
+	for _, mapping := range policy.DomainMappings {
+		domains = append(domains, mapping.Domain)
+	}
+	base, suppressedEntryCount := suppressConflictingMappings(base, domains, newline)
 	var lines []string
 	for _, mapping := range policy.DomainMappings {
 		for _, address := range mapping.Addresses {
@@ -95,13 +102,19 @@ func (a *Adapter) Plan(_ context.Context, policy proxy.DirectPolicy) (proxy.Plan
 	}
 	block := beginMarker + newline + strings.Join(lines, newline) + newline + endMarker + newline
 	content = append(content, block...)
-	payload, err := json.Marshal(planPayload{Content: content, ExpectedHash: hash(previous), EntryCount: len(lines)})
+	payload, err := json.Marshal(planPayload{
+		Content: content, ExpectedHash: hash(previous), EntryCount: len(lines), SuppressedEntryCount: suppressedEntryCount,
+	})
 	if err != nil {
 		return proxy.Plan{}, err
 	}
+	summary := fmt.Sprintf("replace %d entries in the managed Hosts block", len(lines))
+	if suppressedEntryCount > 0 {
+		summary += fmt.Sprintf(" and temporarily suppress %d conflicting entries", suppressedEntryCount)
+	}
 	return proxy.Plan{
 		ID: fmt.Sprintf("hosts-%d", time.Now().UnixNano()), Adapter: adapterName, Policy: policy,
-		Summary: []string{fmt.Sprintf("replace %d entries in the managed Hosts block", len(lines))}, Payload: payload,
+		Summary: []string{summary}, Payload: payload,
 	}, nil
 }
 
@@ -204,6 +217,59 @@ func (a *Adapter) Rollback(_ context.Context, receipt proxy.Receipt) error {
 	return restoreOptionalFile(backupPath, payload.BackupPrevious, payload.BackupPreviousExists, 0o600)
 }
 
+// CleanupConflict 在受管区块已消失时保留当前 Hosts，仅恢复可由收据链证明归属程序的备份文件。
+func (a *Adapter) CleanupConflict(_ context.Context, receipts []proxy.Receipt) error {
+	payloads := make([]receiptPayload, 0, len(receipts))
+	for _, receipt := range receipts {
+		if receipt.Adapter != adapterName || !receipt.Changed {
+			continue
+		}
+		var payload receiptPayload
+		if err := json.Unmarshal(receipt.Payload, &payload); err != nil {
+			return fmt.Errorf("decode Hosts cleanup receipt: %w", err)
+		}
+		payloads = append(payloads, payload)
+	}
+	if len(payloads) == 0 {
+		return nil
+	}
+	current, err := os.ReadFile(a.config.Path)
+	if err != nil {
+		return err
+	}
+	if bytes.Contains(current, []byte(beginMarker)) || bytes.Contains(current, []byte(endMarker)) {
+		return errors.New("Hosts still contains a CF Optimizer marker; refusing conflict cleanup")
+	}
+
+	oldest := payloads[0]
+	backupPath := a.config.Path + ".cf-optimizer.backup"
+	backupCurrent, backupExists, err := readOptionalFile(backupPath)
+	if err != nil {
+		return fmt.Errorf("read Hosts backup during conflict cleanup: %w", err)
+	}
+	if optionalFileEquals(backupCurrent, backupExists, oldest.BackupPrevious, oldest.BackupPreviousExists) {
+		return nil
+	}
+	if !matchesAppliedBackup(backupCurrent, backupExists, payloads) {
+		return errors.New("Hosts backup changed after apply; refusing conflict cleanup overwrite")
+	}
+	return restoreOptionalFile(backupPath, oldest.BackupPrevious, oldest.BackupPreviousExists, 0o600)
+}
+
+// matchesAppliedBackup 只接受收据链中某次应用实际写入的备份版本。
+func matchesAppliedBackup(content []byte, exists bool, payloads []receiptPayload) bool {
+	if !exists {
+		return false
+	}
+	currentHash := hash(content)
+	for _, payload := range payloads {
+		if payload.BackupAppliedHash != "" && currentHash == payload.BackupAppliedHash {
+			return true
+		}
+	}
+	return false
+}
+
 // readOptionalFile 区分不存在的可选文件与实际读取失败。
 func readOptionalFile(path string) ([]byte, bool, error) {
 	content, err := os.ReadFile(path)
@@ -265,6 +331,75 @@ func removeManagedBlock(content []byte) ([]byte, string, error) {
 		result = result[:len(result)-1]
 	}
 	return []byte(strings.Join(result, newline)), newline, nil
+}
+
+// suppressConflictingMappings 临时移除受管区块外的同域名映射，并保留同一行的其他主机名。
+func suppressConflictingMappings(content []byte, domains []string, newline string) ([]byte, int) {
+	targets := make(map[string]struct{}, len(domains))
+	for _, domain := range domains {
+		targets[normalizeHostName(domain)] = struct{}{}
+	}
+	if len(targets) == 0 {
+		return content, 0
+	}
+	lines := strings.Split(string(content), newline)
+	result := make([]string, 0, len(lines))
+	suppressed := 0
+	for _, line := range lines {
+		updated, removed, keep := suppressHostLine(line, targets)
+		suppressed += removed
+		if keep {
+			result = append(result, updated)
+		}
+	}
+	return []byte(strings.Join(result, newline)), suppressed
+}
+
+// suppressHostLine 只重写包含冲突域名的有效 Hosts 记录，注释和其他别名保持可读。
+func suppressHostLine(line string, targets map[string]struct{}) (string, int, bool) {
+	commentIndex := strings.IndexByte(line, '#')
+	record := line
+	comment := ""
+	if commentIndex >= 0 {
+		record = line[:commentIndex]
+		comment = line[commentIndex:]
+	}
+	fields := strings.Fields(record)
+	if len(fields) < 2 {
+		return line, 0, true
+	}
+	if _, err := netip.ParseAddr(fields[0]); err != nil {
+		return line, 0, true
+	}
+	remaining := make([]string, 0, len(fields)-1)
+	removed := 0
+	for _, host := range fields[1:] {
+		if _, conflict := targets[normalizeHostName(host)]; conflict {
+			removed++
+			continue
+		}
+		remaining = append(remaining, host)
+	}
+	if removed == 0 {
+		return line, 0, true
+	}
+	indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+	if len(remaining) == 0 {
+		if comment == "" {
+			return "", removed, false
+		}
+		return indent + comment, removed, true
+	}
+	updated := indent + fields[0] + " " + strings.Join(remaining, " ")
+	if comment != "" {
+		updated += " " + comment
+	}
+	return updated, removed, true
+}
+
+// normalizeHostName 统一 Hosts 主机名比较语义，兼容大小写和末尾根域点。
+func normalizeHostName(host string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
 }
 
 func hash(content []byte) string {

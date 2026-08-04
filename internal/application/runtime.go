@@ -40,20 +40,21 @@ const (
 
 // Runtime 汇总一个进程共享的核心组件和已验证依赖关系。
 type Runtime struct {
-	mutex            sync.RWMutex
-	Config           config.Config
-	ConfigPath       string
-	Store            *store.Store
-	Ranges           *ranges.Catalog
-	Runner           *optimizer.Runner
-	Routes           *cfnetwork.RouteController
-	RouteBackend     cfnetwork.RouteBackend
-	PhysicalPath     cfnetwork.PhysicalPath
-	DirectDial       cfnetwork.DialContextFunc
-	ProxyCoordinator *proxy.Coordinator
-	DomainResolver   *acceleration.PhysicalResolver
-	DomainVerifier   *acceleration.Verifier
-	Logger           *slog.Logger
+	mutex             sync.RWMutex
+	accelerationMutex sync.Mutex
+	Config            config.Config
+	ConfigPath        string
+	Store             *store.Store
+	Ranges            *ranges.Catalog
+	Runner            *optimizer.Runner
+	Routes            *cfnetwork.RouteController
+	RouteBackend      cfnetwork.RouteBackend
+	PhysicalPath      cfnetwork.PhysicalPath
+	DirectDial        cfnetwork.DialContextFunc
+	ProxyCoordinator  *proxy.Coordinator
+	DomainResolver    *acceleration.PhysicalResolver
+	DomainVerifier    *acceleration.Verifier
+	Logger            *slog.Logger
 }
 
 // RuntimeView 提供可并发读取的当前运行配置和执行依赖快照。
@@ -201,6 +202,7 @@ type DomainDiscoveryResult struct {
 	Observed        int                        `json:"observed"`
 	Verified        int                        `json:"verified"`
 	Activated       int                        `json:"activated"`
+	Discovered      int                        `json:"discovered"`
 	PolicyRefreshed bool                       `json:"policy_refreshed"`
 	Domains         []DomainAccelerationStatus `json:"domains"`
 }
@@ -215,6 +217,10 @@ type DomainAccelerationStatus struct {
 
 // DiscoverAccelerationDomains 从 Mihomo 活动连接发现精确域名，并用物理 DNS 与 HTTPS 预检确认。
 func (r *Runtime) DiscoverAccelerationDomains(ctx context.Context) (DomainDiscoveryResult, error) {
+	if !r.accelerationMutex.TryLock() {
+		return r.domainDiscoverySnapshot(), errors.New("domain discovery or cleanup is already active")
+	}
+	defer r.accelerationMutex.Unlock()
 	view := r.View()
 	if !view.Config.Acceleration.Enabled || !view.Config.Acceleration.AutoDiscover || !view.Config.Proxy.AutoDetect {
 		return r.domainDiscoverySnapshot(), nil
@@ -368,16 +374,17 @@ func (r *Runtime) DiscoverAccelerationDomains(ctx context.Context) (DomainDiscov
 		result.PolicyRefreshed = true
 	}
 	snapshot := r.domainDiscoverySnapshot()
+	result.Discovered = snapshot.Discovered
 	result.Domains = snapshot.Domains
 	return result, nil
 }
 
 // domainPolicyNeedsRefresh 检测需清理的自动映射和违反 IP 独占约束的旧策略。
 func domainPolicyNeedsRefresh(cfg config.Config, state store.State) bool {
-	discoveries := acceleration.EffectiveDiscoveries(cfg, state)
 	if state.Policy == nil {
-		return len(discoveries) > 0
+		return false
 	}
+	discoveries := acceleration.EffectiveDiscoveries(cfg, state)
 	manual := make(map[string]struct{}, len(cfg.AccelerationDomains()))
 	for _, domain := range cfg.AccelerationDomains() {
 		manual[domain] = struct{}{}
@@ -459,7 +466,7 @@ func (r *Runtime) domainDiscoverySnapshot() DomainDiscoveryResult {
 		}
 		records[domain] = record
 	}
-	result := DomainDiscoveryResult{Domains: make([]DomainAccelerationStatus, 0, len(records))}
+	result := DomainDiscoveryResult{Discovered: len(state.DiscoveredDomains), Domains: make([]DomainAccelerationStatus, 0, len(records))}
 	for _, record := range records {
 		status := DomainAccelerationStatus{DomainDiscovery: record}
 		if addresses, active := activeMappings[record.Domain]; active {
@@ -620,6 +627,19 @@ func (r *Runtime) UpdateAccelerationDomains(ctx context.Context, manualDomains, 
 	return policyRefreshed, nil
 }
 
+// ClearDiscoveredAccelerationDomains 串行清理自动发现记录及其已验证加速策略。
+func (r *Runtime) ClearDiscoveredAccelerationDomains(ctx context.Context) (optimizer.DiscoveredDomainCleanupResult, error) {
+	if !r.accelerationMutex.TryLock() {
+		return optimizer.DiscoveredDomainCleanupResult{}, errors.New("domain discovery or cleanup is already active")
+	}
+	defer r.accelerationMutex.Unlock()
+	view := r.View()
+	if view.Runner == nil {
+		return optimizer.DiscoveredDomainCleanupResult{}, errors.New("optimizer runner is unavailable for discovered domain cleanup")
+	}
+	return view.Runner.ClearDiscoveredDomains(ctx)
+}
+
 // validateManagedPath 要求至少一个已启用地址族具备可验证的物理网关。
 func validateManagedPath(cfg config.Config, physicalPath cfnetwork.PhysicalPath) error {
 	if physicalPath.Interface == "" {
@@ -684,6 +704,11 @@ func (r *Runtime) CleanupManagedPolicy(ctx context.Context) error {
 	return optimizer.CleanupManagedPolicy(ctx, r.Store, r.Routes, r.ProxyCoordinator)
 }
 
+// RecoverPendingPolicy 恢复进程退出前已应用但尚未提交的代理策略事务。
+func (r *Runtime) RecoverPendingPolicy(ctx context.Context) error {
+	return optimizer.RecoverPendingPolicy(ctx, r.Store, r.ProxyCoordinator)
+}
+
 func configForStoredReceipts(cfg config.Config, state store.State) (config.Config, error) {
 	cfg.Network.ManageRoutes = true
 	cfg.Proxy.Generic.Enabled = false
@@ -692,29 +717,38 @@ func configForStoredReceipts(cfg config.Config, state store.State) (config.Confi
 	cfg.Proxy.Xray.Enabled = false
 	cfg.Proxy.External.Enabled = false
 	cfg.Hosts.Enabled = false
-	if state.Policy == nil {
+	if state.Policy == nil && state.PendingPolicy == nil {
 		return cfg, nil
 	}
-	var applied proxy.ApplyResult
-	if err := json.Unmarshal(state.Policy.Receipts, &applied); err != nil {
-		return config.Config{}, fmt.Errorf("decode stored policy receipts: %w", err)
+	var receiptPayloads []json.RawMessage
+	if state.Policy != nil {
+		receiptPayloads = append(receiptPayloads, state.Policy.Receipts)
 	}
-	for _, receipt := range applied.Receipts {
-		switch receipt.Adapter {
-		case cleanupAdapterGeneric:
-			cfg.Proxy.Generic.Enabled = true
-		case cleanupAdapterMihomo:
-			cfg.Proxy.Mihomo.Enabled = true
-		case cleanupAdapterSingBox:
-			cfg.Proxy.SingBox.Enabled = true
-		case cleanupAdapterXray:
-			cfg.Proxy.Xray.Enabled = true
-		case cleanupAdapterExternal:
-			cfg.Proxy.External.Enabled = true
-		case cleanupAdapterHosts:
-			cfg.Hosts.Enabled = true
-		default:
-			return config.Config{}, fmt.Errorf("stored policy references unsupported adapter %q", receipt.Adapter)
+	if state.PendingPolicy != nil {
+		receiptPayloads = append(receiptPayloads, state.PendingPolicy.Receipts)
+	}
+	for _, payload := range receiptPayloads {
+		var applied proxy.ApplyResult
+		if err := json.Unmarshal(payload, &applied); err != nil {
+			return config.Config{}, fmt.Errorf("decode stored policy receipts: %w", err)
+		}
+		for _, receipt := range applied.Receipts {
+			switch receipt.Adapter {
+			case cleanupAdapterGeneric:
+				cfg.Proxy.Generic.Enabled = true
+			case cleanupAdapterMihomo:
+				cfg.Proxy.Mihomo.Enabled = true
+			case cleanupAdapterSingBox:
+				cfg.Proxy.SingBox.Enabled = true
+			case cleanupAdapterXray:
+				cfg.Proxy.Xray.Enabled = true
+			case cleanupAdapterExternal:
+				cfg.Proxy.External.Enabled = true
+			case cleanupAdapterHosts:
+				cfg.Hosts.Enabled = true
+			default:
+				return config.Config{}, fmt.Errorf("stored policy references unsupported adapter %q", receipt.Adapter)
+			}
 		}
 	}
 	return cfg, nil

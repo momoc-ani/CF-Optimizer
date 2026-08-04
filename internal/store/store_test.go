@@ -1,8 +1,11 @@
 package store
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestUpdatePersistsAndTrimsHistory(t *testing.T) {
@@ -28,5 +31,33 @@ func TestUpdatePersistsAndTrimsHistory(t *testing.T) {
 	}
 	if snapshot.Nodes["1.1.1.1"].Successes != 1 {
 		t.Fatalf("node stats were not persisted: %#v", snapshot.Nodes)
+	}
+}
+
+func TestOpenMigratesVersionOneStateAndPersistsPendingTransaction(t *testing.T) {
+	directory := t.TempDir()
+	legacy := []byte(`{"version":1,"history":[],"nodes":{},"discovered_domains":{},"running":false}`)
+	if err := os.WriteFile(filepath.Join(directory, "state.json"), legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err := Open(directory, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := json.RawMessage(`{"ipv4_cidrs":["1.1.1.1/32"]}`)
+	receipts := json.RawMessage(`{"receipts":[]}`)
+	if err := stateStore.Update(func(state *State) error {
+		state.PendingPolicy = NewPolicyTransaction(time.Unix(10, 0), policy, receipts)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(directory, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := reopened.Snapshot()
+	if snapshot.Version != StateSchemaVersion || snapshot.PendingPolicy == nil || string(snapshot.PendingPolicy.Receipts) != string(receipts) {
+		t.Fatalf("version one state was not migrated with its transaction: %#v", snapshot)
 	}
 }

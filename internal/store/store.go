@@ -12,7 +12,12 @@ import (
 	"github.com/cf-optimizer/cf-optimizer/internal/fsutil"
 )
 
-const StateSchemaVersion = 1
+const (
+	legacyStateSchemaVersion = 1
+	// StateSchemaVersion 标识当前持久化状态结构版本。
+	StateSchemaVersion       = 2
+	policyTransactionVersion = 1
+)
 
 // Selection 保存某个地址族当前生效的节点与稳定性状态。
 type Selection struct {
@@ -81,10 +86,19 @@ type State struct {
 	Nodes             map[string]NodeStats       `json:"nodes"`
 	DiscoveredDomains map[string]DomainDiscovery `json:"discovered_domains"`
 	Policy            *PolicySnapshot            `json:"policy,omitempty"`
+	PendingPolicy     *PolicyTransaction         `json:"pending_policy,omitempty"`
 	LastError         string                     `json:"last_error,omitempty"`
 	LastStartedAt     time.Time                  `json:"last_started_at,omitempty"`
 	LastEndedAt       time.Time                  `json:"last_ended_at,omitempty"`
 	Running           bool                       `json:"running"`
+}
+
+// PolicyTransaction 持久化尚未提交的适配器收据，供崩溃恢复和安全卸载使用。
+type PolicyTransaction struct {
+	Version   int             `json:"version"`
+	StartedAt time.Time       `json:"started_at"`
+	Policy    json.RawMessage `json:"policy"`
+	Receipts  json.RawMessage `json:"receipts"`
 }
 
 // PolicySnapshot 保存最后一次已验证策略及适配器回滚收据。
@@ -129,8 +143,14 @@ func Open(dataDir string, maxRuns int) (*Store, error) {
 	if err := json.Unmarshal(data, &s.state); err != nil {
 		return nil, fmt.Errorf("decode state: %w", err)
 	}
+	if s.state.Version == legacyStateSchemaVersion {
+		s.state.Version = StateSchemaVersion
+	}
 	if s.state.Version != StateSchemaVersion {
 		return nil, fmt.Errorf("unsupported state version %d", s.state.Version)
+	}
+	if s.state.PendingPolicy != nil && s.state.PendingPolicy.Version != policyTransactionVersion {
+		return nil, fmt.Errorf("unsupported pending policy transaction version %d", s.state.PendingPolicy.Version)
 	}
 	if s.state.Nodes == nil {
 		s.state.Nodes = map[string]NodeStats{}
@@ -139,6 +159,11 @@ func Open(dataDir string, maxRuns int) (*Store, error) {
 		s.state.DiscoveredDomains = map[string]DomainDiscovery{}
 	}
 	return s, nil
+}
+
+// NewPolicyTransaction 创建当前状态格式支持的待恢复策略事务。
+func NewPolicyTransaction(startedAt time.Time, policy, receipts json.RawMessage) *PolicyTransaction {
+	return &PolicyTransaction{Version: policyTransactionVersion, StartedAt: startedAt.UTC(), Policy: policy, Receipts: receipts}
 }
 
 // SaveRunDetail 保存一次运行的候选明细，并清理超过保留期限的旧文件。

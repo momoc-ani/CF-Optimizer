@@ -162,18 +162,28 @@ func (c *RouteController) Apply(ctx context.Context, plan ChangePlan) (Transacti
 	}
 	c.logPhase(transaction, "plan", "started", nil)
 	if err := c.backend.Replace(ctx, plan.Route); err != nil {
-		return c.failTransaction(transaction.ID, "apply_failed", fmt.Errorf("apply route: %w", err))
+		operationErr := fmt.Errorf("apply route: %w", err)
+		rollbackErr := c.rollback(context.WithoutCancel(ctx), &transaction)
+		transaction.State = "rolled_back"
+		if rollbackErr != nil {
+			transaction.State = "rollback_failed"
+			operationErr = errors.Join(operationErr, fmt.Errorf("rollback failed route: %w", rollbackErr))
+		}
+		transaction.Error = operationErr.Error()
+		_ = c.replaceTransaction(transaction)
+		c.logPhase(transaction, "apply", "failed", operationErr)
+		return transaction, operationErr
 	}
 	transaction.State = "applied"
 	if err := c.replaceTransaction(transaction); err != nil {
-		_ = c.rollback(ctx, &transaction)
+		_ = c.rollback(context.WithoutCancel(ctx), &transaction)
 		return transaction, err
 	}
 	c.logPhase(transaction, "apply", "completed", nil)
 	resolved, err := c.verify(ctx, plan.Route)
 	if err != nil {
 		transaction.Error = err.Error()
-		if rollbackErr := c.rollback(ctx, &transaction); rollbackErr != nil {
+		if rollbackErr := c.rollback(context.WithoutCancel(ctx), &transaction); rollbackErr != nil {
 			transaction.Error += "; rollback: " + rollbackErr.Error()
 		}
 		transaction.State = "rolled_back"

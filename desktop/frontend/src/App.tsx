@@ -26,7 +26,7 @@ function Workspace() {
   const page = useUIStore((state) => state.page);
   const run = useRun();
   const CurrentPage = pages[page];
-  const activeEvent = run.event ?? status.data?.active_event;
+  const activeEvent = run.running ? run.event : status.data?.state.running ? status.data.active_event : undefined;
   return (
     <Shell status={status.data} disconnected={status.isError} taskStrip={<TaskStrip event={activeEvent} cancelling={run.cancelling} onCancel={run.cancel} />}>
       {status.isError && (

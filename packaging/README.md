@@ -8,7 +8,7 @@ The CI and release workflows build packages on native GitHub-hosted runners. Eve
 - `verify-release-assets.sh` rejects missing, empty, duplicate, or extra packages before checksums and release upload; `release-downloads.sh` generates the six-target download table.
 - `wails/` contains reproducible Wails metadata and the shared application icon source.
 
-Upgrades preserve the service configuration and state. Uninstall first rolls back the persisted managed-policy receipt chain. User configuration, logs, history, and cached benchmark data are preserved by default.
+Upgrades preserve service configuration and state, and repair a missing or stopped service after new files are installed. State schema v2 keeps a versioned `pending_policy` receipt journal so startup and uninstall can recover adapter changes applied before an interrupted commit. Uninstall first recovers that journal and then rolls back the persisted managed-policy receipt chain. Mihomo conflict cleanup rewrites only entries proven to be managed and may finish disk cleanup when the configured controller is offline; reachable-controller protocol or authentication failures still abort. User configuration, logs, history, and cached benchmark data are preserved by default.
 
 The desktop application uses `fyne.io/systray v1.12.2` with the Wails external event loop. Linux uses the desktop session's D-Bus StatusNotifier protocol and does not require native AppIndicator development headers. Closing the window hides it to the tray, while the tray quit action exits only the unprivileged UI process and leaves the service running.
 

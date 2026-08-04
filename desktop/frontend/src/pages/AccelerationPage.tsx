@@ -1,15 +1,15 @@
-import { ActionIcon, Alert, Button, Group, SimpleGrid, Stack, Switch, Text, Textarea, TextInput, Tooltip } from '@mantine/core';
+import { ActionIcon, Alert, Button, Group, Modal, SimpleGrid, Stack, Switch, Text, Textarea, TextInput, Tooltip } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ColumnDef } from '@tanstack/react-table';
-import { RefreshCw, Save, ScanSearch, ShieldAlert, ShieldCheck } from 'lucide-react';
+import { RefreshCw, Save, ScanSearch, ShieldAlert, ShieldCheck, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { request } from '../api/client';
 import { queryKeys, useAccelerationDomains, useConfig, useRoutes, useStatus } from '../api/hooks';
-import type { AppConfig, DomainDiscovery, DomainDiscoveryResult, RouteTransaction } from '../api/types';
+import type { AppConfig, DiscoveredDomainCleanupResult, DomainDiscovery, DomainDiscoveryResult, RouteTransaction } from '../api/types';
 import { DataTable } from '../components/DataTable';
 import { ErrorState, LoadingState, Metric, PageHeader, Section } from '../components/Page';
 import { StatusBadge } from '../components/StatusBadge';
@@ -90,6 +90,7 @@ export function AccelerationPage() {
   const config = useConfig();
   const queryClient = useQueryClient();
   const [selectedDomain, setSelectedDomain] = useState<string>();
+  const [isCleanupOpen, setIsCleanupOpen] = useState(false);
   const form = useForm<AccelerationSettingsForm>({
     resolver: zodResolver(accelerationSettingsSchema),
     defaultValues: {
@@ -121,6 +122,7 @@ export function AccelerationPage() {
   const pendingCount = rows.length - acceleratedCount;
   const accelerationConfig = config.data?.acceleration;
   const isAutomatic = Boolean(accelerationConfig?.enabled && accelerationConfig.auto_discover && accelerationConfig.auto_apply);
+  const discoveredCount = domains.data?.discovered ?? 0;
 
   const columns = useMemo<ColumnDef<DomainRow>[]>(() => [
     { accessorKey: 'domain', header: '域名', size: 220, cell: ({ getValue }) => <Text ff="monospace" size="sm" fw={650}>{String(getValue())}</Text> },
@@ -159,6 +161,21 @@ export function AccelerationPage() {
     onError: (error: Error) => notifications.show({ color: 'red', title: '保存失败', message: error.message }),
   });
 
+  const clearDiscovered = useMutation({
+    mutationFn: () => request<DiscoveredDomainCleanupResult>('acceleration.clear_discovered'),
+    onSuccess: async (result) => {
+      setIsCleanupOpen(false);
+      setSelectedDomain(undefined);
+      notifications.show({ color: 'green', title: '自动发现域名已清理', message: `删除 ${result.cleared} 条发现记录，撤销 ${result.accelerations_removed} 个已有加速` });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.accelerationDomains }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.routes }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.status }),
+      ]);
+    },
+    onError: (error: Error) => notifications.show({ color: 'red', title: '清理失败', message: error.message }),
+  });
+
   const refreshAll = () => void Promise.all([domains.refetch(), routes.refetch(), status.refetch(), config.refetch()]);
   const isLoading = domains.isLoading || routes.isLoading || status.isLoading || config.isLoading;
   const readError = domains.error ?? routes.error ?? status.error ?? config.error;
@@ -178,9 +195,21 @@ export function AccelerationPage() {
         description="手动域名优先、自动发现域名继续消费剩余优选 IP"
         actions={<>
           <Tooltip label="刷新域名、路由与状态"><ActionIcon aria-label="刷新域名加速状态" variant="light" loading={domains.isFetching || routes.isFetching || status.isFetching} onClick={refreshAll}><RefreshCw size={17} /></ActionIcon></Tooltip>
+          <Button color="red" variant="light" leftSection={<Trash2 size={16} />} disabled={discoveredCount === 0 || clearDiscovered.isPending} onClick={() => setIsCleanupOpen(true)}>清理自动发现</Button>
           <Button leftSection={<ScanSearch size={16} />} loading={discover.isPending} disabled={!accelerationConfig?.enabled || !accelerationConfig.auto_discover} onClick={() => discover.mutate()}>立即发现</Button>
         </>}
       />
+
+      <Modal opened={isCleanupOpen} onClose={() => setIsCleanupOpen(false)} title="清理自动发现域名" centered>
+        <Stack gap="md">
+          <Text size="sm">将删除 {discoveredCount} 条自动发现记录，并撤销其中已有的域名加速。手动域名及其加速策略会保留。</Text>
+          <Alert color="yellow" title="自动发现设置保持不变">仍在活动连接中的域名之后可能被重新发现。</Alert>
+          <Group justify="flex-end">
+            <Button variant="default" onClick={() => setIsCleanupOpen(false)}>取消</Button>
+            <Button color="red" leftSection={<Trash2 size={16} />} loading={clearDiscovered.isPending} onClick={() => clearDiscovered.mutate()}>确认清理</Button>
+          </Group>
+        </Stack>
+      </Modal>
 
       <Alert color={isAutomatic ? 'green' : 'yellow'} icon={isAutomatic ? <ShieldCheck size={18} /> : <ShieldAlert size={18} />} title={isAutomatic ? '自动加速已开启' : '自动加速未完全开启'}>
         <Text size="sm">域名加速 {accelerationConfig?.enabled ? '开启' : '关闭'} · 自动发现 {accelerationConfig?.auto_discover ? '开启' : '关闭'} · 自动应用 {accelerationConfig?.auto_apply ? '开启' : '关闭'} · 周期 {accelerationConfig?.discovery_interval ?? '—'}</Text>

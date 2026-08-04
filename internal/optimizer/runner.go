@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cf-optimizer/cf-optimizer/internal/acceleration"
@@ -46,6 +47,14 @@ type PolicyApplier interface {
 	Rollback(context.Context, proxy.ApplyResult) error
 }
 
+type policyReceiptJournalSetter interface {
+	SetReceiptJournal(proxy.ReceiptJournal)
+}
+
+type managedPolicyCleaner interface {
+	Cleanup(context.Context, proxy.ApplyResult) error
+}
+
 // DomainMappingVerifier 验证映射应用前后的 HTTPS 连接证据。
 type DomainMappingVerifier interface {
 	VerifyPreflight(context.Context, []proxy.DomainMapping) error
@@ -71,6 +80,13 @@ type Event struct {
 type RunOptions struct {
 	ForceRangeRefresh bool `json:"force_range_refresh"`
 	ApplyPolicy       bool `json:"apply_policy"`
+}
+
+// DiscoveredDomainCleanupResult 汇总自动发现记录和既有加速映射的清理结果。
+type DiscoveredDomainCleanupResult struct {
+	Cleared              int  `json:"cleared"`
+	AccelerationsRemoved int  `json:"accelerations_removed"`
+	PolicyRefreshed      bool `json:"policy_refreshed"`
 }
 
 // DomainAllocationResult 记录单个加速域名从物理 DNS 校验到优选地址分配的结果。
@@ -121,6 +137,8 @@ type Runner struct {
 	logger         *slog.Logger
 	now            func() time.Time
 	runMutex       sync.Mutex
+	pendingRuns    atomic.Int32
+	operationGate  operationGate
 }
 
 // SetDomainMappingVerifier 注入生产环境的物理接口 HTTPS 验证器。
@@ -145,6 +163,9 @@ func NewRunner(cfg config.Config, rangeSource RangeSource, benchmarker Benchmark
 			policy = nil
 		}
 	}
+	if journaledPolicy, ok := policy.(policyReceiptJournalSetter); ok {
+		journaledPolicy.SetReceiptJournal(newPolicyReceiptJournal(stateStore))
+	}
 	return &Runner{
 		config: cfg, ranges: rangeSource, benchmark: benchmarker, store: stateStore,
 		routes: routes, physicalPath: physicalPath, policy: policy,
@@ -154,10 +175,19 @@ func NewRunner(cfg config.Config, rangeSource RangeSource, benchmarker Benchmark
 
 // Run 执行一次可取消优选；同一 Runner 同时只允许一个任务。
 func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) (report RunReport, runErr error) {
+	r.pendingRuns.Add(1)
 	if !r.runMutex.TryLock() {
+		r.pendingRuns.Add(-1)
 		return RunReport{}, ErrAlreadyRunning
 	}
-	defer r.runMutex.Unlock()
+	defer func() {
+		r.runMutex.Unlock()
+		r.pendingRuns.Add(-1)
+	}()
+	if err := r.operationGate.acquire(ctx); err != nil {
+		return RunReport{}, err
+	}
+	defer r.operationGate.release()
 	report.ID = newRunID()
 	report.StartedAt = r.now().UTC()
 	r.emit(emit, Event{RunID: report.ID, Type: "run.started", Stage: "ranges", Message: "optimization started"})
@@ -282,6 +312,7 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 	var applied proxy.ApplyResult
 	var removedRouteTransactions []string
 	if options.ApplyPolicy {
+		r.emit(emit, Event{RunID: report.ID, Type: "stage.started", Stage: "policy", Message: "applying and verifying selected policy"})
 		for {
 			var allocationWarnings []string
 			report.domainMappings, report.DomainAllocations, allocationWarnings = r.allocateDomainMappings(ctx, rangeResult.Snapshot, report.Results, r.store.Snapshot())
@@ -380,6 +411,7 @@ func (r *Runner) replaceUnsafeLegacyDomainMappings(ctx context.Context, before s
 	}
 	if err := r.store.Update(func(state *store.State) error {
 		state.Policy = policySnapshot(safePolicy, receipts, r.now().UTC())
+		state.PendingPolicy = nil
 		return nil
 	}); err != nil {
 		if restoreErr := r.rollbackRoutes(ctx, removedRouteTransactions); restoreErr != nil {
@@ -429,19 +461,75 @@ func (r *Runner) CleanupManagedPolicy(ctx context.Context) error {
 
 // RefreshPolicy 使用当前已选节点重新应用域名集合，供自动发现和订阅刷新恢复调用。
 func (r *Runner) RefreshPolicy(ctx context.Context) error {
-	if !r.runMutex.TryLock() {
+	if !r.tryAcquireMaintenance() {
 		return ErrAlreadyRunning
 	}
-	defer r.runMutex.Unlock()
+	defer r.operationGate.release()
 	return r.refreshPolicyLocked(ctx)
+}
+
+// ClearDiscoveredDomains 仅删除自动发现记录，并先验证仅保留手动域名的新策略。
+func (r *Runner) ClearDiscoveredDomains(ctx context.Context) (DiscoveredDomainCleanupResult, error) {
+	if !r.tryAcquireMaintenance() {
+		return DiscoveredDomainCleanupResult{}, ErrAlreadyRunning
+	}
+	defer r.operationGate.release()
+
+	before := r.store.Snapshot()
+	manualDomains := make(map[string]struct{}, len(r.config.AccelerationDomains()))
+	for _, domain := range r.config.AccelerationDomains() {
+		manualDomains[domain] = struct{}{}
+	}
+	automaticDomains := make(map[string]struct{}, len(before.DiscoveredDomains))
+	for domain, record := range before.DiscoveredDomains {
+		if _, manual := manualDomains[domain]; manual || record.Source == "manual" {
+			continue
+		}
+		automaticDomains[domain] = struct{}{}
+	}
+	result := DiscoveredDomainCleanupResult{Cleared: len(automaticDomains)}
+	if result.Cleared == 0 {
+		return result, nil
+	}
+	if before.Policy != nil {
+		for _, mapping := range before.Policy.DomainMappings {
+			if _, automatic := automaticDomains[mapping.Domain]; automatic {
+				result.AccelerationsRemoved++
+			}
+		}
+	}
+	clearDiscoveries := func(state *store.State) {
+		for domain := range automaticDomains {
+			delete(state.DiscoveredDomains, domain)
+		}
+	}
+	if result.AccelerationsRemoved == 0 {
+		if err := r.store.Update(func(state *store.State) error {
+			clearDiscoveries(state)
+			return nil
+		}); err != nil {
+			return DiscoveredDomainCleanupResult{}, fmt.Errorf("clear discovered domains: %w", err)
+		}
+		r.logger.Info("自动发现域名已清理", "cleared", result.Cleared, "accelerations_removed", 0, "policy_refreshed", false, "result", "completed")
+		return result, nil
+	}
+	if r.policy == nil {
+		return DiscoveredDomainCleanupResult{}, errors.New("cannot remove discovered domain acceleration because no policy adapter is configured")
+	}
+	if err := r.refreshPolicyWithStateMutationLocked(ctx, clearDiscoveries); err != nil {
+		return DiscoveredDomainCleanupResult{}, fmt.Errorf("remove discovered domain acceleration: %w", err)
+	}
+	result.PolicyRefreshed = true
+	r.logger.Info("自动发现域名已清理", "cleared", result.Cleared, "accelerations_removed", result.AccelerationsRemoved, "policy_refreshed", true, "result", "completed")
+	return result, nil
 }
 
 // UpdateAccelerationDomains 在单任务边界内替换域名集合，并在活动适配器可用时刷新当前策略。
 func (r *Runner) UpdateAccelerationDomains(ctx context.Context, manualDomains, excludedDomains []string) (bool, error) {
-	if !r.runMutex.TryLock() {
+	if !r.tryAcquireMaintenance() {
 		return false, ErrAlreadyRunning
 	}
-	defer r.runMutex.Unlock()
+	defer r.operationGate.release()
 	if slices.Equal(r.config.Acceleration.ManualDomains, manualDomains) && slices.Equal(r.config.Acceleration.ExcludedDomains, excludedDomains) {
 		return false, nil
 	}
@@ -467,8 +555,25 @@ func (r *Runner) UpdateAccelerationDomains(ctx context.Context, manualDomains, e
 	return true, nil
 }
 
+// tryAcquireMaintenance 仅在没有完整优选排队时允许后台维护立即取得执行权。
+func (r *Runner) tryAcquireMaintenance() bool {
+	if r.pendingRuns.Load() > 0 || !r.operationGate.tryAcquire() {
+		return false
+	}
+	if r.pendingRuns.Load() > 0 {
+		r.operationGate.release()
+		return false
+	}
+	return true
+}
+
 // refreshPolicyLocked 使用已持有的单任务锁刷新策略，避免配置切换期间并行运行测速。
 func (r *Runner) refreshPolicyLocked(ctx context.Context) error {
+	return r.refreshPolicyWithStateMutationLocked(ctx, nil)
+}
+
+// refreshPolicyWithStateMutationLocked 先用变更后的状态验证策略，再把策略和状态变更原子提交。
+func (r *Runner) refreshPolicyWithStateMutationLocked(ctx context.Context, mutateState func(*store.State)) error {
 	if r.policy == nil {
 		return errors.New("policy refresh requested but no adapter is configured")
 	}
@@ -478,13 +583,17 @@ func (r *Runner) refreshPolicyLocked(ctx context.Context) error {
 	}
 	for {
 		before := r.store.Snapshot()
-		ranked := rankedHistoricalResults(before, r.now())
-		mappings, allocations, allocationWarnings := r.allocateDomainMappings(ctx, rangeResult.Snapshot, ranked, before)
+		planned := before
+		if mutateState != nil {
+			mutateState(&planned)
+		}
+		ranked := rankedHistoricalResults(planned, r.now())
+		mappings, allocations, allocationWarnings := r.allocateDomainMappings(ctx, rangeResult.Snapshot, ranked, planned)
 		for _, warning := range allocationWarnings {
 			r.logger.Warn("域名未分配优选 IP", "warning", warning)
 		}
 		report := RunReport{DomainAllocations: allocations, domainMappings: mappings, domainAllocationCompleted: true}
-		policy, policyErr := r.policyForDecisions(before, report, false)
+		policy, policyErr := r.policyForDecisions(planned, report, false)
 		if policyErr != nil {
 			return policyErr
 		}
@@ -538,8 +647,12 @@ func (r *Runner) refreshPolicyLocked(ctx context.Context) error {
 			return marshalErr
 		}
 		if persistErr := r.store.Update(func(state *store.State) error {
+			if mutateState != nil {
+				mutateState(state)
+			}
 			state.Policy = policySnapshot(policy, receipts, r.now().UTC())
 			recordDomainAllocationResults(state, report.DomainAllocations, true, r.now().UTC())
+			state.PendingPolicy = nil
 			return nil
 		}); persistErr != nil {
 			if restoreErr := r.rollbackRoutes(ctx, removedRouteTransactions); restoreErr != nil {
@@ -564,6 +677,9 @@ func CleanupManagedPolicy(ctx context.Context, stateStore *store.Store, routes *
 			return fmt.Errorf("recover temporary routes: %w", err)
 		}
 	}
+	if err := RecoverPendingPolicy(ctx, stateStore, policy); err != nil {
+		return err
+	}
 	snapshot := stateStore.Snapshot()
 	if snapshot.Policy == nil {
 		return nil
@@ -575,15 +691,50 @@ func CleanupManagedPolicy(ctx context.Context, stateStore *store.Store, routes *
 	if err := json.Unmarshal(snapshot.Policy.Receipts, &applied); err != nil {
 		return fmt.Errorf("decode stored policy receipts: %w", err)
 	}
-	if err := policy.Rollback(ctx, applied); err != nil {
+	if err := cleanupAppliedPolicy(ctx, policy, applied); err != nil {
 		return fmt.Errorf("rollback stored policy: %w", err)
 	}
 	return stateStore.Update(func(state *store.State) error {
 		state.CurrentIPv4 = nil
 		state.CurrentIPv6 = nil
 		state.Policy = nil
+		state.PendingPolicy = nil
 		return nil
 	})
+}
+
+// RecoverPendingPolicy 回滚尚未提交的适配器收据，并仅在完整成功后清除事务日志。
+func RecoverPendingPolicy(ctx context.Context, stateStore *store.Store, policy PolicyApplier) error {
+	if stateStore == nil {
+		return errors.New("state store is required for pending policy recovery")
+	}
+	pending := stateStore.Snapshot().PendingPolicy
+	if pending == nil {
+		return nil
+	}
+	applied, err := decodeApplyResult(pending.Receipts)
+	if err != nil {
+		return fmt.Errorf("decode pending policy receipts: %w", err)
+	}
+	if len(applied.Receipts) > 0 {
+		if policy == nil {
+			return errors.New("pending policy cannot be recovered because its adapters are disabled")
+		}
+		if err := cleanupAppliedPolicy(ctx, policy, applied); err != nil {
+			return fmt.Errorf("rollback pending policy: %w", err)
+		}
+	}
+	return stateStore.Update(func(state *store.State) error {
+		state.PendingPolicy = nil
+		return nil
+	})
+}
+
+func cleanupAppliedPolicy(ctx context.Context, policy PolicyApplier, applied proxy.ApplyResult) error {
+	if cleaner, ok := policy.(managedPolicyCleaner); ok {
+		return cleaner.Cleanup(ctx, applied)
+	}
+	return policy.Rollback(ctx, applied)
 }
 
 func (r *Runner) generateCandidates(snapshot ranges.Snapshot, state store.State, now time.Time) ([]netip.Addr, error) {
@@ -1127,6 +1278,7 @@ func (r *Runner) persistSuccessfulRun(report RunReport, before store.State, appl
 				return err
 			}
 			state.Policy = policySnapshot(policy, receipts, now)
+			state.PendingPolicy = nil
 		}
 		recordDomainAllocationResults(state, report.DomainAllocations, policyApplied, now)
 		return nil

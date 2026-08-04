@@ -12,9 +12,11 @@ import (
 )
 
 type memoryRouteBackend struct {
-	routes      map[string]RouteSpec
-	resolveFail bool
-	deleteFail  bool
+	routes                 map[string]RouteSpec
+	resolveFail            bool
+	deleteFail             bool
+	replaceAfterWriteError error
+	deleteContextError     error
 }
 
 func newMemoryRouteBackend() *memoryRouteBackend {
@@ -23,10 +25,11 @@ func newMemoryRouteBackend() *memoryRouteBackend {
 
 func (b *memoryRouteBackend) Replace(_ context.Context, route RouteSpec) error {
 	b.routes[route.Prefix] = route
-	return nil
+	return b.replaceAfterWriteError
 }
 
-func (b *memoryRouteBackend) Delete(_ context.Context, route RouteSpec) error {
+func (b *memoryRouteBackend) Delete(ctx context.Context, route RouteSpec) error {
+	b.deleteContextError = ctx.Err()
 	if b.deleteFail {
 		return errors.New("forced delete failure")
 	}
@@ -95,6 +98,25 @@ func TestRouteVerificationFailureRollsBack(t *testing.T) {
 	}
 	if backend.routes[previous.Prefix].Gateway != previous.Gateway {
 		t.Fatalf("previous route was not restored: %#v", backend.routes)
+	}
+}
+
+func TestRouteApplyFailureRollsBackWithoutCanceledContext(t *testing.T) {
+	backend := newMemoryRouteBackend()
+	backend.replaceAfterWriteError = context.Canceled
+	controller := newTestRouteController(t, backend)
+	plan, err := controller.Plan(context.Background(), testRoute(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	transaction, err := controller.Apply(ctx, plan)
+	if err == nil || transaction.State != "rolled_back" {
+		t.Fatalf("expected failed apply to roll back: transaction=%#v error=%v", transaction, err)
+	}
+	if backend.deleteContextError != nil || len(backend.routes) != 0 {
+		t.Fatalf("cleanup inherited cancellation or left a route: context_error=%v routes=%#v", backend.deleteContextError, backend.routes)
 	}
 }
 

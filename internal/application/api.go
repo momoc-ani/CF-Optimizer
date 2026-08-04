@@ -99,7 +99,7 @@ func (a *API) Handle(ctx context.Context, request ipc.Request, emit func(any) er
 	case "ranges.update":
 		return a.runtime.Ranges.Update(ctx, true)
 	case "history.list":
-		return a.runtime.Store.Snapshot().History, nil
+		return newestHistoryFirst(a.runtime.Store.Snapshot().History), nil
 	case "routes.list":
 		return a.runtime.Routes.Transactions(), nil
 	case "proxy.detect":
@@ -108,6 +108,12 @@ func (a *API) Handle(ctx context.Context, request ipc.Request, emit func(any) er
 		return a.runtime.domainDiscoverySnapshot(), nil
 	case "acceleration.discover":
 		return a.runtime.DiscoverAccelerationDomains(ctx)
+	case "acceleration.clear_discovered":
+		var parameters struct{}
+		if err := decodeStrict(request.Params, &parameters); err != nil {
+			return nil, invalidParams(err)
+		}
+		return a.runtime.ClearDiscoveredAccelerationDomains(ctx)
 	case "diagnostics.route":
 		return a.routeDiagnostics(ctx, request.Params)
 	case "config.get":
@@ -119,6 +125,13 @@ func (a *API) Handle(ctx context.Context, request ipc.Request, emit func(any) er
 	default:
 		return nil, &ipc.Error{Code: "method_not_found", Message: "unknown method " + request.Method}
 	}
+}
+
+// newestHistoryFirst 返回供界面扫描的倒序历史副本，不改变持久化追加顺序。
+func newestHistoryFirst(history []store.RunSummary) []store.RunSummary {
+	result := slices.Clone(history)
+	slices.Reverse(result)
+	return result
 }
 
 // systemStatus 返回可高频轮询的精简状态，历史和领域明细由各自的只读接口提供。

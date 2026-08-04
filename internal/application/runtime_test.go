@@ -36,6 +36,21 @@ func TestConfigForStoredReceiptsEnablesOnlyRequiredAdapters(t *testing.T) {
 	}
 }
 
+func TestConfigForStoredReceiptsIncludesPendingTransactionAdapters(t *testing.T) {
+	receipts, err := json.Marshal(proxy.ApplyResult{Receipts: []proxy.Receipt{{Adapter: cleanupAdapterMihomo}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := store.State{PendingPolicy: store.NewPolicyTransaction(time.Now(), json.RawMessage(`{}`), receipts)}
+	cleanupConfig, err := configForStoredReceipts(config.Default(), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cleanupConfig.Proxy.Mihomo.Enabled || cleanupConfig.Proxy.Generic.Enabled {
+		t.Fatalf("pending transaction adapters were not isolated: %#v", cleanupConfig.Proxy)
+	}
+}
+
 func TestConfigForStoredReceiptsRejectsUnknownAdapter(t *testing.T) {
 	receipts, err := json.Marshal(proxy.ApplyResult{Receipts: []proxy.Receipt{{Adapter: "unknown-adapter"}}})
 	if err != nil {
@@ -134,6 +149,22 @@ func TestDomainPolicyNeedsRefreshFollowsAutomaticAllocationSwitches(t *testing.T
 	}
 }
 
+func TestDomainPolicyNeedsRefreshDoesNotBootstrapMissingPolicy(t *testing.T) {
+	cfg := config.Default()
+	cfg.Acceleration.Enabled = true
+	cfg.Acceleration.AutoDiscover = true
+	cfg.Acceleration.AutoApply = true
+	state := store.State{DiscoveredDomains: map[string]store.DomainDiscovery{
+		"auto.example": {
+			Domain: "auto.example", CloudflareVerified: true, PreflightVerified: true, Active: true,
+			LastResolvedAddresses: []string{"104.18.1.10"},
+		},
+	}}
+	if domainPolicyNeedsRefresh(cfg, state) {
+		t.Fatal("automatic discovery must not bootstrap a policy before a full optimization is verified")
+	}
+}
+
 func TestDomainDiscoverySnapshotReturnsSanitizedPolicyEvidence(t *testing.T) {
 	stateStore, err := store.Open(t.TempDir(), 10)
 	if err != nil {
@@ -165,7 +196,7 @@ func TestDomainDiscoverySnapshotReturnsSanitizedPolicyEvidence(t *testing.T) {
 	cfg.Acceleration.ManualDomains = []string{"ani.momoc.top"}
 	runtimeState := &Runtime{Config: cfg, Store: stateStore}
 	result := runtimeState.domainDiscoverySnapshot()
-	if len(result.Domains) != 1 {
+	if result.Discovered != 1 || len(result.Domains) != 1 {
 		t.Fatalf("unexpected acceleration domains: %#v", result.Domains)
 	}
 	domain := result.Domains[0]

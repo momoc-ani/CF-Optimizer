@@ -67,8 +67,15 @@ export interface DomainDiscoveryResult {
   observed: number;
   verified: number;
   activated: number;
+  discovered: number;
   policy_refreshed: boolean;
   domains: DomainDiscovery[];
+}
+
+export interface DiscoveredDomainCleanupResult {
+  cleared: number;
+  accelerations_removed: number;
+  policy_refreshed: boolean;
 }
 
 export interface Progress {

@@ -136,6 +136,103 @@ func TestAdapterApplyVerifyRollbackAndIdempotency(t *testing.T) {
 	}
 }
 
+func TestCleanupConflictRemovesManagedDescendantWithoutOverwritingOtherConfig(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/configs" {
+			response.WriteHeader(http.StatusNoContent)
+			return
+		}
+		response.WriteHeader(http.StatusOK)
+	}))
+	directory := t.TempDir()
+	providerPath := filepath.Join(directory, "cf-optimizer.yaml")
+	activeConfigPath := filepath.Join(directory, "config.yaml")
+	providerPrevious := []byte("payload: []\n")
+	configPrevious := []byte("dns:\n  use-hosts: false\nhosts:\n  existing.example: 9.9.9.9\nrules:\n  - MATCH,proxy\n")
+	if err := os.WriteFile(providerPath, providerPrevious, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(activeConfigPath, configPrevious, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default().Proxy.Mihomo
+	cfg.Enabled = true
+	cfg.Controller = server.URL
+	cfg.ProviderFile = providerPath
+	cfg.ReloadConfig = activeConfigPath
+	cfg.Timeout = config.Duration(time.Second)
+	adapter, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPolicy, err := (proxy.DirectPolicy{
+		IPv4CIDRs: []string{"1.1.1.1/32"}, Domains: []string{"example.com"},
+		DomainMappings: []proxy.DomainMapping{{Domain: "example.com", Addresses: []string{"1.1.1.1"}}},
+	}).Normalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPlan, err := adapter.Plan(context.Background(), firstPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleReceipt, err := adapter.Apply(context.Background(), firstPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPolicy, err := (proxy.DirectPolicy{
+		IPv4CIDRs: []string{"1.1.1.2/32"}, Domains: []string{"example.com"},
+		DomainMappings: []proxy.DomainMapping{{Domain: "example.com", Addresses: []string{"1.1.1.2"}}},
+	}).Normalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPlan, err := adapter.Plan(context.Background(), secondPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Apply(context.Background(), secondPlan); err != nil {
+		t.Fatal(err)
+	}
+	currentConfig, err := os.ReadFile(activeConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentConfig = append(currentConfig, []byte("mode: rule\n")...)
+	if err := os.WriteFile(activeConfigPath, currentConfig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server.Close()
+	if err := adapter.CleanupConflict(context.Background(), []proxy.Receipt{staleReceipt}); err != nil {
+		t.Fatal(err)
+	}
+	restoredProvider, err := os.ReadFile(providerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restoredProvider) != string(providerPrevious) {
+		t.Fatalf("non-managed provider baseline was not restored: %s", restoredProvider)
+	}
+	cleanedConfig, err := os.ReadFile(activeConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanedText := string(cleanedConfig)
+	for _, unwanted := range []string{"example.com", "1.1.1.2/32"} {
+		if strings.Contains(cleanedText, unwanted) {
+			t.Fatalf("managed value %q remained after cleanup: %s", unwanted, cleanedConfig)
+		}
+	}
+	for _, expected := range []string{"existing.example: 9.9.9.9", "use-hosts: false", "mode: rule", "MATCH,proxy"} {
+		if !strings.Contains(cleanedText, expected) {
+			t.Fatalf("unrelated config %q was not preserved: %s", expected, cleanedConfig)
+		}
+	}
+	if _, err := os.Stat(managedMetadataPath(providerPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("managed metadata was not removed: %v", err)
+	}
+}
+
 func TestPlanRemovesPreviouslyManagedHostsWhenMappingsBecomeEmpty(t *testing.T) {
 	directory := t.TempDir()
 	providerPath := filepath.Join(directory, "cf-optimizer.yaml")
@@ -184,6 +281,28 @@ func TestPlanRemovesPreviouslyManagedHostsWhenMappingsBecomeEmpty(t *testing.T) 
 	}
 	if len(payload.ConfigContent) == 0 || strings.Contains(string(payload.ConfigContent), "dash.cloudflare.com: 172.66.2.98") {
 		t.Fatalf("stale managed host was not removed: %s", payload.ConfigContent)
+	}
+}
+
+func TestCleanupManagedConfigRejectsNonAddressHostEdit(t *testing.T) {
+	metadataContent, err := json.Marshal(managedMetadata{
+		Version:        managedMetadataVersion,
+		ManagedDomains: []string{"example.com"},
+		OriginalHosts:  map[string]originalHostValue{"example.com": {Exists: false}},
+		OriginalRules:  map[string]bool{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configContent := []byte("hosts:\n  example.com: user-defined.example\nrules: []\n")
+	if _, err := cleanupManagedConfig(configContent, metadataContent); err == nil {
+		t.Fatal("cleanup overwrote a host value that could not be proven to be managed")
+	}
+}
+
+func TestControllerUnavailableRejectsNonNetworkProtocolError(t *testing.T) {
+	if controllerUnavailable(errors.New("Mihomo reload returned 401")) {
+		t.Fatal("HTTP or authentication failure was treated as an offline controller")
 	}
 }
 

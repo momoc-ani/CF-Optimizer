@@ -75,6 +75,10 @@ $cfopt = Join-Path $env:ProgramFiles "CF Optimizer\cf-optimizer.exe"
 
 确认前不会修改路由、Hosts、代理策略或持续维护配置。后台会依次更新网段、测速、应用并验证策略；验证失败时回滚。界面只会显示“已验证”“仅测速完成”“部分完成”或“已回滚”，不会把配置写入当作直连证据。
 
+应用域名映射时，Hosts 适配器会临时移除受管区块外的同域名旧记录，避免旧地址覆盖本轮优选地址；同一行的其他主机名保持有效。旧记录包含在事务收据中，策略失败、切换、清理或卸载时会原样恢复。
+
+尚无已验证策略时，自动域名发现只保存候选记录，不在后台单独创建部分策略或占用优选任务锁；候选域名会在下一次完整优选中统一应用和验证。
+
 如果自动预检无法确定可信接口或网关，确认框只提供“仅测速”和“高级设置”。此时再到设置页填写物理接口/网关，并在网络路由页运行诊断；CLI、手工 SHA-256 校验和 YAML 编辑均属于高级路径。
 
 VPN Kill Switch、企业策略或代理内核仍可能阻止物理出口。没有实际接口、网关和连接证据时，不应声称流量已经直连。
@@ -127,11 +131,11 @@ $cfopt = Join-Path $env:ProgramFiles "CF Optimizer\cf-optimizer.exe"
 & $cfopt cleanup
 ```
 
-`cleanup` 逆序回滚持久化的受管路由、Hosts 和代理策略，不删除配置、日志或历史。如果受管文件被其他程序修改，清理会拒绝覆盖并返回错误，需先人工核对。
+`cleanup` 会先恢复进程中断时已应用但尚未提交的策略事务，再逆序回滚持久化的受管路由、Hosts 和代理策略，不删除配置、日志或历史。Mihomo 控制端未运行时，只要磁盘内容仍可由程序标记和元数据证明为受管内容，就会完成磁盘清理；控制端可达但返回鉴权、配置或 HTTP 错误时仍会中止。如果无法证明文件归属或发现非受管修改，清理会拒绝覆盖并返回错误，需先人工核对。
 
 ### 9. 升级与卸载
 
-升级时运行同架构的新安装包。安装器会停止现有服务、替换程序文件并重新启动服务，同时保留配置、状态和历史。升级前仍建议备份 `%ProgramData%\CF Optimizer`。
+升级时运行同架构的新安装包。安装器会停止现有服务、替换程序文件，并在复制完成后重新检查服务；服务缺失时会重建，已存在但停止时会启动，同时保留配置、状态和历史。服务安装或修复返回非零状态时，安装器会中止而不会把部分完成显示为成功。升级前仍建议备份 `%ProgramData%\CF Optimizer`。
 
 卸载时打开“设置 -> 应用 -> 已安装的应用”，选择 CF Optimizer。卸载器会先停止服务并执行受管策略清理；清理失败时会中止卸载，避免遗留未知网络状态。
 
@@ -229,6 +233,10 @@ The normal workflow has three steps:
 
 Before confirmation, the application does not change routes, Hosts, proxy policy, or persistent maintenance settings. The service refreshes ranges, benchmarks candidates, applies policy, and verifies it in sequence, rolling back when verification fails. The UI reports only Verified, Benchmark only, Partially completed, or Rolled back; a successful write is never treated as direct-traffic proof.
 
+When applying domain mappings, the Hosts adapter temporarily suppresses same-domain entries outside its managed block so an old address cannot override the selected address; other hostnames on the same line remain active. The transaction receipt restores the original entries after a failed policy, switch, cleanup, or uninstall.
+
+When no verified policy exists, automatic domain discovery records candidates without creating a partial policy or holding the optimization lock in the background. The next full optimization applies and verifies those candidates together.
+
 If preflight cannot identify a trusted interface or gateway, the dialog offers only Benchmark and Advanced settings. Enter manual interface/gateway overrides in Settings and use Routes diagnostics only in that fallback path. CLI use, manual SHA-256 verification, and YAML editing are advanced operations.
 
 A VPN Kill Switch, enterprise policy, or proxy core may still block physical egress. Do not claim direct traffic without effective interface, gateway, and connection evidence.
@@ -281,11 +289,11 @@ To restore managed policy separately while the service is stopped:
 & $cfopt cleanup
 ```
 
-`cleanup` rolls back persisted managed routes, Hosts, and proxy policy in reverse order without deleting configuration, logs, or history. If another program changed a managed file, cleanup refuses to overwrite it and reports an error for manual review.
+`cleanup` first recovers policy changes that were applied but not committed when a process stopped, then rolls back persisted managed routes, Hosts, and proxy policy in reverse order without deleting configuration, logs, or history. When the Mihomo controller is offline, disk cleanup may complete only if ownership markers and metadata still prove that the content is managed. Authentication, configuration, and HTTP errors from a reachable controller still abort cleanup. Unproven or non-managed edits are never overwritten and require manual review.
 
 ### 9. Upgrade and remove
 
-Run the newer installer for the same architecture. It stops the existing service, replaces program files, and restarts the service while preserving configuration, state, and history. Back up `%ProgramData%\CF Optimizer` before a major upgrade.
+Run the newer installer for the same architecture. It stops the existing service, replaces program files, then checks the service again. A missing service is recreated and an installed but stopped service is started while configuration, state, and history are preserved. A nonzero service repair result aborts Setup instead of reporting a partial installation as successful. Back up `%ProgramData%\CF Optimizer` before a major upgrade.
 
 To remove the application, open Settings > Apps > Installed apps and select CF Optimizer. The uninstaller stops the service and cleans managed policy first. It aborts when cleanup fails to avoid leaving an unknown network state.
 

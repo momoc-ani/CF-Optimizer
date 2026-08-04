@@ -60,6 +60,17 @@ test('域名加速页面展示完整的直连验证证据', async ({ page }, tes
   await page.screenshot({ path: testInfo.outputPath('acceleration-page.png'), fullPage: false });
 });
 
+test('清理自动发现域名保留手动域名', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: '域名加速', exact: true }).click();
+  await expect(page.getByText('dash.cloudflare.com').first()).toBeVisible();
+  await page.getByRole('button', { name: '清理自动发现', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText('手动域名及其加速策略会保留');
+  await page.getByRole('button', { name: '确认清理', exact: true }).click();
+  await expect(page.getByText('dash.cloudflare.com')).toHaveCount(0);
+  await expect(page.getByText('ani.momoc.top').first()).toBeVisible();
+});
+
 test('域名加速配置只在独立页面编辑', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: '域名加速', exact: true }).click();

@@ -8,8 +8,10 @@ import (
 	"io"
 	"log/slog"
 	"net/netip"
+	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +27,24 @@ type staticRanges struct{ snapshot ranges.Snapshot }
 
 func (s staticRanges) Update(context.Context, bool) (ranges.UpdateResult, error) {
 	return ranges.UpdateResult{Snapshot: s.snapshot}, nil
+}
+
+type blockingRanges struct {
+	snapshot ranges.Snapshot
+	started  chan struct{}
+	release  chan struct{}
+	once     sync.Once
+}
+
+// Update 阻塞首次网段读取，用于稳定复现策略刷新与手动优选的竞争。
+func (s *blockingRanges) Update(ctx context.Context, _ bool) (ranges.UpdateResult, error) {
+	s.once.Do(func() { close(s.started) })
+	select {
+	case <-ctx.Done():
+		return ranges.UpdateResult{}, ctx.Err()
+	case <-s.release:
+		return ranges.UpdateResult{Snapshot: s.snapshot}, nil
+	}
 }
 
 type staticBenchmark struct{}
@@ -188,10 +208,102 @@ func TestRunnerBenchmarkOnlyDoesNotChangeAppliedSelection(t *testing.T) {
 	}
 }
 
+func TestRunnerWaitsForPolicyRefreshAndKeepsDuplicateRunConflict(t *testing.T) {
+	runner, stateStore := newTestRunner(t, &recordingPolicy{})
+	blockingSource := &blockingRanges{
+		snapshot: ranges.Snapshot{Version: 1, Source: "test", Hash: "test", IPv4: []string{"1.1.1.0/30"}},
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	runner.ranges = blockingSource
+	if err := stateStore.Update(func(state *store.State) error {
+		state.CurrentIPv4 = &store.Selection{IP: "1.1.1.1", Family: 4, PolicyVerified: true}
+		state.Nodes["1.1.1.1"] = store.NodeStats{Successes: 2, AverageScore: 99}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- runner.RefreshPolicy(context.Background()) }()
+	waitForSignal(t, blockingSource.started, "policy refresh did not start")
+
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := runner.Run(context.Background(), RunOptions{}, nil)
+		runDone <- err
+	}()
+	waitForPendingRun(t, runner)
+
+	select {
+	case err := <-runDone:
+		t.Fatalf("manual run returned before policy refresh completed: %v", err)
+	default:
+	}
+	if err := runner.RefreshPolicy(context.Background()); !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("new maintenance did not yield to the pending manual run: %v", err)
+	}
+	if _, err := runner.Run(context.Background(), RunOptions{}, nil); !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("duplicate manual run did not retain conflict semantics: %v", err)
+	}
+
+	close(blockingSource.release)
+	if err := waitForResult(t, refreshDone, "policy refresh did not finish"); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForResult(t, runDone, "manual run did not start after policy refresh"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunnerCancelsWhileWaitingForPolicyRefresh(t *testing.T) {
+	runner, stateStore := newTestRunner(t, &recordingPolicy{})
+	blockingSource := &blockingRanges{
+		snapshot: ranges.Snapshot{Version: 1, Source: "test", Hash: "test", IPv4: []string{"1.1.1.0/30"}},
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	runner.ranges = blockingSource
+	if err := stateStore.Update(func(state *store.State) error {
+		state.CurrentIPv4 = &store.Selection{IP: "1.1.1.1", Family: 4, PolicyVerified: true}
+		state.Nodes["1.1.1.1"] = store.NodeStats{Successes: 2, AverageScore: 99}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- runner.RefreshPolicy(context.Background()) }()
+	waitForSignal(t, blockingSource.started, "policy refresh did not start")
+
+	runContext, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := runner.Run(runContext, RunOptions{}, nil)
+		runDone <- err
+	}()
+	waitForPendingRun(t, runner)
+	cancel()
+	if err := waitForResult(t, runDone, "cancelled manual run did not return"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("manual run returned an unexpected cancellation error: %v", err)
+	}
+	if pending := runner.pendingRuns.Load(); pending != 0 {
+		t.Fatalf("cancelled manual run left a pending reservation: %d", pending)
+	}
+
+	close(blockingSource.release)
+	if err := waitForResult(t, refreshDone, "policy refresh did not finish"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRunnerAppliesAndPersistsVerifiedSelection(t *testing.T) {
 	policy := &recordingPolicy{}
 	runner, stateStore := newTestRunner(t, policy)
-	report, err := runner.Run(context.Background(), RunOptions{ApplyPolicy: true}, nil)
+	var events []Event
+	report, err := runner.Run(context.Background(), RunOptions{ApplyPolicy: true}, func(event Event) {
+		events = append(events, event)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,6 +313,9 @@ func TestRunnerAppliesAndPersistsVerifiedSelection(t *testing.T) {
 	}
 	if len(policy.policies) != 1 || len(policy.policies[0].IPv4CIDRs) != 1 {
 		t.Fatalf("unexpected applied policy: %#v", policy.policies)
+	}
+	if !slices.ContainsFunc(events, func(event Event) bool { return event.Stage == "policy" }) {
+		t.Fatalf("policy application stage was not emitted: %#v", events)
 	}
 }
 
@@ -407,6 +522,27 @@ func TestRunnerAccumulatesReceiptsAndCleansManagedPolicy(t *testing.T) {
 	}
 }
 
+func TestRecoverPendingPolicyRollsBackBeforeClearingJournal(t *testing.T) {
+	policy := &recordingPolicy{}
+	_, stateStore := newTestRunner(t, policy)
+	receipts, err := json.Marshal(proxy.ApplyResult{Receipts: []proxy.Receipt{{ID: "pending", Adapter: "test", Changed: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Update(func(state *store.State) error {
+		state.PendingPolicy = store.NewPolicyTransaction(time.Now(), json.RawMessage(`{}`), receipts)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecoverPendingPolicy(context.Background(), stateStore, policy); err != nil {
+		t.Fatal(err)
+	}
+	if stateStore.Snapshot().PendingPolicy != nil || len(policy.rollbacks) != 1 || policy.rollbacks[0].Receipts[0].ID != "pending" {
+		t.Fatalf("pending policy was not recovered: state=%#v rollbacks=%#v", stateStore.Snapshot(), policy.rollbacks)
+	}
+}
+
 func TestRunnerClearsUnsafeLegacyMappingsBeforeFailedReplacement(t *testing.T) {
 	policy := &recordingPolicy{
 		capabilities:   proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true},
@@ -536,6 +672,86 @@ func TestUpdateAccelerationDomainsWithoutAdapterKeepsStalePolicyForCleanup(t *te
 	policy := stateStore.Snapshot().Policy
 	if policy == nil || !slices.Equal(policy.Domains, []string{"old.example"}) {
 		t.Fatalf("stale policy receipts were discarded before cleanup: %#v", policy)
+	}
+}
+
+func TestClearDiscoveredDomainsRemovesAutomaticAccelerationAndPreservesManualDomain(t *testing.T) {
+	policy := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
+	runner, stateStore := newTestRunner(t, policy)
+	runner.config.Acceleration.Enabled = true
+	runner.config.Acceleration.AutoDiscover = true
+	runner.config.Acceleration.AutoApply = true
+	runner.config.Acceleration.ManualDomains = []string{"manual.example"}
+	runner.domainResolver = staticDomainResolver{addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	receipts, err := json.Marshal(proxy.ApplyResult{Receipts: []proxy.Receipt{{ID: "previous", Adapter: "test", Changed: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Update(func(state *store.State) error {
+		state.CurrentIPv4 = &store.Selection{IP: "1.1.1.1", Family: 4, PolicyVerified: true}
+		state.Nodes["1.1.1.1"] = store.NodeStats{Successes: 2, AverageScore: 99}
+		state.Nodes["1.1.1.2"] = store.NodeStats{Successes: 2, AverageScore: 98}
+		state.DiscoveredDomains["manual.example"] = store.DomainDiscovery{Domain: "manual.example", Source: "mihomo", Active: true, CloudflareVerified: true, PreflightVerified: true, LastResolvedAddresses: []string{"1.1.1.1"}}
+		state.DiscoveredDomains["auto.example"] = store.DomainDiscovery{Domain: "auto.example", Source: "mihomo", Active: true, CloudflareVerified: true, PreflightVerified: true, LastResolvedAddresses: []string{"1.1.1.1"}}
+		state.Policy = &store.PolicySnapshot{
+			DomainMappings: []store.DomainMappingSnapshot{
+				{Domain: "manual.example", Addresses: []string{"1.1.1.1"}},
+				{Domain: "auto.example", Addresses: []string{"1.1.1.2"}},
+			},
+			Receipts: receipts,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := runner.ClearDiscoveredDomains(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Cleared != 1 || result.AccelerationsRemoved != 1 || !result.PolicyRefreshed {
+		t.Fatalf("unexpected cleanup result: %#v", result)
+	}
+	state := stateStore.Snapshot()
+	manualRecord, manualRecordExists := state.DiscoveredDomains["manual.example"]
+	if len(state.DiscoveredDomains) != 1 || !manualRecordExists || manualRecord.Source != "manual" || !manualRecord.Active {
+		t.Fatalf("manual domain evidence was not preserved: %#v", state.DiscoveredDomains)
+	}
+	if state.Policy == nil || len(state.Policy.DomainMappings) != 1 || state.Policy.DomainMappings[0].Domain != "manual.example" {
+		t.Fatalf("manual acceleration was not preserved: %#v", state.Policy)
+	}
+	if len(policy.policies) != 1 || len(policy.policies[0].DomainMappings) != 1 || policy.policies[0].DomainMappings[0].Domain != "manual.example" {
+		t.Fatalf("replacement policy did not preserve only the manual domain: %#v", policy.policies)
+	}
+}
+
+func TestClearDiscoveredDomainsFailurePreservesRecordsAndStoredPolicy(t *testing.T) {
+	policy := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}, rejectedDomain: "manual.example"}
+	runner, stateStore := newTestRunner(t, policy)
+	runner.config.Acceleration.ManualDomains = []string{"manual.example"}
+	runner.domainResolver = staticDomainResolver{addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	previousMappings := []store.DomainMappingSnapshot{
+		{Domain: "manual.example", Addresses: []string{"1.1.1.1"}},
+		{Domain: "auto.example", Addresses: []string{"1.1.1.2"}},
+	}
+	if err := stateStore.Update(func(state *store.State) error {
+		state.CurrentIPv4 = &store.Selection{IP: "1.1.1.1", Family: 4, PolicyVerified: true}
+		state.Nodes["1.1.1.1"] = store.NodeStats{Successes: 2, AverageScore: 99}
+		state.DiscoveredDomains["auto.example"] = store.DomainDiscovery{Domain: "auto.example", Source: "mihomo", Active: true}
+		state.Policy = &store.PolicySnapshot{DomainMappings: previousMappings, Receipts: json.RawMessage(`{"receipts":[]}`)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runner.ClearDiscoveredDomains(context.Background()); err == nil {
+		t.Fatal("expected replacement policy failure")
+	}
+	state := stateStore.Snapshot()
+	if len(state.DiscoveredDomains) != 1 || state.Policy == nil || !reflect.DeepEqual(state.Policy.DomainMappings, previousMappings) {
+		t.Fatalf("failed cleanup changed durable state: %#v", state)
 	}
 }
 
@@ -692,4 +908,40 @@ func newTestRunner(t *testing.T, policy PolicyApplier) (*Runner, *store.Store) {
 		t.Fatal(err)
 	}
 	return runner, stateStore
+}
+
+const concurrencyTestTimeout = time.Second
+
+// waitForSignal 等待并发测试进入指定阶段，超时后提供稳定失败信息。
+func waitForSignal(t *testing.T, signal <-chan struct{}, message string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(concurrencyTestTimeout):
+		t.Fatal(message)
+	}
+}
+
+// waitForResult 等待异步操作完成并返回其错误。
+func waitForResult(t *testing.T, result <-chan error, message string) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(concurrencyTestTimeout):
+		t.Fatal(message)
+		return nil
+	}
+}
+
+// waitForPendingRun 等待手动优选完成排队登记。
+func waitForPendingRun(t *testing.T, runner *Runner) {
+	t.Helper()
+	deadline := time.Now().Add(concurrencyTestTimeout)
+	for runner.pendingRuns.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("manual run did not register as pending")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
