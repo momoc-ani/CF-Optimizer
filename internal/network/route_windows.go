@@ -106,14 +106,37 @@ func (b *windowsRouteBackend) runPowerShell(ctx context.Context, script string) 
 }
 
 func windowsInterfaceIndex(route RouteSpec) (int, error) {
+	return resolveWindowsInterfaceIndex(route, net.InterfaceByName, net.InterfaceByIndex)
+}
+
+// resolveWindowsInterfaceIndex 优先用稳定接口名刷新可能因重连而变化的 Windows 接口索引。
+func resolveWindowsInterfaceIndex(
+	route RouteSpec,
+	byName func(string) (*net.Interface, error),
+	byIndex func(int) (*net.Interface, error),
+) (int, error) {
+	var nameErr error
+	if strings.TrimSpace(route.Interface) != "" {
+		iface, err := byName(route.Interface)
+		if err == nil {
+			return iface.Index, nil
+		}
+		nameErr = err
+	}
 	if route.InterfaceIndex > 0 {
-		return route.InterfaceIndex, nil
+		iface, err := byIndex(route.InterfaceIndex)
+		if err == nil {
+			return iface.Index, nil
+		}
+		if nameErr != nil {
+			return 0, fmt.Errorf("resolve Windows interface %q or index %d: %w", route.Interface, route.InterfaceIndex, errors.Join(nameErr, err))
+		}
+		return 0, fmt.Errorf("resolve Windows interface index %d: %w", route.InterfaceIndex, err)
 	}
-	iface, err := net.InterfaceByName(route.Interface)
-	if err != nil {
-		return 0, fmt.Errorf("resolve Windows interface: %w", err)
+	if nameErr != nil {
+		return 0, fmt.Errorf("resolve Windows interface %q: %w", route.Interface, nameErr)
 	}
-	return iface.Index, nil
+	return 0, errors.New("Windows route interface is required")
 }
 
 func decodeWindowsRoute(output []byte) (windowsRouteRecord, error) {

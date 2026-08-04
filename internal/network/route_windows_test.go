@@ -4,8 +4,51 @@ package network
 
 import (
 	"errors"
+	"net"
 	"testing"
 )
+
+func TestResolveWindowsInterfaceIndexRefreshesStaleIndexByName(t *testing.T) {
+	byIndexCalled := false
+	index, err := resolveWindowsInterfaceIndex(
+		RouteSpec{Interface: "Ethernet", InterfaceIndex: 28},
+		func(name string) (*net.Interface, error) {
+			if name != "Ethernet" {
+				t.Fatalf("unexpected interface name: %q", name)
+			}
+			return &net.Interface{Index: 24, Name: name}, nil
+		},
+		func(int) (*net.Interface, error) {
+			byIndexCalled = true
+			return nil, errors.New("stale index")
+		},
+	)
+	if err != nil || index != 24 || byIndexCalled {
+		t.Fatalf("stale index was not refreshed by name: index=%d by_index_called=%t error=%v", index, byIndexCalled, err)
+	}
+}
+
+func TestResolveWindowsInterfaceIndexFallsBackToValidIndex(t *testing.T) {
+	index, err := resolveWindowsInterfaceIndex(
+		RouteSpec{Interface: "Renamed Ethernet", InterfaceIndex: 24},
+		func(string) (*net.Interface, error) { return nil, errors.New("name missing") },
+		func(index int) (*net.Interface, error) { return &net.Interface{Index: index}, nil },
+	)
+	if err != nil || index != 24 {
+		t.Fatalf("valid fallback index was not used: index=%d error=%v", index, err)
+	}
+}
+
+func TestResolveWindowsInterfaceIndexRejectsMissingInterface(t *testing.T) {
+	_, err := resolveWindowsInterfaceIndex(
+		RouteSpec{Interface: "Missing Ethernet", InterfaceIndex: 28},
+		func(string) (*net.Interface, error) { return nil, errors.New("name missing") },
+		func(int) (*net.Interface, error) { return nil, errors.New("index missing") },
+	)
+	if err == nil {
+		t.Fatal("expected missing interface error")
+	}
+}
 
 func TestDecodeWindowsResolvedRouteSelectsRouteAndSourceAddress(t *testing.T) {
 	output := []byte(`[
