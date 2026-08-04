@@ -1,0 +1,53 @@
+package mihomo
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
+
+type testVerificationTimeout struct{}
+
+func (testVerificationTimeout) Error() string   { return "verification timed out" }
+func (testVerificationTimeout) Timeout() bool   { return true }
+func (testVerificationTimeout) Temporary() bool { return true }
+
+func TestVerifyWithTransientRetryRetriesTimeoutOnce(t *testing.T) {
+	attempts := 0
+	err := verifyWithTransientRetry(context.Background(), time.Second, func(context.Context) error {
+		attempts++
+		if attempts == 1 {
+			return testVerificationTimeout{}
+		}
+		return nil
+	})
+	if err != nil || attempts != 2 {
+		t.Fatalf("transient timeout was not retried once: attempts=%d error=%v", attempts, err)
+	}
+}
+
+func TestVerifyWithTransientRetryDoesNotRetryDeterministicError(t *testing.T) {
+	attempts := 0
+	expected := errors.New("connection is not DIRECT")
+	err := verifyWithTransientRetry(context.Background(), time.Second, func(context.Context) error {
+		attempts++
+		return expected
+	})
+	if !errors.Is(err, expected) || attempts != 1 {
+		t.Fatalf("deterministic error was retried: attempts=%d error=%v", attempts, err)
+	}
+}
+
+func TestVerifyWithTransientRetryDoesNotRetryCanceledParent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	attempts := 0
+	err := verifyWithTransientRetry(ctx, time.Second, func(context.Context) error {
+		attempts++
+		return context.DeadlineExceeded
+	})
+	if !errors.Is(err, context.DeadlineExceeded) || attempts != 1 {
+		t.Fatalf("canceled parent was retried: attempts=%d error=%v", attempts, err)
+	}
+}

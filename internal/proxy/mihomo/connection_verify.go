@@ -12,9 +12,12 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cf-optimizer/cf-optimizer/internal/proxy"
 )
+
+const mappedConnectionVerificationAttempts = 2
 
 // verifyMappedConnections 通过 Mihomo mixed-port 建立真实 HTTPS 连接并核对控制 API 连接证据。
 func (a *Adapter) verifyMappedConnections(ctx context.Context, mappings []proxy.DomainMapping) error {
@@ -28,14 +31,40 @@ func (a *Adapter) verifyMappedConnections(ctx context.Context, mappings []proxy.
 	}
 	proxyAddress := net.JoinHostPort(proxyHost, strconv.Itoa(mixedPort))
 	for _, mapping := range mappings {
-		verifyContext, cancel := context.WithTimeout(ctx, a.config.Timeout.Duration())
-		err := a.verifyMappedConnection(verifyContext, proxyAddress, mapping)
-		cancel()
+		err := verifyWithTransientRetry(ctx, a.config.Timeout.Duration(), func(verifyContext context.Context) error {
+			return a.verifyMappedConnection(verifyContext, proxyAddress, mapping)
+		})
 		if err != nil {
 			return &proxy.DomainVerificationError{Domain: mapping.Domain, Err: err}
 		}
 	}
 	return nil
+}
+
+// verifyWithTransientRetry 仅对连接超时增加一次独立尝试，确定性策略错误仍立即返回。
+func verifyWithTransientRetry(ctx context.Context, timeout time.Duration, verify func(context.Context) error) error {
+	var lastErr error
+	for attempt := 0; attempt < mappedConnectionVerificationAttempts; attempt++ {
+		verifyContext, cancel := context.WithTimeout(ctx, timeout)
+		lastErr = verify(verifyContext)
+		cancel()
+		if lastErr == nil {
+			return nil
+		}
+		if attempt+1 == mappedConnectionVerificationAttempts || ctx.Err() != nil || !isTransientVerificationError(lastErr) {
+			return lastErr
+		}
+	}
+	return lastErr
+}
+
+// isTransientVerificationError 识别可通过一次重试吸收的网络或上下文超时。
+func isTransientVerificationError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var networkErr net.Error
+	return errors.As(err, &networkErr) && networkErr.Timeout()
 }
 
 // mixedPort 从活动 Mihomo 配置读取可用于真实 HTTPS 验证的混合代理端口。
