@@ -130,15 +130,19 @@ func (a *Adapter) verifyMappedConnection(ctx context.Context, proxyAddress strin
 	if err := request.Write(tlsConnection); err != nil {
 		return fmt.Errorf("send HTTPS verification request for %s: %w", mapping.Domain, err)
 	}
-	if err := a.verifyConnectionEvidence(ctx, mapping); err != nil {
-		return err
-	}
-	response, err := http.ReadResponse(bufio.NewReader(tlsConnection), request)
+	return verifyMappedHTTPSResponse(bufio.NewReader(tlsConnection), request, mapping.Domain, func() error {
+		return a.verifyConnectionEvidence(ctx, mapping)
+	})
+}
+
+// verifyMappedHTTPSResponse 先消费站点响应，再在连接仍存活时查询 Mihomo DIRECT 证据。
+func verifyMappedHTTPSResponse(reader *bufio.Reader, request *http.Request, domain string, verifyEvidence func() error) error {
+	response, err := http.ReadResponse(reader, request)
 	if err != nil {
-		return fmt.Errorf("read HTTPS verification response for %s: %w", mapping.Domain, err)
+		return fmt.Errorf("read HTTPS verification response for %s: %w", domain, err)
 	}
 	_ = response.Body.Close()
-	return nil
+	return verifyEvidence()
 }
 
 // verifyConnectionEvidence 核对控制 API 中最新连接确实命中精确域名 DIRECT 规则。

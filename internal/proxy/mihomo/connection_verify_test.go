@@ -1,8 +1,11 @@
 package mihomo
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -50,4 +53,35 @@ func TestVerifyWithTransientRetryDoesNotRetryCanceledParent(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) || attempts != 1 {
 		t.Fatalf("canceled parent was retried: attempts=%d error=%v", attempts, err)
 	}
+}
+
+func TestReadMappedHTTPSResponseCompletesBeforeConnectionEvidence(t *testing.T) {
+	request, err := http.NewRequest(http.MethodHead, "https://ani.example/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	responseRead := false
+	reader := bufio.NewReader(&responseTrackingReader{
+		Reader: strings.NewReader("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"),
+		read:   &responseRead,
+	})
+	err = verifyMappedHTTPSResponse(reader, request, "ani.example", func() error {
+		if !responseRead {
+			t.Fatal("connection evidence was queried before reading the HTTPS response")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+type responseTrackingReader struct {
+	*strings.Reader
+	read *bool
+}
+
+func (r *responseTrackingReader) Read(buffer []byte) (int, error) {
+	*r.read = true
+	return r.Reader.Read(buffer)
 }
