@@ -24,7 +24,11 @@ func TestLoadRunDetailReturnsPersistedDocument(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if detail.Version != 1 || detail.RunID != "run-1" || detail.SavedAt.IsZero() || !bytes.Equal(detail.Payload, payload) {
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, detail.Payload); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Version != 1 || detail.RunID != "run-1" || detail.SavedAt.IsZero() || !bytes.Equal(compact.Bytes(), payload) {
 		t.Fatalf("unexpected run detail: %#v", detail)
 	}
 }
