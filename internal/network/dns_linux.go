@@ -3,11 +3,9 @@
 package network
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -34,22 +32,4 @@ func discoverPlatformDNSServers(ctx context.Context, path PhysicalPath, timeout 
 		commandErr = commandContext.Err()
 	}
 	return nil, fmt.Errorf("discover Linux interface DNS: resolvectl: %v; resolv.conf: %v", commandErr, fileErr)
-}
-
-// readResolvConf 解析 resolv.conf 中有效的 nameserver 地址。
-func readResolvConf(path string) ([]string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	var servers []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) >= 2 && fields[0] == "nameserver" {
-			servers = append(servers, fields[1])
-		}
-	}
-	return servers, scanner.Err()
 }

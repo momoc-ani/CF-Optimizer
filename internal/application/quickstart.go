@@ -201,6 +201,18 @@ func (a *API) runQuickStart(ctx context.Context, raw json.RawMessage, emit func(
 		return result, nil
 	}
 	result.Status = "verified"
+	var failedManualDomains []string
+	for _, allocation := range report.DomainAllocations {
+		if allocation.Source != "manual" || allocation.AssignedAddress != "" {
+			continue
+		}
+		failedManualDomains = append(failedManualDomains, fmt.Sprintf("%s: %s", allocation.Domain, allocation.Error))
+		a.runtime.Logger.Warn("手动域名未在快速流程中生效", "component", "quickstart", "run_id", report.ID, "domain", allocation.Domain, "result", "partial", "error", allocation.Error)
+	}
+	if len(failedManualDomains) > 0 {
+		result.Status = "partial"
+		result.Error = "以下手动域名未生效：" + strings.Join(failedManualDomains, "；")
+	}
 	if parameters.Mode == quickStartApplyAndRemember {
 		if a.runtime.ConfigPath == "" {
 			result.Status = "partial"

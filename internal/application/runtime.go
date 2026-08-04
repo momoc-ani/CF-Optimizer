@@ -118,7 +118,7 @@ func Build(cfg config.Config, configPath string, logger *slog.Logger) (*Runtime,
 			}
 		}
 	}
-	proxyCoordinator, err := buildProxyCoordinator(managedConfig, physicalPath, routeController, logger)
+	proxyCoordinator, err := buildProxyCoordinator(managedConfig, physicalPath, routeController, directDial, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +176,7 @@ func (r *Runtime) DetectManagedAdapters(ctx context.Context, physicalPath cfnetw
 	if err := managedConfig.Validate(); err != nil {
 		return nil, fmt.Errorf("validate managed runtime config: %w", err)
 	}
-	coordinator, err := buildProxyCoordinator(managedConfig, physicalPath, r.Routes, r.Logger)
+	coordinator, err := buildProxyCoordinator(managedConfig, physicalPath, r.Routes, nil, r.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -414,7 +414,16 @@ func (r *Runtime) domainDiscoverySnapshot() DomainDiscoveryResult {
 	state := r.Store.Snapshot()
 	view := r.View()
 	records := make(map[string]store.DomainDiscovery, len(state.DiscoveredDomains)+len(view.Config.Acceleration.ManualDomains))
+	configuredManualDomains := make(map[string]struct{}, len(view.Config.Acceleration.ManualDomains))
+	for _, domain := range view.Config.AccelerationDomains() {
+		configuredManualDomains[domain] = struct{}{}
+	}
 	for domain, record := range state.DiscoveredDomains {
+		if record.Source == "manual" {
+			if _, configured := configuredManualDomains[domain]; !configured {
+				continue
+			}
+		}
 		records[domain] = record
 	}
 	activeMappings := map[string][]string{}
@@ -551,7 +560,7 @@ func (r *Runtime) BuildManagedSession(physicalPath cfnetwork.PhysicalPath, detec
 	if err != nil {
 		return RuntimeSession{}, fmt.Errorf("create confirmed physical interface dialer: %w", err)
 	}
-	proxyCoordinator, err := buildProxyCoordinator(managedConfig, physicalPath, r.Routes, r.Logger)
+	proxyCoordinator, err := buildProxyCoordinator(managedConfig, physicalPath, r.Routes, directDial, r.Logger)
 	if err != nil {
 		return RuntimeSession{}, err
 	}
@@ -660,7 +669,7 @@ func BuildCleanup(cfg config.Config, configPath string, logger *slog.Logger) (*R
 	if err != nil {
 		return nil, err
 	}
-	proxyCoordinator, err := buildProxyCoordinator(cleanupConfig, cfnetwork.PhysicalPath{}, routeController, logger)
+	proxyCoordinator, err := buildProxyCoordinator(cleanupConfig, cfnetwork.PhysicalPath{}, routeController, nil, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -711,7 +720,7 @@ func configForStoredReceipts(cfg config.Config, state store.State) (config.Confi
 	return cfg, nil
 }
 
-func buildProxyCoordinator(cfg config.Config, physicalPath cfnetwork.PhysicalPath, routeController *cfnetwork.RouteController, logger *slog.Logger) (*proxy.Coordinator, error) {
+func buildProxyCoordinator(cfg config.Config, physicalPath cfnetwork.PhysicalPath, routeController *cfnetwork.RouteController, benchmarkDial cfnetwork.DialContextFunc, logger *slog.Logger) (*proxy.Coordinator, error) {
 	var adapters []proxy.Adapter
 	if cfg.Proxy.Generic.Enabled && cfg.Network.ManageRoutes {
 		adapter, err := generic.New(routeController, physicalPath, 5)
@@ -724,6 +733,9 @@ func buildProxyCoordinator(cfg config.Config, physicalPath cfnetwork.PhysicalPat
 		adapter, err := mihomo.New(cfg.Proxy.Mihomo)
 		if err != nil {
 			return nil, err
+		}
+		if benchmarkDial != nil {
+			adapter.SetBenchmarkDialer(physicalPath.Interface, benchmarkDial)
 		}
 		adapters = append(adapters, adapter)
 	}

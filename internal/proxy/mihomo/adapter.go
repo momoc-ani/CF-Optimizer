@@ -19,6 +19,7 @@ import (
 
 	"github.com/cf-optimizer/cf-optimizer/internal/config"
 	"github.com/cf-optimizer/cf-optimizer/internal/fsutil"
+	cfnetwork "github.com/cf-optimizer/cf-optimizer/internal/network"
 	"github.com/cf-optimizer/cf-optimizer/internal/proxy"
 	"gopkg.in/yaml.v3"
 )
@@ -65,6 +66,8 @@ type Adapter struct {
 	endpoint           string
 	client             *http.Client
 	connectionVerifier func(context.Context, []proxy.DomainMapping) error
+	benchmarkDial      cfnetwork.DialContextFunc
+	benchmarkInterface string
 }
 
 // New 创建强制禁用系统代理的 Mihomo 控制 API 客户端。

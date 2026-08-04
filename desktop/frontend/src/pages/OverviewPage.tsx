@@ -13,7 +13,7 @@ import { useRun } from '../hooks/useRun';
 import { QuickStartDialog } from '../components/QuickStartDialog';
 import { useUIStore } from '../state/ui';
 import { countCurrentVerifiedRoutes } from '../lib/routeSummary';
-import { formatRunEventDetail, formatRunEventTitle, presentSchedule } from '../lib/overview';
+import { describeQuickStartResult, formatRunEventDetail, formatRunEventTitle, presentSchedule } from '../lib/overview';
 
 function SelectionRow({ title, selection, interfaceName }: { title: string; selection?: Selection; interfaceName?: string }) {
   if (!selection) return <div className="selection-row"><Text fw={650}>{title}</Text><Text c="dimmed" size="sm">尚未选择节点</Text><StatusBadge label="未验证" /></div>;
@@ -110,7 +110,7 @@ export function OverviewPage() {
     <Stack gap="lg">
       <PageHeader title="总览" description="后台服务、当前节点与已验证直连策略" actions={<Button leftSection={<Play size={16} />} loading={planMutation.isPending || run.running} onClick={() => void prepareQuickStart()}>一键优选</Button>} />
       {planMutation.isError && <Alert color="red" title="预检失败" withCloseButton onClose={() => planMutation.reset()}>{planMutation.error.message}</Alert>}
-      {run.quickStartResult && <Alert color={run.quickStartResult.status === 'verified' ? 'green' : run.quickStartResult.status === 'rolled_back' ? 'gray' : 'yellow'} title={run.quickStartResult.status === 'verified' ? '已验证' : run.quickStartResult.status === 'rolled_back' ? '已回滚' : '部分完成'}>{run.quickStartResult.persistence_warning || run.quickStartResult.error || (run.quickStartResult.auto_maintenance_enabled ? '策略与实际选路已验证，自动维护已经启用。' : '策略与实际选路已验证，本次运行未启用自动维护。')}</Alert>}
+      {run.quickStartResult && <Alert color={run.quickStartResult.status === 'verified' ? 'green' : run.quickStartResult.status === 'rolled_back' ? 'gray' : 'yellow'} title={run.quickStartResult.status === 'verified' ? '已验证' : run.quickStartResult.status === 'rolled_back' ? '已回滚' : '部分完成'}>{describeQuickStartResult(run.quickStartResult)}</Alert>}
       {didRunBenchmarkOnly && run.report && !run.running && !run.error && <Alert color="blue" title="仅测速完成">候选结果已生成，没有修改系统路由或代理策略。</Alert>}
       {run.error && !run.running && <Alert color={run.error.message.includes('cancelled') ? 'gray' : 'red'} title={run.error.message.includes('cancelled') ? '任务已取消' : '任务未完成'}>{run.error.message}</Alert>}
       {state?.last_error && <Alert color="red" title="上次任务失败">{state.last_error}</Alert>}

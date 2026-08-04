@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/netip"
 	"testing"
 	"time"
 )
@@ -34,6 +35,9 @@ func (a *lifecycleAdapter) Rollback(context.Context, Receipt) error {
 	a.rolledBack = true
 	return nil
 }
+func (a *lifecycleAdapter) VerifyBenchmarkPath(context.Context, []netip.Addr) (BenchmarkPathEvidence, error) {
+	return BenchmarkPathEvidence{Target: "1.1.1.1", SocketBound: true, ProxyObserved: true, DirectVerified: true, Verification: "test_direct"}, nil
+}
 
 func TestCoordinatorRollsBackInScopeOnVerificationFailure(t *testing.T) {
 	first := &lifecycleAdapter{name: "first"}
@@ -56,5 +60,28 @@ func TestCoordinatorRejectsUnsupportedPolicyField(t *testing.T) {
 	}
 	if _, err := coordinator.Apply(context.Background(), DirectPolicy{Domains: []string{"example.com"}}); err == nil {
 		t.Fatal("expected unsupported domain policy to be rejected")
+	}
+}
+
+func TestCoordinatorBenchmarkGuardUsesReversibleAdapterLifecycle(t *testing.T) {
+	adapter := &lifecycleAdapter{name: "guard"}
+	coordinator, err := NewCoordinator([]Adapter{adapter}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.BeginBenchmarkGuard(
+		context.Background(), DirectPolicy{IPv4CIDRs: []string{"1.1.1.1/32"}}, []netip.Addr{netip.MustParseAddr("1.1.1.1")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Receipts) != 1 || len(result.Evidence) != 1 || !result.Evidence[0].GuardApplied || adapter.rolledBack {
+		t.Fatalf("benchmark guard was not applied and verified: %#v", result)
+	}
+	if err := coordinator.EndBenchmarkGuard(context.Background(), result); err != nil {
+		t.Fatal(err)
+	}
+	if !adapter.rolledBack {
+		t.Fatal("benchmark guard receipt was not rolled back")
 	}
 }

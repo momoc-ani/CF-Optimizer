@@ -98,7 +98,9 @@ func (quickStartBenchmark) Run(_ context.Context, addresses []netip.Addr, _ func
 
 type quickStartPolicy struct{}
 
-func (quickStartPolicy) Capabilities() proxy.Capabilities { return proxy.Capabilities{IPv4: true} }
+func (quickStartPolicy) Capabilities() proxy.Capabilities {
+	return proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}
+}
 func (quickStartPolicy) Apply(_ context.Context, policy proxy.DirectPolicy) (proxy.ApplyResult, error) {
 	payload, _ := json.Marshal(policy)
 	return proxy.ApplyResult{Receipts: []proxy.Receipt{{ID: "quickstart-test", Adapter: "test", Changed: true, Payload: payload}}}, nil
@@ -200,6 +202,29 @@ func TestQuickStartVerificationFailureReportsRollback(t *testing.T) {
 	}
 	if result.Status != "rolled_back" || result.Error == "" || len(backend.routes) != 0 {
 		t.Fatalf("verification failure was not reported as rolled back: result=%#v routes=%#v", result, backend.routes)
+	}
+}
+
+func TestQuickStartManualDomainFailureIsPartial(t *testing.T) {
+	api, runtimeState, _ := newQuickStartTestAPI(t, false)
+	runtimeState.mutex.Lock()
+	runtimeState.Config.Acceleration.Enabled = true
+	runtimeState.Config.Acceleration.ManualDomains = []string{"ani.momoc.top"}
+	runtimeState.mutex.Unlock()
+	plan, err := api.planQuickStart(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr := runQuickStartRequest(t, api, plan.PlanID, quickStartApplyOnce)
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if result.Status != "partial" || !result.Report.PolicyApplied || len(result.Report.DomainAllocations) != 1 || result.Report.DomainAllocations[0].AssignedAddress != "" || !strings.Contains(result.Error, "ani.momoc.top") {
+		t.Fatalf("manual domain failure was misreported: %#v", result)
+	}
+	domains := runtimeState.domainDiscoverySnapshot().Domains
+	if len(domains) != 1 || domains[0].Active || domains[0].LastError == "" {
+		t.Fatalf("manual domain failure was not exposed by acceleration.domains: %#v", domains)
 	}
 }
 

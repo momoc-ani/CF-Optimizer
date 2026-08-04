@@ -142,6 +142,30 @@ export interface Decision {
   reason: string;
 }
 
+export interface DomainAllocationResult {
+  domain: string;
+  source: string;
+  resolved_addresses?: string[];
+  assigned_address?: string;
+  cloudflare_verified: boolean;
+  preflight_verified: boolean;
+  error?: string;
+}
+
+export interface BenchmarkPathEvidence {
+  adapter: string;
+  interface?: string;
+  target: string;
+  guard_applied: boolean;
+  socket_bound: boolean;
+  proxy_observed: boolean;
+  direct_verified: boolean;
+  physical_route_used: boolean;
+  rule?: string;
+  rule_payload?: string;
+  verification: string;
+}
+
 export interface RunReport {
   id: string;
   started_at: string;
@@ -152,6 +176,8 @@ export interface RunReport {
   ipv4_decision: Decision;
   ipv6_decision: Decision;
   policy_applied: boolean;
+  benchmark_path?: BenchmarkPathEvidence[];
+  domain_allocations?: DomainAllocationResult[];
   warnings?: string[];
 }
 

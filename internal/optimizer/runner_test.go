@@ -50,12 +50,42 @@ type recordingPolicy struct {
 	rollbacks      []proxy.ApplyResult
 }
 
+type guardedRecordingPolicy struct {
+	recordingPolicy
+	events      []string
+	guardActive bool
+}
+
+func (p *guardedRecordingPolicy) BeginBenchmarkGuard(context.Context, proxy.DirectPolicy, []netip.Addr) (proxy.BenchmarkGuardResult, error) {
+	p.events = append(p.events, "guard_begin")
+	p.guardActive = true
+	return proxy.BenchmarkGuardResult{
+		Receipts: []proxy.Receipt{{ID: "benchmark-guard", Adapter: "test", Changed: true}},
+		Evidence: []proxy.BenchmarkPathEvidence{{Target: "1.1.1.1", SocketBound: true, ProxyObserved: true, DirectVerified: true, Verification: "test_direct"}},
+	}, nil
+}
+
+func (p *guardedRecordingPolicy) EndBenchmarkGuard(context.Context, proxy.BenchmarkGuardResult) error {
+	p.events = append(p.events, "guard_end")
+	p.guardActive = false
+	return nil
+}
+
+func (p *guardedRecordingPolicy) Apply(ctx context.Context, policy proxy.DirectPolicy) (proxy.ApplyResult, error) {
+	if p.guardActive {
+		return proxy.ApplyResult{}, errors.New("final policy applied before benchmark guard rollback")
+	}
+	p.events = append(p.events, "policy_apply")
+	return p.recordingPolicy.Apply(ctx, policy)
+}
+
 type staticDomainResolver struct {
 	addresses []netip.Addr
+	err       error
 }
 
 func (r staticDomainResolver) Resolve(context.Context, string) ([]netip.Addr, error) {
-	return append([]netip.Addr(nil), r.addresses...), nil
+	return append([]netip.Addr(nil), r.addresses...), r.err
 }
 
 type selectiveDomainVerifier struct {
@@ -198,15 +228,18 @@ func TestAllocateDomainMappingsUsesManualConfigurationAndRankingOrder(t *testing
 		{IP: netip.MustParseAddr("1.1.1.3"), Qualified: true, TLSVerified: true, Score: 97},
 	}
 
-	mappings, warnings := runner.allocateDomainMappings(context.Background(), snapshot, results, store.State{})
-	if len(warnings) != 1 || len(mappings) != 2 {
-		t.Fatalf("unexpected allocation result: mappings=%#v warnings=%#v", mappings, warnings)
+	mappings, allocations, warnings := runner.allocateDomainMappings(context.Background(), snapshot, results, store.State{})
+	if len(warnings) != 1 || len(mappings) != 2 || len(allocations) != 3 {
+		t.Fatalf("unexpected allocation result: mappings=%#v allocations=%#v warnings=%#v", mappings, allocations, warnings)
 	}
 	if mappings[0].Domain != "priority.example" || mappings[0].Addresses[0] != "1.1.1.2" {
 		t.Fatalf("first manual domain did not consume ranked candidates in order: %#v", mappings)
 	}
 	if mappings[1].Domain != "second.example" || mappings[1].Addresses[0] != "1.1.1.3" {
 		t.Fatalf("second manual domain did not receive the next address: %#v", mappings)
+	}
+	if allocations[0].AssignedAddress != "1.1.1.2" || !allocations[0].CloudflareVerified || !allocations[0].PreflightVerified || allocations[2].Error == "" {
+		t.Fatalf("structured domain allocation evidence is incomplete: %#v", allocations)
 	}
 }
 
@@ -237,7 +270,7 @@ func TestAllocateDomainMappingsGivesRemainingPoolToAutomaticDomains(t *testing.T
 		{IP: netip.MustParseAddr("1.1.1.4"), Qualified: true, Score: 96},
 	}
 
-	mappings, warnings := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, stateStore.Snapshot())
+	mappings, _, warnings := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, stateStore.Snapshot())
 	if len(warnings) != 0 || len(mappings) != 4 {
 		t.Fatalf("unexpected combined allocation: mappings=%#v warnings=%#v", mappings, warnings)
 	}
@@ -272,9 +305,48 @@ func TestAllocateDomainMappingsIgnoresAutomaticDomainsWithoutAllSwitches(t *test
 		{IP: netip.MustParseAddr("1.1.1.2"), Qualified: true, Score: 98},
 	}
 
-	mappings, warnings := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, stateStore.Snapshot())
+	mappings, _, warnings := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, stateStore.Snapshot())
 	if len(warnings) != 0 || len(mappings) != 1 || mappings[0].Domain != "manual.example" || mappings[0].Addresses[0] != "1.1.1.1" {
 		t.Fatalf("automatic domain consumed the pool without all switches: mappings=%#v warnings=%#v", mappings, warnings)
+	}
+}
+
+func TestRunPersistsManualDomainAllocationFailure(t *testing.T) {
+	policy := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
+	runner, stateStore := newTestRunner(t, policy)
+	runner.config.Acceleration.Enabled = true
+	runner.config.Acceleration.ManualDomains = []string{"ani.momoc.top"}
+	runner.domainResolver = staticDomainResolver{err: errors.New("physical DNS timeout")}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+
+	report, err := runner.Run(context.Background(), RunOptions{ApplyPolicy: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.PolicyApplied || len(report.DomainAllocations) != 1 || report.DomainAllocations[0].AssignedAddress != "" || !strings.Contains(report.DomainAllocations[0].Error, "physical DNS timeout") {
+		t.Fatalf("manual domain failure was not exposed in run report: %#v", report)
+	}
+	record := stateStore.Snapshot().DiscoveredDomains["ani.momoc.top"]
+	if record.Source != "manual" || record.Active || !strings.Contains(record.LastError, "physical DNS timeout") {
+		t.Fatalf("manual domain failure was not persisted: %#v", record)
+	}
+	if history := stateStore.Snapshot().History; len(history) != 1 || !strings.Contains(history[0].Error, "ani.momoc.top") {
+		t.Fatalf("manual domain failure was not marked partial in history: %#v", history)
+	}
+}
+
+func TestRunRollsBackBenchmarkGuardBeforeFinalPolicy(t *testing.T) {
+	policy := &guardedRecordingPolicy{recordingPolicy: recordingPolicy{capabilities: proxy.Capabilities{IPv4: true}}}
+	runner, _ := newTestRunner(t, policy)
+	report, err := runner.Run(context.Background(), RunOptions{ApplyPolicy: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(policy.events, ",") != "guard_begin,guard_end,policy_apply" {
+		t.Fatalf("unexpected benchmark guard lifecycle: %#v", policy.events)
+	}
+	if len(report.BenchmarkPath) != 1 || !report.BenchmarkPath[0].DirectVerified || policy.guardActive {
+		t.Fatalf("benchmark guard evidence or cleanup is incomplete: report=%#v active=%v", report.BenchmarkPath, policy.guardActive)
 	}
 }
 

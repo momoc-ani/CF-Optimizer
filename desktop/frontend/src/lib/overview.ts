@@ -1,4 +1,4 @@
-import type { RunSummary, ScheduleStatus } from '../api/types';
+import type { QuickStartResult, RunSummary, ScheduleStatus } from '../api/types';
 
 const scheduleTriggerLabels: Record<string, string> = {
   startup: '服务启动后执行',
@@ -46,4 +46,21 @@ export function formatRunEventDetail(summary: RunSummary): string {
     summary.selected_ipv6 ? `IPv6 ${summary.selected_ipv6}` : '',
   ].filter(Boolean);
   return selections.length > 0 ? selections.join(' · ') : '本次没有选出节点';
+}
+
+/** describeQuickStartResult 只根据后端连接证据描述测速 DIRECT 状态和维护结果。 */
+export function describeQuickStartResult(result: QuickStartResult): string {
+  if (result.persistence_warning) return result.persistence_warning;
+  if (result.error) return result.error;
+  const evidence = result.report.benchmark_path?.find((item) => item.direct_verified);
+  let benchmarkPath = '';
+  if (evidence?.proxy_observed) {
+    benchmarkPath = `测速连接已由 ${evidence.adapter} 确认为 DIRECT`;
+  } else if (evidence?.physical_route_used) {
+    benchmarkPath = `测速 Socket 已绑定 ${evidence.interface || '物理接口'}，且 ${evidence.adapter} 未接管该连接`;
+  }
+  const maintenance = result.auto_maintenance_enabled
+    ? '策略与实际选路已验证，自动维护已经启用。'
+    : '策略与实际选路已验证，本次运行未启用自动维护。';
+  return benchmarkPath ? `${benchmarkPath}；${maintenance}` : maintenance;
 }

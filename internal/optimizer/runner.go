@@ -73,18 +73,36 @@ type RunOptions struct {
 	ApplyPolicy       bool `json:"apply_policy"`
 }
 
+// DomainAllocationResult 记录单个加速域名从物理 DNS 校验到优选地址分配的结果。
+type DomainAllocationResult struct {
+	Domain             string   `json:"domain"`
+	Source             string   `json:"source"`
+	ResolvedAddresses  []string `json:"resolved_addresses,omitempty"`
+	AssignedAddress    string   `json:"assigned_address,omitempty"`
+	CloudflareVerified bool     `json:"cloudflare_verified"`
+	PreflightVerified  bool     `json:"preflight_verified"`
+	Error              string   `json:"error,omitempty"`
+}
+
+type domainAllocationCandidate struct {
+	domain string
+	source string
+}
+
 // RunReport 汇总候选结果、地址族决策、策略状态和可恢复警告。
 type RunReport struct {
-	ID                        string             `json:"id"`
-	StartedAt                 time.Time          `json:"started_at"`
-	FinishedAt                time.Time          `json:"finished_at"`
-	RangeSource               string             `json:"range_source"`
-	RangeHash                 string             `json:"range_hash"`
-	Results                   []benchmark.Result `json:"results"`
-	IPv4Decision              Decision           `json:"ipv4_decision"`
-	IPv6Decision              Decision           `json:"ipv6_decision"`
-	PolicyApplied             bool               `json:"policy_applied"`
-	Warnings                  []string           `json:"warnings,omitempty"`
+	ID                        string                        `json:"id"`
+	StartedAt                 time.Time                     `json:"started_at"`
+	FinishedAt                time.Time                     `json:"finished_at"`
+	RangeSource               string                        `json:"range_source"`
+	RangeHash                 string                        `json:"range_hash"`
+	Results                   []benchmark.Result            `json:"results"`
+	IPv4Decision              Decision                      `json:"ipv4_decision"`
+	IPv6Decision              Decision                      `json:"ipv6_decision"`
+	PolicyApplied             bool                          `json:"policy_applied"`
+	BenchmarkPath             []proxy.BenchmarkPathEvidence `json:"benchmark_path,omitempty"`
+	DomainAllocations         []DomainAllocationResult      `json:"domain_allocations,omitempty"`
+	Warnings                  []string                      `json:"warnings,omitempty"`
 	domainMappings            []proxy.DomainMapping
 	domainAllocationCompleted bool
 }
@@ -159,6 +177,8 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 		result := "completed"
 		if runErr != nil {
 			result = "failed"
+		} else if manualDomainAllocationFailure(report) != "" {
+			result = "partial"
 		}
 		r.logger.Info("优选任务结束", "run_id", report.ID, "duration", report.FinishedAt.Sub(report.StartedAt), "result", result, "error", runErr)
 		r.emit(emit, Event{RunID: report.ID, Type: "run.finished", Stage: "complete", Message: result})
@@ -202,6 +222,43 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 	if err != nil {
 		return report, err
 	}
+	var benchmarkGuard proxy.BenchmarkGuard
+	var benchmarkGuardResult proxy.BenchmarkGuardResult
+	benchmarkGuardActive := false
+	defer func() {
+		if !benchmarkGuardActive {
+			return
+		}
+		if cleanupErr := r.endBenchmarkGuard(ctx, benchmarkGuard, benchmarkGuardResult); cleanupErr != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("clean benchmark DIRECT guard: %w", cleanupErr))
+		}
+	}()
+	if options.ApplyPolicy && r.policy != nil {
+		benchmarkGuard, _ = r.policy.(proxy.BenchmarkGuard)
+		if benchmarkGuard != nil {
+			guardPolicy := benchmarkDirectPolicy(addresses)
+			benchmarkGuardResult, err = benchmarkGuard.BeginBenchmarkGuard(ctx, guardPolicy, addresses)
+			if err != nil {
+				return report, fmt.Errorf("apply benchmark DIRECT guard: %w", err)
+			}
+			benchmarkGuardActive = len(benchmarkGuardResult.Receipts) > 0
+			report.BenchmarkPath = append([]proxy.BenchmarkPathEvidence(nil), benchmarkGuardResult.Evidence...)
+			for index := range report.BenchmarkPath {
+				evidence := &report.BenchmarkPath[index]
+				if evidence.ProxyObserved && evidence.DirectVerified {
+					evidence.PhysicalRouteUsed = len(temporaryTransactions) > 0
+				} else if !evidence.ProxyObserved && evidence.SocketBound && len(temporaryTransactions) > 0 {
+					evidence.DirectVerified = true
+					evidence.PhysicalRouteUsed = true
+					evidence.Verification = "bound_socket_and_verified_physical_route"
+				}
+				if !evidence.DirectVerified {
+					return report, fmt.Errorf("benchmark path to %s lacks DIRECT connection or verified physical-route evidence", evidence.Target)
+				}
+				r.logger.Info("测速直连路径验证完成", "run_id", report.ID, "adapter", evidence.Adapter, "interface", evidence.Interface, "target_ip", evidence.Target, "proxy_observed", evidence.ProxyObserved, "physical_route_used", evidence.PhysicalRouteUsed, "result", "verified")
+			}
+		}
+	}
 	r.logger.Info("候选生成完成", "run_id", report.ID, "candidates", len(addresses), "range_hash", report.RangeHash)
 	r.emit(emit, Event{RunID: report.ID, Type: "stage.started", Stage: "benchmark", Message: fmt.Sprintf("testing %d candidates", len(addresses))})
 	report.Results, err = r.benchmark.Run(ctx, addresses, func(progress benchmark.Progress) {
@@ -209,6 +266,12 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 	})
 	if err != nil {
 		return report, fmt.Errorf("benchmark candidates: %w", err)
+	}
+	if benchmarkGuardActive {
+		if err := r.endBenchmarkGuard(ctx, benchmarkGuard, benchmarkGuardResult); err != nil {
+			return report, fmt.Errorf("rollback benchmark DIRECT guard before final policy: %w", err)
+		}
+		benchmarkGuardActive = false
 	}
 	ApplyHistory(report.Results, stateBefore.Nodes)
 	sort.SliceStable(report.Results, func(i, j int) bool { return report.Results[i].Score > report.Results[j].Score })
@@ -221,7 +284,7 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 	if options.ApplyPolicy {
 		for {
 			var allocationWarnings []string
-			report.domainMappings, allocationWarnings = r.allocateDomainMappings(ctx, rangeResult.Snapshot, report.Results, r.store.Snapshot())
+			report.domainMappings, report.DomainAllocations, allocationWarnings = r.allocateDomainMappings(ctx, rangeResult.Snapshot, report.Results, r.store.Snapshot())
 			report.Warnings = append(report.Warnings, allocationWarnings...)
 			report.domainAllocationCompleted = true
 			applied, removedRouteTransactions, err = r.applySelectedPolicy(ctx, stateBefore, report)
@@ -253,6 +316,39 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 		return report, err
 	}
 	return report, nil
+}
+
+// benchmarkDirectPolicy 将本次实际候选收敛为精确主机规则，避免临时保护扩大范围。
+func benchmarkDirectPolicy(addresses []netip.Addr) proxy.DirectPolicy {
+	policy := proxy.DirectPolicy{}
+	seen := make(map[netip.Addr]struct{}, len(addresses))
+	for _, address := range addresses {
+		address = address.Unmap()
+		if !address.IsValid() {
+			continue
+		}
+		if _, exists := seen[address]; exists {
+			continue
+		}
+		seen[address] = struct{}{}
+		prefix := netip.PrefixFrom(address, address.BitLen()).String()
+		if address.Is4() {
+			policy.IPv4CIDRs = append(policy.IPv4CIDRs, prefix)
+		} else {
+			policy.IPv6CIDRs = append(policy.IPv6CIDRs, prefix)
+		}
+	}
+	return policy
+}
+
+// endBenchmarkGuard 使用独立清理上下文撤销临时代理规则，任务取消也不得遗留配置。
+func (r *Runner) endBenchmarkGuard(ctx context.Context, guard proxy.BenchmarkGuard, result proxy.BenchmarkGuardResult) error {
+	if guard == nil || len(result.Receipts) == 0 {
+		return nil
+	}
+	cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.config.Network.CommandTimeout.Duration())
+	defer cancel()
+	return guard.EndBenchmarkGuard(cleanupContext, result)
 }
 
 // replaceUnsafeLegacyDomainMappings 前向应用无域名映射的安全策略，摆脱已失效的历史收据链。
@@ -383,11 +479,11 @@ func (r *Runner) refreshPolicyLocked(ctx context.Context) error {
 	for {
 		before := r.store.Snapshot()
 		ranked := rankedHistoricalResults(before, r.now())
-		mappings, allocationWarnings := r.allocateDomainMappings(ctx, rangeResult.Snapshot, ranked, before)
+		mappings, allocations, allocationWarnings := r.allocateDomainMappings(ctx, rangeResult.Snapshot, ranked, before)
 		for _, warning := range allocationWarnings {
 			r.logger.Warn("域名未分配优选 IP", "warning", warning)
 		}
-		report := RunReport{domainMappings: mappings, domainAllocationCompleted: true}
+		report := RunReport{DomainAllocations: allocations, domainMappings: mappings, domainAllocationCompleted: true}
 		policy, policyErr := r.policyForDecisions(before, report, false)
 		if policyErr != nil {
 			return policyErr
@@ -443,6 +539,7 @@ func (r *Runner) refreshPolicyLocked(ctx context.Context) error {
 		}
 		if persistErr := r.store.Update(func(state *store.State) error {
 			state.Policy = policySnapshot(policy, receipts, r.now().UTC())
+			recordDomainAllocationResults(state, report.DomainAllocations, true, r.now().UTC())
 			return nil
 		}); persistErr != nil {
 			if restoreErr := r.rollbackRoutes(ctx, removedRouteTransactions); restoreErr != nil {
@@ -659,43 +756,47 @@ func (r *Runner) isolateFailedAutomaticDomain(operationErr error) (bool, error) 
 	return updated, nil
 }
 
-// verifyCloudflareDomain 要求物理 DNS 返回的全部地址都属于当前可信网段快照。
-func (r *Runner) verifyCloudflareDomain(ctx context.Context, snapshot ranges.Snapshot, domain string) error {
+// verifyCloudflareDomain 要求物理 DNS 返回的全部地址都属于当前可信网段快照，并返回可审计地址。
+func (r *Runner) verifyCloudflareDomain(ctx context.Context, snapshot ranges.Snapshot, domain string) ([]netip.Addr, error) {
 	addresses, err := r.domainResolver.Resolve(ctx, domain)
 	if err != nil {
-		return fmt.Errorf("resolve acceleration domain %s: %w", domain, err)
+		return nil, fmt.Errorf("resolve acceleration domain %s: %w", domain, err)
 	}
 	if len(addresses) == 0 {
-		return fmt.Errorf("acceleration domain %s has no public address", domain)
+		return nil, fmt.Errorf("acceleration domain %s has no public address", domain)
 	}
 	for _, address := range addresses {
 		if !snapshot.Contains(address) {
-			return fmt.Errorf("acceleration domain %s resolved outside verified Cloudflare ranges: %s", domain, address)
+			return nil, fmt.Errorf("acceleration domain %s resolved outside verified Cloudflare ranges: %s", domain, address)
 		}
 	}
-	return nil
+	return addresses, nil
 }
 
 // allocateDomainMappings 先按手动配置顺序、再按自动发现顺序消费互不重复的兼容地址。
-func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Snapshot, results []benchmark.Result, state store.State) ([]proxy.DomainMapping, []string) {
-	if r.policy == nil || !r.policy.Capabilities().DomainMappings || !r.config.Acceleration.Enabled {
-		return nil, nil
+func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Snapshot, results []benchmark.Result, state store.State) ([]proxy.DomainMapping, []DomainAllocationResult, []string) {
+	if !r.config.Acceleration.Enabled {
+		return nil, nil, nil
 	}
-	domains := r.config.AccelerationDomains()
+	candidatesByDomain := make([]domainAllocationCandidate, 0, len(r.config.Acceleration.ManualDomains))
+	for _, domain := range r.config.AccelerationDomains() {
+		candidatesByDomain = append(candidatesByDomain, domainAllocationCandidate{domain: domain, source: "manual"})
+	}
 	if automaticDomainAllocationEnabled(r.config) {
 		for _, discovery := range acceleration.EffectiveDiscoveries(r.config, state) {
-			domains = append(domains, discovery.Domain)
+			candidatesByDomain = append(candidatesByDomain, domainAllocationCandidate{domain: discovery.Domain, source: "automatic"})
 		}
 	}
-	if len(domains) == 0 {
-		return nil, nil
+	if len(candidatesByDomain) == 0 {
+		return nil, nil, nil
+	}
+	if r.policy == nil || !r.policy.Capabilities().DomainMappings {
+		allocations := failedDomainAllocations(candidatesByDomain, "domain mapping capability is unavailable")
+		return nil, allocations, domainAllocationWarnings(allocations)
 	}
 	if r.domainResolver == nil || r.domainVerifier == nil {
-		warnings := make([]string, 0, len(domains))
-		for _, domain := range domains {
-			warnings = append(warnings, fmt.Sprintf("acceleration domain %s was not assigned: verification is unavailable", domain))
-		}
-		return nil, warnings
+		allocations := failedDomainAllocations(candidatesByDomain, "verification is unavailable")
+		return nil, allocations, domainAllocationWarnings(allocations)
 	}
 	ranked := append([]benchmark.Result(nil), results...)
 	sort.SliceStable(ranked, func(i, j int) bool { return ranked[i].Score > ranked[j].Score })
@@ -716,36 +817,81 @@ func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Sna
 		candidates = append(candidates, address.String())
 	}
 	var mappings []proxy.DomainMapping
-	var warnings []string
+	allocations := make([]DomainAllocationResult, 0, len(candidatesByDomain))
 	nextCandidate := 0
-	for _, domain := range domains {
-		if err := r.verifyCloudflareDomain(ctx, snapshot, domain); err != nil {
-			warnings = append(warnings, fmt.Sprintf("acceleration domain %s was not assigned: %v", domain, err))
+	for _, candidate := range candidatesByDomain {
+		allocation := DomainAllocationResult{Domain: candidate.domain, Source: candidate.source}
+		resolvedAddresses, err := r.verifyCloudflareDomain(ctx, snapshot, candidate.domain)
+		if err != nil {
+			allocation.Error = err.Error()
+			allocations = append(allocations, allocation)
 			continue
+		}
+		allocation.CloudflareVerified = true
+		for _, address := range resolvedAddresses {
+			allocation.ResolvedAddresses = append(allocation.ResolvedAddresses, address.Unmap().String())
 		}
 		var lastError error
 		assigned := false
 		for nextCandidate < len(candidates) {
-			mapping := proxy.DomainMapping{Domain: domain, Addresses: []string{candidates[nextCandidate]}}
+			mapping := proxy.DomainMapping{Domain: candidate.domain, Addresses: []string{candidates[nextCandidate]}}
 			nextCandidate++
 			if err := r.domainVerifier.VerifyPreflight(ctx, []proxy.DomainMapping{mapping}); err != nil {
 				lastError = err
 				continue
 			}
 			mappings = append(mappings, mapping)
+			allocation.AssignedAddress = mapping.Addresses[0]
+			allocation.PreflightVerified = true
 			assigned = true
 			break
 		}
 		if assigned {
+			allocations = append(allocations, allocation)
 			continue
 		}
 		if lastError != nil {
-			warnings = append(warnings, fmt.Sprintf("acceleration domain %s was not assigned: %v", domain, lastError))
+			allocation.Error = lastError.Error()
 		} else {
-			warnings = append(warnings, fmt.Sprintf("acceleration domain %s was not assigned: ranked address pool is exhausted", domain))
+			allocation.Error = "ranked address pool is exhausted"
+		}
+		allocations = append(allocations, allocation)
+	}
+	return mappings, allocations, domainAllocationWarnings(allocations)
+}
+
+// failedDomainAllocations 为无法进入校验流程的域名生成逐项失败结果。
+func failedDomainAllocations(candidates []domainAllocationCandidate, reason string) []DomainAllocationResult {
+	allocations := make([]DomainAllocationResult, 0, len(candidates))
+	for _, candidate := range candidates {
+		allocations = append(allocations, DomainAllocationResult{Domain: candidate.domain, Source: candidate.source, Error: reason})
+	}
+	return allocations
+}
+
+// domainAllocationWarnings 保留兼容的运行警告，同时以结构化结果作为唯一事实来源。
+func domainAllocationWarnings(allocations []DomainAllocationResult) []string {
+	var warnings []string
+	for _, allocation := range allocations {
+		if allocation.AssignedAddress == "" {
+			warnings = append(warnings, fmt.Sprintf("acceleration domain %s was not assigned: %s", allocation.Domain, allocation.Error))
 		}
 	}
-	return mappings, warnings
+	return warnings
+}
+
+// manualDomainAllocationFailure 汇总手动域名失败，供任务日志、历史和快速结果保持一致语义。
+func manualDomainAllocationFailure(report RunReport) string {
+	var failures []string
+	for _, allocation := range report.DomainAllocations {
+		if allocation.Source == "manual" && allocation.AssignedAddress == "" {
+			failures = append(failures, fmt.Sprintf("%s (%s)", allocation.Domain, allocation.Error))
+		}
+	}
+	if len(failures) == 0 {
+		return ""
+	}
+	return "手动域名未全部生效: " + strings.Join(failures, "; ")
 }
 
 // automaticDomainAllocationEnabled 要求三个开关同时开启后才允许自动域名消费剩余地址池。
@@ -982,6 +1128,7 @@ func (r *Runner) persistSuccessfulRun(report RunReport, before store.State, appl
 			}
 			state.Policy = policySnapshot(policy, receipts, now)
 		}
+		recordDomainAllocationResults(state, report.DomainAllocations, policyApplied, now)
 		return nil
 	}); err != nil {
 		return err
@@ -991,6 +1138,31 @@ func (r *Runner) persistSuccessfulRun(report RunReport, before store.State, appl
 		return err
 	}
 	return r.store.SaveRunDetail(report.ID, details, r.config.History.DetailRetention.Duration())
+}
+
+// recordDomainAllocationResults 将手动与自动域名的本次分配证据写入统一展示状态。
+func recordDomainAllocationResults(state *store.State, allocations []DomainAllocationResult, policyApplied bool, now time.Time) {
+	if state.DiscoveredDomains == nil {
+		state.DiscoveredDomains = make(map[string]store.DomainDiscovery)
+	}
+	for _, allocation := range allocations {
+		record := state.DiscoveredDomains[allocation.Domain]
+		record.Domain = allocation.Domain
+		record.Source = allocation.Source
+		if record.FirstSeenAt.IsZero() {
+			record.FirstSeenAt = now
+		}
+		record.LastSeenAt = now
+		record.CloudflareVerified = allocation.CloudflareVerified
+		record.PreflightVerified = allocation.PreflightVerified
+		record.Active = policyApplied && allocation.AssignedAddress != ""
+		record.LastResolvedAddresses = append([]string(nil), allocation.ResolvedAddresses...)
+		record.LastError = allocation.Error
+		if record.Active {
+			record.LastError = ""
+		}
+		state.DiscoveredDomains[allocation.Domain] = record
+	}
 }
 
 // policySnapshot 将规范化策略和累计回滚收据转换为可持久化状态。
@@ -1034,6 +1206,9 @@ func (r *Runner) finalize(report RunReport, runErr error) error {
 		summary := store.RunSummary{
 			ID: report.ID, StartedAt: report.StartedAt, FinishedAt: report.FinishedAt,
 			Candidates: len(report.Results), SwitchReason: report.IPv4Decision.Reason + "; " + report.IPv6Decision.Reason,
+		}
+		if runErr == nil {
+			summary.Error = manualDomainAllocationFailure(report)
 		}
 		for _, result := range report.Results {
 			if result.Qualified {

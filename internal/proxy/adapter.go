@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"time"
 )
 
@@ -63,6 +64,37 @@ type Adapter interface {
 type ApplyResult struct {
 	Receipts []Receipt `json:"receipts"`
 	Skipped  []string  `json:"skipped"`
+}
+
+// BenchmarkPathEvidence 描述一次真实测速 Socket 在代理控制面中的 DIRECT 证据。
+type BenchmarkPathEvidence struct {
+	Adapter           string `json:"adapter"`
+	Interface         string `json:"interface,omitempty"`
+	Target            string `json:"target"`
+	GuardApplied      bool   `json:"guard_applied"`
+	SocketBound       bool   `json:"socket_bound"`
+	ProxyObserved     bool   `json:"proxy_observed"`
+	DirectVerified    bool   `json:"direct_verified"`
+	PhysicalRouteUsed bool   `json:"physical_route_used"`
+	Rule              string `json:"rule,omitempty"`
+	RulePayload       string `json:"rule_payload,omitempty"`
+	Verification      string `json:"verification"`
+}
+
+// BenchmarkGuardResult 保存临时测速保护的回滚收据和对外证据。
+type BenchmarkGuardResult struct {
+	Receipts []Receipt               `json:"-"`
+	Evidence []BenchmarkPathEvidence `json:"evidence,omitempty"`
+}
+
+// BenchmarkGuard 为测速阶段提供与最终策略隔离的可回滚 DIRECT 保护。
+type BenchmarkGuard interface {
+	BeginBenchmarkGuard(context.Context, DirectPolicy, []netip.Addr) (BenchmarkGuardResult, error)
+	EndBenchmarkGuard(context.Context, BenchmarkGuardResult) error
+}
+
+type benchmarkPathVerifier interface {
+	VerifyBenchmarkPath(context.Context, []netip.Addr) (BenchmarkPathEvidence, error)
 }
 
 // DomainVerificationError 标识真实连接验证失败的精确域名，供策略层隔离单个自动发现项。
@@ -195,6 +227,66 @@ func (c *Coordinator) Rollback(ctx context.Context, result ApplyResult) error {
 		return nil
 	}
 	return errors.Join(c.rollbackReceipts(ctx, result.Receipts)...)
+}
+
+// BeginBenchmarkGuard 只调用具备连接证据能力的适配器，应用并验证临时 DIRECT 规则。
+func (c *Coordinator) BeginBenchmarkGuard(ctx context.Context, policy DirectPolicy, targets []netip.Addr) (BenchmarkGuardResult, error) {
+	normalized, err := policy.Normalize()
+	if err != nil {
+		return BenchmarkGuardResult{}, err
+	}
+	result := BenchmarkGuardResult{}
+	for _, adapter := range c.adapters {
+		verifier, supported := adapter.(benchmarkPathVerifier)
+		if !supported {
+			continue
+		}
+		detection, detectErr := adapter.Detect(ctx)
+		if detectErr != nil {
+			return result, c.rollbackBenchmarkGuard(ctx, result, fmt.Errorf("detect benchmark guard %s: %w", adapter.Name(), detectErr))
+		}
+		if !detection.Present {
+			continue
+		}
+		if !adapterSupportsAny(normalized, adapter.Capabilities()) {
+			return result, c.rollbackBenchmarkGuard(ctx, result, fmt.Errorf("benchmark guard %s does not support the temporary policy", adapter.Name()))
+		}
+		plan, planErr := adapter.Plan(ctx, normalized)
+		if planErr != nil {
+			return result, c.rollbackBenchmarkGuard(ctx, result, fmt.Errorf("plan benchmark guard %s: %w", adapter.Name(), planErr))
+		}
+		c.logPhase(adapter.Name(), plan.ID, "benchmark_plan", "completed", nil)
+		receipt, applyErr := adapter.Apply(ctx, plan)
+		if applyErr != nil {
+			return result, c.rollbackBenchmarkGuard(ctx, result, fmt.Errorf("apply benchmark guard %s: %w", adapter.Name(), applyErr))
+		}
+		result.Receipts = append(result.Receipts, receipt)
+		c.logPhase(adapter.Name(), receipt.ID, "benchmark_apply", "completed", nil)
+		if verifyErr := adapter.Verify(ctx, normalized, receipt); verifyErr != nil {
+			return result, c.rollbackBenchmarkGuard(ctx, result, fmt.Errorf("verify benchmark guard %s: %w", adapter.Name(), verifyErr))
+		}
+		evidence, evidenceErr := verifier.VerifyBenchmarkPath(ctx, targets)
+		if evidenceErr != nil {
+			return result, c.rollbackBenchmarkGuard(ctx, result, fmt.Errorf("verify benchmark path %s: %w", adapter.Name(), evidenceErr))
+		}
+		evidence.Adapter = adapter.Name()
+		evidence.GuardApplied = true
+		result.Evidence = append(result.Evidence, evidence)
+		c.logPhase(adapter.Name(), receipt.ID, "benchmark_verify", "completed", nil)
+	}
+	return result, nil
+}
+
+// EndBenchmarkGuard 在最终策略应用前逆序撤销全部临时测速规则。
+func (c *Coordinator) EndBenchmarkGuard(ctx context.Context, result BenchmarkGuardResult) error {
+	return errors.Join(c.rollbackReceipts(ctx, result.Receipts)...)
+}
+
+// rollbackBenchmarkGuard 在临时保护任一阶段失败时保留原始错误并逆序恢复已应用项。
+func (c *Coordinator) rollbackBenchmarkGuard(ctx context.Context, result BenchmarkGuardResult, cause error) error {
+	rollbackErrors := []error{cause}
+	rollbackErrors = append(rollbackErrors, c.rollbackReceipts(ctx, result.Receipts)...)
+	return errors.Join(rollbackErrors...)
 }
 
 func adapterSupportsAny(policy DirectPolicy, capabilities Capabilities) bool {

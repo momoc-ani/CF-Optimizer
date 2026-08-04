@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { RunSummary } from '../api/types';
-import { formatRunEventDetail, formatRunEventTitle, presentSchedule } from './overview';
+import type { QuickStartResult, RunSummary } from '../api/types';
+import { describeQuickStartResult, formatRunEventDetail, formatRunEventTitle, presentSchedule } from './overview';
 
 describe('overview presentation', () => {
   it('shows the exact next execution time promised by the daemon', () => {
@@ -27,5 +27,16 @@ describe('overview presentation', () => {
     };
     expect(formatRunEventTitle(summary)).toBe('部分完成 · 27/1000 合格');
     expect(formatRunEventDetail(summary)).toBe('IPv6 未选出合格节点');
+  });
+
+  it('describes DIRECT only when benchmark connection evidence is verified', () => {
+    const result = {
+      status: 'verified', mode: 'apply_once', auto_maintenance_enabled: false,
+      report: { benchmark_path: [{ adapter: 'mihomo', interface: 'en0', target: '1.1.1.1', guard_applied: true, socket_bound: true, proxy_observed: true, direct_verified: true, physical_route_used: false, verification: 'mihomo_connection_direct' }] },
+    } as QuickStartResult;
+    expect(describeQuickStartResult(result)).toContain('mihomo 确认为 DIRECT');
+    result.report.benchmark_path = [{ ...result.report.benchmark_path![0], proxy_observed: false, physical_route_used: true }];
+    expect(describeQuickStartResult(result)).toContain('绑定 en0');
+    expect(describeQuickStartResult({ ...result, error: '手动域名未生效' })).toBe('手动域名未生效');
   });
 });

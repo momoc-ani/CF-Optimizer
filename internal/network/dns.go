@@ -1,10 +1,14 @@
 package network
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -39,4 +43,30 @@ func normalizeDNSServers(servers []string) []string {
 		result = append(result, server.String())
 	}
 	return result
+}
+
+// readResolvConf 读取并解析 resolv.conf 中有效且不重复的 nameserver 地址。
+func readResolvConf(path string) ([]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return parseResolvConf(file)
+}
+
+// parseResolvConf 解析 resolv.conf 内容，并忽略注释、非法地址和重复项。
+func parseResolvConf(reader io.Reader) ([]string, error) {
+	var servers []string
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 2 && fields[0] == "nameserver" {
+			servers = append(servers, fields[1])
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return normalizeDNSServers(servers), nil
 }
