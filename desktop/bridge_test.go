@@ -23,3 +23,9 @@ func TestNewBridgeRequiresEndpoint(t *testing.T) {
 		t.Fatal("expected endpoint validation error")
 	}
 }
+
+func TestBridgeAllowsLatestBenchmarkRead(t *testing.T) {
+	if _, allowed := allowedMethods["history.latest"]; !allowed {
+		t.Fatal("history.latest should be available to the desktop UI")
+	}
+}

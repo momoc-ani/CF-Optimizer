@@ -85,6 +85,53 @@ func TestNewestHistoryFirstDoesNotMutateStoredOrder(t *testing.T) {
 	}
 }
 
+func TestLatestBenchmarkReturnsNewestPersistedSuccessfulDetail(t *testing.T) {
+	stateStore, err := store.Open(t.TempDir(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := []benchmark.Result{{IP: netip.MustParseAddr("104.25.250.104"), Family: 4, Qualified: true, Score: 93.31}}
+	payload, err := json.Marshal(results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.SaveRunDetail("successful-run", payload, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	finishedAt := time.Date(2026, time.August, 5, 0, 39, 44, 0, time.UTC)
+	if err := stateStore.Update(func(state *store.State) error {
+		state.History = []store.RunSummary{
+			{ID: "successful-run", FinishedAt: finishedAt},
+			{ID: "failed-run", FinishedAt: finishedAt.Add(time.Minute), Error: "policy verification failed"},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	api, err := NewAPI(&Runtime{Store: stateStore})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := api.Handle(context.Background(), ipc.Request{Method: "history.latest", Params: json.RawMessage(`{}`)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest, ok := response.(LatestBenchmark)
+	if !ok || latest.RunID != "successful-run" || !latest.FinishedAt.Equal(finishedAt) || len(latest.Results) != 1 || latest.Results[0].IP.String() != "104.25.250.104" {
+		t.Fatalf("unexpected latest benchmark: %#v", response)
+	}
+}
+
+func TestLatestBenchmarkRejectsUnknownParameters(t *testing.T) {
+	api := &API{runtime: &Runtime{}}
+	_, err := api.Handle(context.Background(), ipc.Request{Method: "history.latest", Params: json.RawMessage(`{"unexpected":true}`)}, nil)
+	var ipcErr *ipc.Error
+	if !errors.As(err, &ipcErr) || ipcErr.Code != "invalid_params" {
+		t.Fatalf("unexpected IPC error: %#v", err)
+	}
+}
+
 func TestSystemStatusExcludesLargeInternalState(t *testing.T) {
 	stateStore, err := store.Open(t.TempDir(), 10)
 	if err != nil {

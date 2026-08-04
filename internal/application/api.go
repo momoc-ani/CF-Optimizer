@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cf-optimizer/cf-optimizer/internal/benchmark"
 	"github.com/cf-optimizer/cf-optimizer/internal/config"
 	"github.com/cf-optimizer/cf-optimizer/internal/diagnostics"
 	"github.com/cf-optimizer/cf-optimizer/internal/ipc"
@@ -50,6 +51,14 @@ type ScheduleStatus struct {
 	Interval        string     `json:"interval"`
 	NextScheduledAt *time.Time `json:"next_scheduled_at,omitempty"`
 	Trigger         string     `json:"trigger,omitempty"`
+}
+
+// LatestBenchmark 返回最近一次已持久化成功任务的完整候选结果。
+type LatestBenchmark struct {
+	RunID      string             `json:"run_id"`
+	FinishedAt time.Time          `json:"finished_at"`
+	SavedAt    time.Time          `json:"saved_at"`
+	Results    []benchmark.Result `json:"results"`
 }
 
 // statusState 仅包含普通状态轮询所需字段，避免通过 IPC 暴露节点明细和策略回滚收据。
@@ -100,6 +109,8 @@ func (a *API) Handle(ctx context.Context, request ipc.Request, emit func(any) er
 		return a.runtime.Ranges.Update(ctx, true)
 	case "history.list":
 		return newestHistoryFirst(a.runtime.Store.Snapshot().History), nil
+	case "history.latest":
+		return a.latestBenchmark(request.Params)
 	case "routes.list":
 		return a.runtime.Routes.Transactions(), nil
 	case "proxy.detect":
@@ -125,6 +136,34 @@ func (a *API) Handle(ctx context.Context, request ipc.Request, emit func(any) er
 	default:
 		return nil, &ipc.Error{Code: "method_not_found", Message: "unknown method " + request.Method}
 	}
+}
+
+// latestBenchmark 从新到旧寻找已有明细的成功任务；失败任务不会覆盖上一份可展示结果。
+func (a *API) latestBenchmark(raw json.RawMessage) (LatestBenchmark, error) {
+	var parameters struct{}
+	if err := decodeStrict(raw, &parameters); err != nil {
+		return LatestBenchmark{}, invalidParams(err)
+	}
+	history := a.runtime.Store.Snapshot().History
+	for index := len(history) - 1; index >= 0; index-- {
+		summary := history[index]
+		detail, err := a.runtime.Store.LoadRunDetail(summary.ID)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return LatestBenchmark{}, fmt.Errorf("load latest benchmark %s: %w", summary.ID, err)
+		}
+		var results []benchmark.Result
+		if err := json.Unmarshal(detail.Payload, &results); err != nil {
+			return LatestBenchmark{}, fmt.Errorf("decode latest benchmark %s: %w", summary.ID, err)
+		}
+		if results == nil {
+			results = []benchmark.Result{}
+		}
+		return LatestBenchmark{RunID: summary.ID, FinishedAt: summary.FinishedAt, SavedAt: detail.SavedAt, Results: results}, nil
+	}
+	return LatestBenchmark{Results: []benchmark.Result{}}, nil
 }
 
 // newestHistoryFirst 返回供界面扫描的倒序历史副本，不改变持久化追加顺序。

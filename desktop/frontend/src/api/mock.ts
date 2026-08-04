@@ -3,6 +3,7 @@ import type {
   BenchmarkResult,
   DiagnosticReport,
   DomainDiscovery,
+  LatestBenchmark,
   OptimizerEvent,
   ProxyDetections,
   QuickStartPlan,
@@ -31,6 +32,13 @@ const history: RunSummary[] = [
   { id: 'run-20260801-0330', started_at: iso(-366), finished_at: iso(-363), candidates: 1000, qualified: 24, selected_ipv4: '172.66.44.18', selected_ipv6: '2606:4700:3037::6815:1d8', switch_reason: 'current nodes remained stable' },
   { id: 'run-20260731-2130', started_at: iso(-726), finished_at: iso(-723), candidates: 1000, qualified: 19, selected_ipv4: '172.66.44.18', switch_reason: 'IPv6 had no qualified candidate', error: 'IPv6 partial failure' },
 ];
+
+let latestBenchmark: LatestBenchmark = {
+  run_id: history[0].id,
+  finished_at: history[0].finished_at,
+  saved_at: history[0].finished_at,
+  results,
+};
 
 const manualDomain: DomainDiscovery = { domain: 'ani.momoc.top', source: 'manual', first_seen_at: iso(-60), last_seen_at: iso(0), cloudflare_verified: true, preflight_verified: true, active: true, last_resolved_addresses: ['104.21.92.119', '172.67.192.253'], accelerated_addresses: ['104.16.132.229'], verified_adapters: ['generic-route', 'mihomo', 'windows-hosts'], applied_at: iso(-3) };
 let discoveredDomains: DomainDiscovery[] = [
@@ -133,7 +141,9 @@ async function runOptimization(shouldHoldForCancellation = false): Promise<RunRe
   }
   running = false;
   activeEvent = undefined;
-  return { id: runId, started_at: iso(-2), finished_at: iso(0), range_source: 'cloudflare-api', range_hash: mockRangeSnapshot.hash, results, ipv4_decision: { selected: results[0], changed: true, reason: 'score improved 18.4%' }, ipv6_decision: { selected: results[1], changed: false, reason: 'minimum hold kept current node' }, policy_applied: true };
+  const report = { id: runId, started_at: iso(-2), finished_at: new Date().toISOString(), range_source: 'cloudflare-api', range_hash: mockRangeSnapshot.hash, results, ipv4_decision: { selected: results[0], changed: true, reason: 'score improved 18.4%' }, ipv6_decision: { selected: results[1], changed: false, reason: 'minimum hold kept current node' }, policy_applied: true } satisfies RunReport;
+  latestBenchmark = { run_id: report.id, finished_at: report.finished_at, saved_at: report.finished_at, results: report.results };
+  return report;
 }
 
 export function subscribeMockEvents(listener: (event: OptimizerEvent) => void): () => void {
@@ -174,6 +184,7 @@ export async function mockRequest<T>(method: string, parameters: Record<string, 
     case 'ranges.get': return mockRangeSnapshot as T;
     case 'ranges.update': return { snapshot: mockRangeSnapshot, updated: false } as T;
     case 'history.list': return history as T;
+    case 'history.latest': return latestBenchmark as T;
     case 'routes.list': return routes as T;
     case 'proxy.detect': return proxyDetections as T;
     case 'acceleration.domains': return { observed: 0, verified: 1, activated: 0, discovered: discoveredDomains.length, policy_refreshed: false, domains: [manualDomain, ...discoveredDomains] } as T;

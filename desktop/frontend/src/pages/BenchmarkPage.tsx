@@ -4,8 +4,9 @@ import type { ColumnDef } from '@tanstack/react-table';
 import ReactECharts from 'echarts-for-react';
 import { Filter, Play, RotateCcw, Square } from 'lucide-react';
 import type { BenchmarkResult } from '../api/types';
-import { useStatus } from '../api/hooks';
-import { formatDuration, formatMbps, formatPercent, formatScore } from '../lib/format';
+import { useLatestBenchmark, useStatus } from '../api/hooks';
+import { selectBenchmarkSnapshot } from '../lib/benchmarkSnapshot';
+import { formatDate, formatDuration, formatMbps, formatPercent, formatScore } from '../lib/format';
 import { shouldApplyPolicy } from '../lib/policyAvailability';
 import { useUIStore } from '../state/ui';
 import { DataTable } from '../components/DataTable';
@@ -16,6 +17,7 @@ import { useRun } from '../hooks/useRun';
 export function BenchmarkPage() {
   const run = useRun();
   const status = useStatus();
+  const latestBenchmark = useLatestBenchmark(status.data?.state.last_ended_at);
   const filter = useUIStore((state) => state.benchmarkFilter);
   const setFilter = useUIStore((state) => state.setBenchmarkFilter);
   const [family, setFamily] = useState('all');
@@ -23,7 +25,8 @@ export function BenchmarkPage() {
   const [policyRequested, setPolicyRequested] = useState(true);
   const policyAvailable = Boolean(status.data?.policy_available);
   const applyPolicy = shouldApplyPolicy(policyAvailable, policyRequested);
-  const rows = useMemo(() => (run.report?.results ?? []).filter((item) => (family === 'all' || item.family === Number(family)) && item.ip.toLowerCase().includes(filter.toLowerCase())), [family, filter, run.report]);
+  const snapshot = useMemo(() => selectBenchmarkSnapshot(run.report, latestBenchmark.data), [latestBenchmark.data, run.report]);
+  const rows = useMemo(() => (snapshot?.results ?? []).filter((item) => (family === 'all' || item.family === Number(family)) && item.ip.toLowerCase().includes(filter.toLowerCase())), [family, filter, snapshot]);
   const columns = useMemo<ColumnDef<BenchmarkResult>[]>(() => [
     { id: 'rank', header: '#', size: 44, enableSorting: false, cell: ({ row }) => <Text c="dimmed" className="tabular">{row.index + 1}</Text> },
     { accessorKey: 'ip', header: 'IP', size: 228, cell: ({ getValue }) => <Text ff="monospace" size="sm">{String(getValue())}</Text> },
@@ -45,6 +48,10 @@ export function BenchmarkPage() {
     series: [{ name: '评分', type: 'bar', data: rows.slice(0, 10).map((row) => row.score), itemStyle: { color: '#1677a6' } }, { name: '吞吐', type: 'line', yAxisIndex: 1, data: rows.slice(0, 10).map((row) => row.mbps ?? 0), itemStyle: { color: '#c47a12' } }],
   }), [rows]);
   const progress = run.event?.progress;
+  const qualified = snapshot?.results.filter((item) => item.qualified).length ?? 0;
+  const currentPolicyVerified = Boolean(status.data?.state.current_ipv4?.policy_verified || status.data?.state.current_ipv6?.policy_verified);
+  const reportMatchesSnapshot = Boolean(run.report && snapshot?.runId === run.report.id);
+  const verifiedPolicy = Boolean((reportMatchesSnapshot && run.report?.policy_applied) || currentPolicyVerified);
   return (
     <Stack gap="lg">
       <PageHeader title="测速优选" description="两阶段候选测速、稳定选择与策略应用" actions={<Group gap="xs"><Button leftSection={<Play size={16} />} disabled={run.running} onClick={() => run.run({ force_range_refresh: forceRefresh, apply_policy: applyPolicy })}>开始优选</Button><Tooltip label="取消当前任务"><ActionIcon color="red" aria-label="取消当前任务" disabled={!run.running} loading={run.cancelling} onClick={run.cancel}><Square size={15} fill="currentColor" /></ActionIcon></Tooltip></Group>} />
@@ -58,14 +65,15 @@ export function BenchmarkPage() {
         </Group>
       </Section>
       {run.error && <Alert color={run.error.message.includes('cancelled') ? 'gray' : 'red'} title={run.error.message.includes('cancelled') ? '任务已取消' : '任务失败'}>{run.error.message}</Alert>}
+      {latestBenchmark.isError && <Alert color="yellow" title="最近结果刷新失败"><Group justify="space-between" align="center" wrap="nowrap"><Text size="sm">{latestBenchmark.error.message}</Text><Button size="compact-xs" variant="subtle" loading={latestBenchmark.isFetching} onClick={() => void latestBenchmark.refetch()}>重试</Button></Group></Alert>}
       <SimpleGrid cols={{ base: 2, md: 4 }} spacing="sm">
-        <Metric label="阶段" value={run.event?.stage ?? (run.report ? '已完成' : '等待开始')} detail={run.event?.message} accent="#1677a6" />
-        <Metric label="进度" value={progress ? `${progress.completed} / ${progress.total}` : '—'} detail={progress ? `合格 ${progress.qualified}` : '尚无活动任务'} />
-        <Metric label="候选结果" value={run.report?.results.length ?? 0} detail={`当前显示 ${rows.length}`} />
-        <Metric label="策略" value={run.report?.policy_applied ? '已应用' : !policyAvailable ? '不可用' : applyPolicy ? '完成后应用' : '仅测速'} detail={run.report?.policy_applied ? '后台已完成验证' : !policyAvailable ? '当前运行时没有已启用适配器' : '应用前不会修改系统'} accent={run.report?.policy_applied ? '#2b8a5a' : '#75808a'} />
+        <Metric label="阶段" value={run.event?.stage ?? (run.running ? '启动中' : snapshot ? '已完成' : '等待开始')} detail={run.event?.message ?? (snapshot ? `最近结果 ${formatDate(snapshot.finishedAt)}` : undefined)} accent="#1677a6" />
+        <Metric label="进度" value={progress ? `${progress.completed} / ${progress.total}` : snapshot ? '已保存' : '—'} detail={progress ? `合格 ${progress.qualified}` : snapshot ? `合格 ${qualified}` : '尚无活动任务'} />
+        <Metric label="候选结果" value={snapshot?.results.length ?? 0} detail={`当前显示 ${rows.length}`} />
+        <Metric label="策略" value={verifiedPolicy ? '已验证' : !policyAvailable ? '不可用' : applyPolicy ? '完成后应用' : '仅测速'} detail={verifiedPolicy ? '当前节点策略已有验证证据' : !policyAvailable ? '当前运行时没有已启用适配器' : '应用前不会修改系统'} accent={verifiedPolicy ? '#2b8a5a' : '#75808a'} />
       </SimpleGrid>
-      <Section title="候选结果" aside={run.report && <Button variant="subtle" leftSection={<RotateCcw size={15} />} onClick={() => run.run({ force_range_refresh: false, apply_policy: false })}>仅复测</Button>}>
-        {run.running && !run.report ? <div className="running-placeholder"><div className="pulse-line" /><Text fw={600}>后台正在生成候选结果</Text><Text size="sm" c="dimmed">关闭此窗口不会停止任务；重新打开后会恢复当前阶段。</Text></div> : <DataTable columns={columns} data={rows} emptyTitle="尚无候选结果" emptyDetail="开始一次优选后，TCP、TLS 与下载指标会显示在这里。" minWidth={980} rowKey={(row) => row.ip} />}
+      <Section title="候选结果" aside={snapshot && <Button variant="subtle" leftSection={<RotateCcw size={15} />} onClick={() => run.run({ force_range_refresh: false, apply_policy: false })}>仅复测</Button>}>
+        {run.running && !snapshot ? <div className="running-placeholder"><div className="pulse-line" /><Text fw={600}>后台正在生成候选结果</Text><Text size="sm" c="dimmed">关闭此窗口不会停止任务；重新打开后会恢复当前阶段。</Text></div> : <DataTable columns={columns} data={rows} emptyTitle="尚无候选结果" emptyDetail="开始一次优选后，TCP、TLS 与下载指标会显示在这里。" minWidth={980} rowKey={(row) => row.ip} />}
       </Section>
       <Section title="前十名评分与吞吐">
         {rows.length ? <ReactECharts option={chart} style={{ height: 300 }} opts={{ renderer: 'svg' }} /> : <EmptyState title="暂无图表数据" detail="完整优选结束后显示前十名比较。" />}

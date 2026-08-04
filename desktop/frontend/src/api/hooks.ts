@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { request } from './client';
-import type { AppConfig, DomainDiscoveryResult, ProxyDetections, RangeSnapshot, RouteTransaction, RunSummary, SystemStatus } from './types';
+import type { AppConfig, DomainDiscoveryResult, LatestBenchmark, ProxyDetections, RangeSnapshot, RouteTransaction, RunSummary, SystemStatus } from './types';
 
 export const queryKeys = {
   status: ['system', 'status'] as const,
@@ -8,6 +8,7 @@ export const queryKeys = {
   routes: ['routes'] as const,
   proxies: ['proxies'] as const,
   history: ['history'] as const,
+  latestBenchmark: ['benchmark', 'latest'] as const,
   logs: ['logs'] as const,
   config: ['config'] as const,
   accelerationDomains: ['acceleration', 'domains'] as const,
@@ -31,6 +32,14 @@ export function useProxies() {
 
 export function useHistory() {
   return useQuery({ queryKey: queryKeys.history, queryFn: () => request<RunSummary[]>('history.list') });
+}
+
+/** useLatestBenchmark 以后台结束时间作为版本信号，任务完成后自动读取最新成功明细。 */
+export function useLatestBenchmark(lastEndedAt?: string) {
+  return useQuery({
+    queryKey: [...queryKeys.latestBenchmark, lastEndedAt ?? 'none'],
+    queryFn: () => request<LatestBenchmark>('history.latest'),
+  });
 }
 
 export function useLogs(lines = 500) {

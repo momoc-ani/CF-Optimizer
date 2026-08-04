@@ -53,6 +53,14 @@ type RunSummary struct {
 	Error        string          `json:"error,omitempty"`
 }
 
+// RunDetail 保存可独立读取的一次运行候选明细文档。
+type RunDetail struct {
+	Version int             `json:"version"`
+	RunID   string          `json:"run_id"`
+	SavedAt time.Time       `json:"saved_at"`
+	Payload json.RawMessage `json:"payload"`
+}
+
 // NodeStats 聚合节点历史表现，并记录连续失败后的冷却时间。
 type NodeStats struct {
 	Attempts      int       `json:"attempts"`
@@ -172,12 +180,7 @@ func (s *Store) SaveRunDetail(runID string, payload json.RawMessage, retention t
 		return errors.New("invalid run ID")
 	}
 	directory := filepath.Join(s.dataDir, "run-details")
-	document := struct {
-		Version int             `json:"version"`
-		RunID   string          `json:"run_id"`
-		SavedAt time.Time       `json:"saved_at"`
-		Payload json.RawMessage `json:"payload"`
-	}{Version: 1, RunID: runID, SavedAt: time.Now().UTC(), Payload: payload}
+	document := RunDetail{Version: 1, RunID: runID, SavedAt: time.Now().UTC(), Payload: payload}
 	encoded, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {
 		return err
@@ -205,6 +208,32 @@ func (s *Store) SaveRunDetail(runID string, payload json.RawMessage, retention t
 		}
 	}
 	return nil
+}
+
+// LoadRunDetail 读取并校验指定运行的候选明细，避免界面依赖进程内报告。
+func (s *Store) LoadRunDetail(runID string) (RunDetail, error) {
+	if !validRunID(runID) {
+		return RunDetail{}, errors.New("invalid run ID")
+	}
+	path := filepath.Join(s.dataDir, "run-details", runID+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return RunDetail{}, fmt.Errorf("read run detail: %w", err)
+	}
+	var detail RunDetail
+	if err := json.Unmarshal(data, &detail); err != nil {
+		return RunDetail{}, fmt.Errorf("decode run detail: %w", err)
+	}
+	if detail.Version != 1 {
+		return RunDetail{}, fmt.Errorf("unsupported run detail version %d", detail.Version)
+	}
+	if detail.RunID != runID {
+		return RunDetail{}, fmt.Errorf("run detail ID %q does not match requested ID %q", detail.RunID, runID)
+	}
+	if detail.SavedAt.IsZero() || len(detail.Payload) == 0 {
+		return RunDetail{}, errors.New("run detail is incomplete")
+	}
+	return detail, nil
 }
 
 func validRunID(runID string) bool {

@@ -23,6 +23,7 @@ var allowedMethods = map[string]struct{}{
 	"ranges.get":                    {},
 	"ranges.update":                 {},
 	"history.list":                  {},
+	"history.latest":                {},
 	"routes.list":                   {},
 	"proxy.detect":                  {},
 	"acceleration.domains":          {},

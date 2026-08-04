@@ -37,6 +37,14 @@ export interface RunSummary {
   error?: string;
 }
 
+/** LatestBenchmark 描述后台最近一次成功持久化的候选明细。 */
+export interface LatestBenchmark {
+  run_id: string;
+  finished_at: string;
+  saved_at: string;
+  results: BenchmarkResult[];
+}
+
 export interface ServiceState {
   version: number;
   updated_at: string;
