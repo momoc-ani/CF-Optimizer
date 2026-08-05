@@ -44,6 +44,7 @@ RestartApplications=no
 Source: "{#SourceDir}\cf-optimizer.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\cf-optimizerd.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\cf-optimizer-ui.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\config.yaml"; DestDir: "{commonappdata}\CF Optimizer"; Flags: ignoreversion onlyifdoesntexist
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion; AfterInstall: ConfigureService
 Source: "{#SourceDir}\MicrosoftEdgeWebview2Setup.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall skipifsourcedoesntexist
 

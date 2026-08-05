@@ -17,6 +17,7 @@ func TestInstallerRepairsServiceAfterFilesAreReplaced(t *testing.T) {
 		"procedure ConfigureService;",
 		"install --daemon",
 		"(ExitCode <> 0)",
+		`Source: "..\..\config.yaml"; DestDir: "{commonappdata}\CF Optimizer"; Flags: ignoreversion onlyifdoesntexist`,
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("installer is missing repair guard %q", expected)
