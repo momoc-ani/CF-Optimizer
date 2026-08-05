@@ -70,6 +70,12 @@ type recordingPolicy struct {
 	rollbacks      []proxy.ApplyResult
 }
 
+type candidateRejectingPolicy struct {
+	recordingPolicy
+	rejectedAddress string
+	rejectAll       bool
+}
+
 type guardedRecordingPolicy struct {
 	recordingPolicy
 	events      []string
@@ -188,6 +194,18 @@ func (p *recordingPolicy) Apply(_ context.Context, policy proxy.DirectPolicy) (p
 func (p *recordingPolicy) Rollback(_ context.Context, applied proxy.ApplyResult) error {
 	p.rollbacks = append(p.rollbacks, applied)
 	return nil
+}
+
+func (p *candidateRejectingPolicy) Apply(ctx context.Context, policy proxy.DirectPolicy) (proxy.ApplyResult, error) {
+	for _, mapping := range policy.DomainMappings {
+		if len(mapping.Addresses) > 0 && (p.rejectAll || mapping.Addresses[0] == p.rejectedAddress) {
+			return proxy.ApplyResult{}, fmt.Errorf("candidate verification failed: %w", &proxy.DomainVerificationError{
+				Domain: mapping.Domain, Address: mapping.Addresses[0], Kind: proxy.DomainVerificationCandidateUnreachable,
+				Err: errors.New("candidate HTTPS connection unavailable"),
+			})
+		}
+	}
+	return p.recordingPolicy.Apply(ctx, policy)
 }
 
 func TestRunnerBenchmarkOnlyDoesNotChangeAppliedSelection(t *testing.T) {
@@ -447,6 +465,70 @@ func TestRunPersistsManualDomainAllocationFailure(t *testing.T) {
 	}
 	if history := stateStore.Snapshot().History; len(history) != 1 || !strings.Contains(history[0].Error, "ani.momoc.top") {
 		t.Fatalf("manual domain failure was not marked partial in history: %#v", history)
+	}
+}
+
+func TestRunRetriesNextCandidateAfterApplicationVerificationFailure(t *testing.T) {
+	policy := &candidateRejectingPolicy{
+		recordingPolicy: recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}},
+		rejectedAddress: "1.1.1.1",
+	}
+	runner, stateStore := newTestRunner(t, policy)
+	runner.config.Acceleration.Enabled = true
+	runner.config.Acceleration.ManualDomains = []string{"ani.momoc.top"}
+	runner.domainResolver = staticDomainResolver{addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+
+	report, err := runner.Run(context.Background(), RunOptions{ApplyPolicy: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.PolicyApplied || len(report.DomainAllocations) != 1 || report.DomainAllocations[0].AssignedAddress != "1.1.1.2" {
+		t.Fatalf("application failure did not advance to the next candidate: %#v", report.DomainAllocations)
+	}
+	state := stateStore.Snapshot()
+	if state.Policy == nil || len(state.Policy.DomainMappings) != 1 || state.Policy.DomainMappings[0].Addresses[0] != "1.1.1.2" {
+		t.Fatalf("successful fallback mapping was not persisted: %#v", state.Policy)
+	}
+	failedNode := state.Nodes["1.1.1.1"]
+	if failedNode.CooldownUntil.IsZero() || failedNode.FailureStreak < 1 {
+		t.Fatalf("failed candidate was not persisted in cooldown: %#v", failedNode)
+	}
+}
+
+func TestRunKeepsPreviousPolicyWhenManualCandidatesAreExhausted(t *testing.T) {
+	policy := &candidateRejectingPolicy{
+		recordingPolicy: recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}},
+		rejectAll:       true,
+	}
+	runner, stateStore := newTestRunner(t, policy)
+	runner.config.Acceleration.Enabled = true
+	runner.config.Acceleration.ManualDomains = []string{"ani.momoc.top"}
+	runner.domainResolver = staticDomainResolver{addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	previousReceipts, err := json.Marshal(proxy.ApplyResult{Receipts: []proxy.Receipt{{ID: "previous", Adapter: "test", Changed: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Update(func(state *store.State) error {
+		state.CurrentIPv4 = &store.Selection{IP: "1.1.1.3", Family: 4, PolicyVerified: true}
+		state.Policy = &store.PolicySnapshot{
+			IPv4CIDRs:      []string{"1.1.1.3/32"},
+			DomainMappings: []store.DomainMappingSnapshot{{Domain: "ani.momoc.top", Addresses: []string{"1.1.1.3"}}},
+			Receipts:       previousReceipts,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = runner.Run(context.Background(), RunOptions{ApplyPolicy: true}, nil)
+	if err == nil || !strings.Contains(err.Error(), "ani.momoc.top") {
+		t.Fatalf("exhausted manual candidates should fail with domain context: %v", err)
+	}
+	state := stateStore.Snapshot()
+	if state.Policy == nil || !reflect.DeepEqual(state.Policy.DomainMappings, []store.DomainMappingSnapshot{{Domain: "ani.momoc.top", Addresses: []string{"1.1.1.3"}}}) {
+		t.Fatalf("previous policy was not preserved after fallback exhaustion: %#v", state.Policy)
 	}
 }
 

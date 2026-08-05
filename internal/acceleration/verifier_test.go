@@ -105,6 +105,91 @@ func TestVerifyAppliedRejectsStaleSystemMappingAfterRetryLimit(t *testing.T) {
 	}
 }
 
+func TestVerifyAppliedClassifiesCandidateConnectionFailure(t *testing.T) {
+	verifier, err := NewVerifierWithOptions(func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("unexpected raw dial")
+	}, VerificationOptions{
+		PreflightTimeout: time.Second,
+		ApplyTimeout:     time.Second,
+		AttemptTimeout:   50 * time.Millisecond,
+		RetryInterval:    time.Nanosecond,
+		MaxAttempts:      1,
+	})
+	if err != nil {
+		t.Fatalf("create verifier: %v", err)
+	}
+	verifier.requestConnection = func(context.Context, string, string) (string, error) {
+		return "", context.DeadlineExceeded
+	}
+	err = verifier.VerifyApplied(context.Background(), []proxy.DomainMapping{{Domain: "ani.momoc.top", Addresses: []string{"104.25.241.29"}}})
+	var verificationErr *proxy.DomainVerificationError
+	if !errors.As(err, &verificationErr) {
+		t.Fatalf("verification error = %v, want typed domain error", err)
+	}
+	if verificationErr.Kind != proxy.DomainVerificationCandidateUnreachable || verificationErr.Address != "104.25.241.29" {
+		t.Fatalf("unexpected candidate failure details: %#v", verificationErr)
+	}
+}
+
+func TestVerifyAppliedClassifiesMappingPropagationFailure(t *testing.T) {
+	verifier, err := NewVerifierWithOptions(func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("unexpected raw dial")
+	}, VerificationOptions{
+		PreflightTimeout: time.Second,
+		ApplyTimeout:     time.Second,
+		AttemptTimeout:   50 * time.Millisecond,
+		RetryInterval:    time.Nanosecond,
+		MaxAttempts:      1,
+	})
+	if err != nil {
+		t.Fatalf("create verifier: %v", err)
+	}
+	verifier.requestConnection = func(context.Context, string, string) (string, error) {
+		return "172.66.2.98", nil
+	}
+	err = verifier.VerifyApplied(context.Background(), []proxy.DomainMapping{{Domain: "ani.momoc.top", Addresses: []string{"104.25.241.29"}}})
+	var verificationErr *proxy.DomainVerificationError
+	if !errors.As(err, &verificationErr) {
+		t.Fatalf("verification error = %v, want typed domain error", err)
+	}
+	if verificationErr.Kind != proxy.DomainVerificationMappingNotPropagated || !strings.Contains(verificationErr.Error(), "connected to 172.66.2.98") {
+		t.Fatalf("unexpected propagation failure details: %#v", verificationErr)
+	}
+}
+
+func TestVerifyAppliedRetriesCandidateWithinIndependentAttemptTimeout(t *testing.T) {
+	verifier, err := NewVerifierWithOptions(func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("unexpected raw dial")
+	}, VerificationOptions{
+		PreflightTimeout: 10 * time.Millisecond,
+		ApplyTimeout:     time.Second,
+		AttemptTimeout:   100 * time.Millisecond,
+		RetryInterval:    time.Nanosecond,
+		MaxAttempts:      2,
+	})
+	if err != nil {
+		t.Fatalf("create verifier: %v", err)
+	}
+	requests := 0
+	verifier.requestConnection = func(ctx context.Context, _, _ string) (string, error) {
+		requests++
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) <= verifier.timeout {
+			t.Fatalf("apply attempt reused preflight timeout: deadline=%s preflight=%s", deadline, verifier.timeout)
+		}
+		if requests == 1 {
+			return "", errors.New("temporary connection failure")
+		}
+		return "104.25.241.29", nil
+	}
+	if err := verifier.VerifyApplied(context.Background(), []proxy.DomainMapping{{Domain: "ani.momoc.top", Addresses: []string{"104.25.241.29"}}}); err != nil {
+		t.Fatalf("verify retry: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("verification requests = %d, want 2", requests)
+	}
+}
+
 func TestValidateHTTPSResponseRejectsCloudflareEdgeIPRestricted(t *testing.T) {
 	response := &http.Response{
 		StatusCode: http.StatusForbidden,

@@ -32,8 +32,37 @@ func TestLoadMergesDefaults(t *testing.T) {
 	if !cfg.Acceleration.Enabled || !cfg.Acceleration.AutoDiscover || !cfg.Acceleration.AutoApply {
 		t.Fatalf("域名加速默认值未启用自动发现和自动应用：%#v", cfg.Acceleration)
 	}
+	if cfg.Acceleration.ApplyVerificationTimeout.Duration() != 20*time.Second ||
+		cfg.Acceleration.ApplyAttemptTimeout.Duration() != 5*time.Second ||
+		cfg.Acceleration.ApplyRetryInterval.Duration() != 500*time.Millisecond ||
+		cfg.Acceleration.ApplyMaxAttempts != 4 {
+		t.Fatalf("域名应用验证默认值未合并：%#v", cfg.Acceleration)
+	}
 	if got := cfg.AccelerationDomains(); len(got) != 0 {
 		t.Fatalf("default acceleration domains = %#v, want empty", got)
+	}
+}
+
+func TestValidateRejectsInvalidAccelerationVerificationWindow(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{name: "non-positive apply timeout", mutate: func(cfg *Config) { cfg.Acceleration.ApplyVerificationTimeout = 0 }},
+		{name: "attempt exceeds apply window", mutate: func(cfg *Config) {
+			cfg.Acceleration.ApplyAttemptTimeout = cfg.Acceleration.ApplyVerificationTimeout + Duration(time.Second)
+		}},
+		{name: "zero retry interval", mutate: func(cfg *Config) { cfg.Acceleration.ApplyRetryInterval = 0 }},
+		{name: "too many attempts", mutate: func(cfg *Config) { cfg.Acceleration.ApplyMaxAttempts = 21 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := Default()
+			test.mutate(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("Validate() error = nil, want invalid acceleration verification configuration")
+			}
+		})
 	}
 }
 

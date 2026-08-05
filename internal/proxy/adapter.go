@@ -109,10 +109,22 @@ type benchmarkPathVerifier interface {
 	VerifyBenchmarkPath(context.Context, []netip.Addr) (BenchmarkPathEvidence, error)
 }
 
-// DomainVerificationError 标识真实连接验证失败的精确域名，供策略层隔离单个自动发现项。
+// DomainVerificationKind 标识域名应用验证失败的原因类别。
+type DomainVerificationKind string
+
+const (
+	// DomainVerificationCandidateUnreachable 表示候选地址无法完成 HTTPS 连接。
+	DomainVerificationCandidateUnreachable DomainVerificationKind = "candidate_unreachable"
+	// DomainVerificationMappingNotPropagated 表示连接成功但系统映射仍未切换到候选地址。
+	DomainVerificationMappingNotPropagated DomainVerificationKind = "mapping_not_propagated"
+)
+
+// DomainVerificationError 标识真实连接验证失败的精确域名和候选地址。
 type DomainVerificationError struct {
-	Domain string
-	Err    error
+	Domain  string
+	Address string
+	Kind    DomainVerificationKind
+	Err     error
 }
 
 // Error 返回包含失败域名的验证错误。
@@ -120,7 +132,10 @@ func (e *DomainVerificationError) Error() string {
 	if e == nil {
 		return "domain connection verification failed"
 	}
-	return fmt.Sprintf("verify domain %s connection: %v", e.Domain, e.Err)
+	if e.Kind == "" {
+		return fmt.Sprintf("verify domain %s connection: %v", e.Domain, e.Err)
+	}
+	return fmt.Sprintf("verify domain %s connection (%s): %v", e.Domain, e.Kind, e.Err)
 }
 
 // Unwrap 保留底层网络错误链。

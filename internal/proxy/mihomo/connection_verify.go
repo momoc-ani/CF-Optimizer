@@ -17,7 +17,29 @@ import (
 	"github.com/cf-optimizer/cf-optimizer/internal/proxy"
 )
 
-const mappedConnectionVerificationAttempts = 2
+const (
+	mappedConnectionVerificationAttempts      = 2
+	mappedConnectionVerificationRetryInterval = 500 * time.Millisecond
+	mappedConnectionVerificationMaxBackoff    = 4 * time.Second
+)
+
+// mappingNotPropagatedError 表示连接已建立，但 Mihomo 尚未暴露目标域名的 DIRECT 连接证据。
+type mappingNotPropagatedError struct{ err error }
+
+func (e *mappingNotPropagatedError) Error() string {
+	if e == nil || e.err == nil {
+		return "Mihomo mapping has not propagated"
+	}
+	return e.err.Error()
+}
+
+// Unwrap 保留传播检查的底层描述，便于上层记录完整原因。
+func (e *mappingNotPropagatedError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
 
 // verifyMappedConnections 通过 Mihomo mixed-port 建立真实 HTTPS 连接并核对控制 API 连接证据。
 func (a *Adapter) verifyMappedConnections(ctx context.Context, mappings []proxy.DomainMapping) error {
@@ -31,11 +53,20 @@ func (a *Adapter) verifyMappedConnections(ctx context.Context, mappings []proxy.
 	}
 	proxyAddress := net.JoinHostPort(proxyHost, strconv.Itoa(mixedPort))
 	for _, mapping := range mappings {
-		err := verifyWithTransientRetry(ctx, a.config.Timeout.Duration(), func(verifyContext context.Context) error {
+		err := verifyWithTransientRetryWindow(ctx, a.verificationTimeout, a.verificationAttemptTimeout, a.verificationRetryInterval, a.verificationMaxAttempts, func(verifyContext context.Context) error {
 			return a.verifyMappedConnection(verifyContext, proxyAddress, mapping)
 		})
 		if err != nil {
-			return &proxy.DomainVerificationError{Domain: mapping.Domain, Err: err}
+			kind := proxy.DomainVerificationCandidateUnreachable
+			var propagationErr *mappingNotPropagatedError
+			if errors.As(err, &propagationErr) {
+				kind = proxy.DomainVerificationMappingNotPropagated
+			}
+			address := ""
+			if len(mapping.Addresses) > 0 {
+				address = mapping.Addresses[0]
+			}
+			return &proxy.DomainVerificationError{Domain: mapping.Domain, Address: address, Kind: kind, Err: err}
 		}
 	}
 	return nil
@@ -58,8 +89,58 @@ func verifyWithTransientRetry(ctx context.Context, timeout time.Duration, verify
 	return lastErr
 }
 
+// verifyWithTransientRetryWindow 在总窗口内按单次超时和退避重试 Mihomo 连接验证。
+func verifyWithTransientRetryWindow(ctx context.Context, total, attempt, retry time.Duration, maxAttempts int, verify func(context.Context) error) error {
+	if total <= 0 {
+		total = attempt
+	}
+	if attempt <= 0 || attempt > total {
+		attempt = total
+	}
+	if retry <= 0 {
+		retry = mappedConnectionVerificationRetryInterval
+	}
+	if maxAttempts < 1 {
+		maxAttempts = mappedConnectionVerificationAttempts
+	}
+	totalContext, cancel := context.WithTimeout(ctx, total)
+	defer cancel()
+	var lastErr error
+	for current := 1; current <= maxAttempts; current++ {
+		attemptContext, attemptCancel := context.WithTimeout(totalContext, attempt)
+		lastErr = verify(attemptContext)
+		attemptCancel()
+		if lastErr == nil {
+			return nil
+		}
+		if current == maxAttempts || totalContext.Err() != nil || !isTransientVerificationError(lastErr) {
+			return lastErr
+		}
+		interval := retry
+		for step := 1; step < current && interval < mappedConnectionVerificationMaxBackoff; step++ {
+			if interval > mappedConnectionVerificationMaxBackoff/2 {
+				interval = mappedConnectionVerificationMaxBackoff
+				break
+			}
+			interval *= 2
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-totalContext.Done():
+			timer.Stop()
+			return lastErr
+		case <-timer.C:
+		}
+	}
+	return lastErr
+}
+
 // isTransientVerificationError 识别可通过一次重试吸收的网络或上下文超时。
 func isTransientVerificationError(err error) bool {
+	var propagationErr *mappingNotPropagatedError
+	if errors.As(err, &propagationErr) {
+		return true
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
@@ -190,7 +271,7 @@ func (a *Adapter) verifyConnectionEvidence(ctx context.Context, mapping proxy.Do
 				return nil
 			}
 		}
-		return fmt.Errorf("Mihomo connection for %s reached %s but was not DIRECT (rule=%s payload=%s)", mapping.Domain, address, connection.Rule, connection.RulePayload)
+		return &mappingNotPropagatedError{err: fmt.Errorf("Mihomo connection for %s reached %s but was not DIRECT (rule=%s payload=%s)", mapping.Domain, address, connection.Rule, connection.RulePayload)}
 	}
-	return fmt.Errorf("Mihomo did not expose an active DIRECT connection for %s to an optimized address", mapping.Domain)
+	return &mappingNotPropagatedError{err: fmt.Errorf("Mihomo did not expose an active DIRECT connection for %s to an optimized address", mapping.Domain)}
 }

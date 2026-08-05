@@ -311,16 +311,60 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 
 	var applied proxy.ApplyResult
 	var removedRouteTransactions []string
+	failedAddresses := make(map[string]struct{})
 	if options.ApplyPolicy {
 		r.emit(emit, Event{RunID: report.ID, Type: "stage.started", Stage: "policy", Message: "applying and verifying selected policy"})
+		failedDomainAddresses := make(map[string]map[string]struct{})
+		failedVerificationErrors := make(map[string]error)
+	retryPolicy:
 		for {
 			var allocationWarnings []string
-			report.domainMappings, report.DomainAllocations, allocationWarnings = r.allocateDomainMappings(ctx, rangeResult.Snapshot, report.Results, r.store.Snapshot())
+			report.domainMappings, report.DomainAllocations, allocationWarnings = r.allocateDomainMappings(ctx, rangeResult.Snapshot, report.Results, r.store.Snapshot(), failedDomainAddresses)
 			report.Warnings = append(report.Warnings, allocationWarnings...)
 			report.domainAllocationCompleted = true
+			if failure := manualDomainAllocationFailure(report); failure != "" && len(failedAddresses) > 0 {
+				return report, errors.New(failure)
+			}
+			for domain, verificationFailure := range failedVerificationErrors {
+				if !isAutomaticDomain(r.config, domain) || !allocationHasNoAddress(report.DomainAllocations, domain) {
+					continue
+				}
+				isolated, isolateErr := r.isolateFailedAutomaticDomain(verificationFailure)
+				if isolateErr != nil {
+					return report, isolateErr
+				}
+				if isolated {
+					continue retryPolicy
+				}
+			}
 			applied, removedRouteTransactions, err = r.applySelectedPolicy(ctx, stateBefore, report)
 			if err == nil {
 				break
+			}
+			var verificationErr *proxy.DomainVerificationError
+			if errors.As(err, &verificationErr) && verificationErr.Address != "" {
+				domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(verificationErr.Domain)), ".")
+				failedVerificationErrors[domain] = err
+				if failedDomainAddresses[domain] == nil {
+					failedDomainAddresses[domain] = make(map[string]struct{})
+				}
+				failedDomainAddresses[domain][verificationErr.Address] = struct{}{}
+				if _, recorded := failedAddresses[verificationErr.Address]; !recorded {
+					failedAddresses[verificationErr.Address] = struct{}{}
+					if cooldownErr := r.recordApplicationVerificationFailure(verificationErr.Address); cooldownErr != nil {
+						return report, errors.Join(err, cooldownErr)
+					}
+				}
+				if verificationErr.Domain != "" && isAutomaticDomain(r.config, verificationErr.Domain) && allocationHasNoAddress(report.DomainAllocations, verificationErr.Domain) {
+					isolated, isolateErr := r.isolateFailedAutomaticDomain(err)
+					if isolateErr != nil {
+						return report, errors.Join(err, isolateErr)
+					}
+					if isolated {
+						continue retryPolicy
+					}
+				}
+				continue retryPolicy
 			}
 			isolated, isolateErr := r.isolateFailedAutomaticDomain(err)
 			if isolateErr != nil {
@@ -345,6 +389,11 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 			}
 		}
 		return report, err
+	}
+	if len(failedAddresses) > 0 {
+		if err := r.reinstateApplicationFailureCooldown(failedAddresses); err != nil {
+			return report, err
+		}
 	}
 	return report, nil
 }
@@ -581,6 +630,10 @@ func (r *Runner) refreshPolicyWithStateMutationLocked(ctx context.Context, mutat
 	if err != nil {
 		return fmt.Errorf("load ranges for policy refresh: %w", err)
 	}
+	failedDomainAddresses := make(map[string]map[string]struct{})
+	failedAddresses := make(map[string]struct{})
+	failedVerificationErrors := make(map[string]error)
+retryRefresh:
 	for {
 		before := r.store.Snapshot()
 		planned := before
@@ -588,17 +641,57 @@ func (r *Runner) refreshPolicyWithStateMutationLocked(ctx context.Context, mutat
 			mutateState(&planned)
 		}
 		ranked := rankedHistoricalResults(planned, r.now())
-		mappings, allocations, allocationWarnings := r.allocateDomainMappings(ctx, rangeResult.Snapshot, ranked, planned)
+		mappings, allocations, allocationWarnings := r.allocateDomainMappings(ctx, rangeResult.Snapshot, ranked, planned, failedDomainAddresses)
 		for _, warning := range allocationWarnings {
 			r.logger.Warn("域名未分配优选 IP", "warning", warning)
 		}
 		report := RunReport{DomainAllocations: allocations, domainMappings: mappings, domainAllocationCompleted: true}
+		if failure := manualDomainAllocationFailure(report); failure != "" && len(failedAddresses) > 0 {
+			return errors.New(failure)
+		}
+		for domain, verificationFailure := range failedVerificationErrors {
+			if !isAutomaticDomain(r.config, domain) || !allocationHasNoAddress(allocations, domain) {
+				continue
+			}
+			isolated, isolateErr := r.isolateFailedAutomaticDomain(verificationFailure)
+			if isolateErr != nil {
+				return isolateErr
+			}
+			if isolated {
+				continue retryRefresh
+			}
+		}
 		policy, policyErr := r.policyForDecisions(planned, report, false)
 		if policyErr != nil {
 			return policyErr
 		}
 		applied, applyErr := r.policy.Apply(ctx, policy)
 		if applyErr != nil {
+			var verificationErr *proxy.DomainVerificationError
+			if errors.As(applyErr, &verificationErr) && verificationErr.Address != "" {
+				domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(verificationErr.Domain)), ".")
+				failedVerificationErrors[domain] = applyErr
+				if failedDomainAddresses[domain] == nil {
+					failedDomainAddresses[domain] = make(map[string]struct{})
+				}
+				failedDomainAddresses[domain][verificationErr.Address] = struct{}{}
+				if _, recorded := failedAddresses[verificationErr.Address]; !recorded {
+					failedAddresses[verificationErr.Address] = struct{}{}
+					if cooldownErr := r.recordApplicationVerificationFailure(verificationErr.Address); cooldownErr != nil {
+						return errors.Join(applyErr, cooldownErr)
+					}
+				}
+				if isAutomaticDomain(r.config, verificationErr.Domain) && allocationHasNoAddress(allocations, verificationErr.Domain) {
+					isolated, isolateErr := r.isolateFailedAutomaticDomain(applyErr)
+					if isolateErr != nil {
+						return errors.Join(applyErr, isolateErr)
+					}
+					if isolated {
+						continue retryRefresh
+					}
+				}
+				continue retryRefresh
+			}
 			isolated, isolateErr := r.isolateFailedAutomaticDomain(applyErr)
 			if isolateErr != nil {
 				return errors.Join(fmt.Errorf("refresh policy: %w", applyErr), isolateErr)
@@ -610,9 +703,40 @@ func (r *Runner) refreshPolicyWithStateMutationLocked(ctx context.Context, mutat
 		}
 		newApplied := applied
 		if len(policy.DomainMappings) > 0 {
+			if r.domainVerifier == nil {
+				if rollbackErr := r.policy.Rollback(ctx, applied); rollbackErr != nil {
+					return errors.Join(errors.New("domain mapping verification is unavailable"), rollbackErr)
+				}
+				return errors.New("domain mapping verification is unavailable")
+			}
 			if verifyErr := r.domainVerifier.VerifyApplied(ctx, policy.DomainMappings); verifyErr != nil {
 				if rollbackErr := r.policy.Rollback(ctx, applied); rollbackErr != nil {
 					verifyErr = errors.Join(verifyErr, rollbackErr)
+				}
+				var verificationErr *proxy.DomainVerificationError
+				if errors.As(verifyErr, &verificationErr) && verificationErr.Address != "" {
+					domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(verificationErr.Domain)), ".")
+					failedVerificationErrors[domain] = verifyErr
+					if failedDomainAddresses[domain] == nil {
+						failedDomainAddresses[domain] = make(map[string]struct{})
+					}
+					failedDomainAddresses[domain][verificationErr.Address] = struct{}{}
+					if _, recorded := failedAddresses[verificationErr.Address]; !recorded {
+						failedAddresses[verificationErr.Address] = struct{}{}
+						if cooldownErr := r.recordApplicationVerificationFailure(verificationErr.Address); cooldownErr != nil {
+							return errors.Join(verifyErr, cooldownErr)
+						}
+					}
+					if isAutomaticDomain(r.config, verificationErr.Domain) && allocationHasNoAddress(allocations, verificationErr.Domain) {
+						isolated, isolateErr := r.isolateFailedAutomaticDomain(verifyErr)
+						if isolateErr != nil {
+							return errors.Join(verifyErr, isolateErr)
+						}
+						if isolated {
+							continue retryRefresh
+						}
+					}
+					continue retryRefresh
 				}
 				isolated, isolateErr := r.isolateFailedAutomaticDomain(verifyErr)
 				if isolateErr != nil {
@@ -662,6 +786,9 @@ func (r *Runner) refreshPolicyWithStateMutationLocked(ctx context.Context, mutat
 				return errors.Join(persistErr, rollbackErr)
 			}
 			return persistErr
+		}
+		if err := r.reinstateApplicationFailureCooldown(failedAddresses); err != nil {
+			return err
 		}
 		return nil
 	}
@@ -854,6 +981,12 @@ func (r *Runner) applySelectedPolicy(ctx context.Context, state store.State, rep
 		Skipped:  append(append([]string{}, transition.Skipped...), finalResult.Skipped...),
 	}
 	if len(finalPolicy.DomainMappings) > 0 {
+		if r.domainVerifier == nil {
+			if rollbackErr := r.policy.Rollback(ctx, combined); rollbackErr != nil {
+				return proxy.ApplyResult{}, nil, errors.Join(errors.New("domain mapping verification is unavailable"), rollbackErr)
+			}
+			return proxy.ApplyResult{}, nil, errors.New("domain mapping verification is unavailable")
+		}
 		if err := r.domainVerifier.VerifyApplied(ctx, finalPolicy.DomainMappings); err != nil {
 			if rollbackErr := r.policy.Rollback(ctx, combined); rollbackErr != nil {
 				err = errors.Join(err, rollbackErr)
@@ -907,6 +1040,75 @@ func (r *Runner) isolateFailedAutomaticDomain(operationErr error) (bool, error) 
 	return updated, nil
 }
 
+// isAutomaticDomain 判断域名是否来自自动发现而非用户手动配置。
+func isAutomaticDomain(cfg config.Config, rawDomain string) bool {
+	if !automaticDomainAllocationEnabled(cfg) {
+		return false
+	}
+	domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(rawDomain)), ".")
+	for _, manualDomain := range cfg.AccelerationDomains() {
+		if manualDomain == domain {
+			return false
+		}
+	}
+	return true
+}
+
+// allocationHasNoAddress 判断指定域名在本轮分配中是否已经耗尽候选地址。
+func allocationHasNoAddress(allocations []DomainAllocationResult, rawDomain string) bool {
+	domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(rawDomain)), ".")
+	for _, allocation := range allocations {
+		if strings.TrimSuffix(strings.ToLower(strings.TrimSpace(allocation.Domain)), ".") == domain {
+			return allocation.AssignedAddress == ""
+		}
+	}
+	return true
+}
+
+// recordApplicationVerificationFailure 将应用验证失败的候选立即加入持久化冷却列表。
+func (r *Runner) recordApplicationVerificationFailure(rawAddress string) error {
+	address := strings.TrimSpace(rawAddress)
+	if address == "" {
+		return nil
+	}
+	now := r.now().UTC()
+	return r.store.Update(func(state *store.State) error {
+		if state.Nodes == nil {
+			state.Nodes = make(map[string]store.NodeStats)
+		}
+		stats := state.Nodes[address]
+		stats.FailureStreak++
+		stats.CooldownUntil = now.Add(r.config.Benchmark.FailureCooldown.Duration()).UTC()
+		state.Nodes[address] = stats
+		return nil
+	})
+}
+
+// reinstateApplicationFailureCooldown 在成功运行持久化测速结果后恢复失败候选的冷却状态。
+func (r *Runner) reinstateApplicationFailureCooldown(addresses map[string]struct{}) error {
+	if len(addresses) == 0 {
+		return nil
+	}
+	now := r.now().UTC()
+	return r.store.Update(func(state *store.State) error {
+		if state.Nodes == nil {
+			state.Nodes = make(map[string]store.NodeStats)
+		}
+		for address := range addresses {
+			stats := state.Nodes[address]
+			if stats.FailureStreak < 1 {
+				stats.FailureStreak = 1
+			}
+			cooldownUntil := now.Add(r.config.Benchmark.FailureCooldown.Duration()).UTC()
+			if stats.CooldownUntil.Before(cooldownUntil) {
+				stats.CooldownUntil = cooldownUntil
+			}
+			state.Nodes[address] = stats
+		}
+		return nil
+	})
+}
+
 // verifyCloudflareDomain 要求物理 DNS 返回的全部地址都属于当前可信网段快照，并返回可审计地址。
 func (r *Runner) verifyCloudflareDomain(ctx context.Context, snapshot ranges.Snapshot, domain string) ([]netip.Addr, error) {
 	addresses, err := r.domainResolver.Resolve(ctx, domain)
@@ -925,7 +1127,7 @@ func (r *Runner) verifyCloudflareDomain(ctx context.Context, snapshot ranges.Sna
 }
 
 // allocateDomainMappings 先按手动配置顺序、再按自动发现顺序消费互不重复的兼容地址。
-func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Snapshot, results []benchmark.Result, state store.State) ([]proxy.DomainMapping, []DomainAllocationResult, []string) {
+func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Snapshot, results []benchmark.Result, state store.State, excludedAddresses ...map[string]map[string]struct{}) ([]proxy.DomainMapping, []DomainAllocationResult, []string) {
 	if !r.config.Acceleration.Enabled {
 		return nil, nil, nil
 	}
@@ -969,9 +1171,14 @@ func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Sna
 	}
 	var mappings []proxy.DomainMapping
 	allocations := make([]DomainAllocationResult, 0, len(candidatesByDomain))
-	nextCandidate := 0
+	assignedCandidates := make(map[string]struct{}, len(candidatesByDomain))
+	preflightRejectedCandidates := make(map[string]struct{})
 	for _, candidate := range candidatesByDomain {
 		allocation := DomainAllocationResult{Domain: candidate.domain, Source: candidate.source}
+		excludedForDomain := map[string]struct{}{}
+		if len(excludedAddresses) > 0 && excludedAddresses[0] != nil {
+			excludedForDomain = excludedAddresses[0][candidate.domain]
+		}
 		resolvedAddresses, err := r.verifyCloudflareDomain(ctx, snapshot, candidate.domain)
 		if err != nil {
 			allocation.Error = err.Error()
@@ -984,14 +1191,24 @@ func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Sna
 		}
 		var lastError error
 		assigned := false
-		for nextCandidate < len(candidates) {
-			mapping := proxy.DomainMapping{Domain: candidate.domain, Addresses: []string{candidates[nextCandidate]}}
-			nextCandidate++
+		for _, candidateAddress := range candidates {
+			if _, alreadyAssigned := assignedCandidates[candidateAddress]; alreadyAssigned {
+				continue
+			}
+			if _, rejected := preflightRejectedCandidates[candidateAddress]; rejected {
+				continue
+			}
+			if _, excluded := excludedForDomain[candidateAddress]; excluded {
+				continue
+			}
+			mapping := proxy.DomainMapping{Domain: candidate.domain, Addresses: []string{candidateAddress}}
 			if err := r.domainVerifier.VerifyPreflight(ctx, []proxy.DomainMapping{mapping}); err != nil {
 				lastError = err
+				preflightRejectedCandidates[candidateAddress] = struct{}{}
 				continue
 			}
 			mappings = append(mappings, mapping)
+			assignedCandidates[candidateAddress] = struct{}{}
 			allocation.AssignedAddress = mapping.Addresses[0]
 			allocation.PreflightVerified = true
 			assigned = true

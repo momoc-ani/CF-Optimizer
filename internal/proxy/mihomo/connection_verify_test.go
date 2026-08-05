@@ -55,6 +55,27 @@ func TestVerifyWithTransientRetryDoesNotRetryCanceledParent(t *testing.T) {
 	}
 }
 
+func TestVerifyWithTransientRetryWindowRetriesUnpropagatedMapping(t *testing.T) {
+	attempts := 0
+	err := verifyWithTransientRetryWindow(context.Background(), time.Second, time.Second, time.Nanosecond, 2, func(context.Context) error {
+		attempts++
+		if attempts == 1 {
+			return &mappingNotPropagatedError{err: errors.New("mapping is still propagating")}
+		}
+		return nil
+	})
+	if err != nil || attempts != 2 {
+		t.Fatalf("mapping propagation failure was not retried: attempts=%d error=%v", attempts, err)
+	}
+}
+
+func TestMappingNotPropagatedErrorIsClassifiedAsTransient(t *testing.T) {
+	err := &mappingNotPropagatedError{err: errors.New("Mihomo did not expose an active DIRECT connection")}
+	if !isTransientVerificationError(err) {
+		t.Fatal("mapping propagation error must be retriable")
+	}
+}
+
 func TestReadMappedHTTPSResponseCompletesBeforeConnectionEvidence(t *testing.T) {
 	request, err := http.NewRequest(http.MethodHead, "https://ani.example/", nil)
 	if err != nil {

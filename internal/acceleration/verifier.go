@@ -21,29 +21,60 @@ const (
 	maximumPreflightBody             = 64 << 10
 	appliedVerificationMaxAttempts   = 4
 	appliedVerificationRetryInterval = 250 * time.Millisecond
+	appliedVerificationMaxBackoff    = 4 * time.Second
 )
 
 type domainRequestFunc func(context.Context, string, string) (string, error)
 
+// VerificationOptions 定义预检和应用后域名映射验证的独立时间窗口。
+type VerificationOptions struct {
+	PreflightTimeout time.Duration
+	ApplyTimeout     time.Duration
+	AttemptTimeout   time.Duration
+	RetryInterval    time.Duration
+	MaxAttempts      int
+}
+
 // Verifier 通过绑定物理接口的 HTTPS 请求验证 SNI、Host、目标地址和系统映射。
 type Verifier struct {
-	dial                 cfnetwork.DialContextFunc
-	timeout              time.Duration
-	requestConnection    domainRequestFunc
-	appliedMaxAttempts   int
-	appliedRetryInterval time.Duration
+	dial                  cfnetwork.DialContextFunc
+	timeout               time.Duration
+	appliedTimeout        time.Duration
+	appliedAttemptTimeout time.Duration
+	requestConnection     domainRequestFunc
+	appliedMaxAttempts    int
+	appliedRetryInterval  time.Duration
 }
 
 // NewVerifier 创建不读取任何代理环境变量的域名映射验证器。
 func NewVerifier(dial cfnetwork.DialContextFunc, timeout time.Duration) (*Verifier, error) {
-	if dial == nil || timeout <= 0 {
-		return nil, errors.New("domain verifier dialer and positive timeout are required")
+	return NewVerifierWithOptions(dial, VerificationOptions{
+		PreflightTimeout: timeout,
+		ApplyTimeout:     timeout,
+		AttemptTimeout:   timeout,
+		RetryInterval:    appliedVerificationRetryInterval,
+		MaxAttempts:      appliedVerificationMaxAttempts,
+	})
+}
+
+// NewVerifierWithOptions 创建具有独立预检和应用验证窗口的域名映射验证器。
+func NewVerifierWithOptions(dial cfnetwork.DialContextFunc, options VerificationOptions) (*Verifier, error) {
+	if dial == nil || options.PreflightTimeout <= 0 || options.ApplyTimeout <= 0 || options.AttemptTimeout <= 0 || options.RetryInterval <= 0 {
+		return nil, errors.New("domain verifier dialer and positive verification options are required")
+	}
+	if options.AttemptTimeout > options.ApplyTimeout {
+		return nil, errors.New("domain verifier attempt timeout must not exceed apply timeout")
+	}
+	if options.MaxAttempts < 1 || options.MaxAttempts > 20 {
+		return nil, errors.New("domain verifier max attempts must be between 1 and 20")
 	}
 	verifier := &Verifier{
-		dial:                 dial,
-		timeout:              timeout,
-		appliedMaxAttempts:   appliedVerificationMaxAttempts,
-		appliedRetryInterval: appliedVerificationRetryInterval,
+		dial:                  dial,
+		timeout:               options.PreflightTimeout,
+		appliedTimeout:        options.ApplyTimeout,
+		appliedAttemptTimeout: options.AttemptTimeout,
+		appliedMaxAttempts:    options.MaxAttempts,
+		appliedRetryInterval:  options.RetryInterval,
 	}
 	verifier.requestConnection = verifier.request
 	return verifier, nil
@@ -55,10 +86,13 @@ func (v *Verifier) VerifyPreflight(ctx context.Context, mappings []proxy.DomainM
 		for _, rawAddress := range mapping.Addresses {
 			address, err := netip.ParseAddr(rawAddress)
 			if err != nil {
-				return &proxy.DomainVerificationError{Domain: mapping.Domain, Err: err}
+				return &proxy.DomainVerificationError{Domain: mapping.Domain, Address: rawAddress, Kind: proxy.DomainVerificationCandidateUnreachable, Err: err}
 			}
-			if _, err := v.requestConnection(ctx, mapping.Domain, net.JoinHostPort(address.String(), "443")); err != nil {
-				return &proxy.DomainVerificationError{Domain: mapping.Domain, Err: fmt.Errorf("preflight via %s: %w", address, err)}
+			requestContext, cancel := context.WithTimeout(ctx, v.timeout)
+			_, requestErr := v.requestConnection(requestContext, mapping.Domain, net.JoinHostPort(address.String(), "443"))
+			cancel()
+			if requestErr != nil {
+				return &proxy.DomainVerificationError{Domain: mapping.Domain, Address: address.String(), Kind: proxy.DomainVerificationCandidateUnreachable, Err: fmt.Errorf("preflight via %s: %w", address, requestErr)}
 			}
 		}
 	}
@@ -69,7 +103,11 @@ func (v *Verifier) VerifyPreflight(ctx context.Context, mappings []proxy.DomainM
 func (v *Verifier) VerifyApplied(ctx context.Context, mappings []proxy.DomainMapping) error {
 	for _, mapping := range mappings {
 		if err := v.verifyAppliedMapping(ctx, mapping); err != nil {
-			return &proxy.DomainVerificationError{Domain: mapping.Domain, Err: err}
+			var verificationErr *proxy.DomainVerificationError
+			if errors.As(err, &verificationErr) {
+				return verificationErr
+			}
+			return &proxy.DomainVerificationError{Domain: mapping.Domain, Kind: proxy.DomainVerificationCandidateUnreachable, Err: err}
 		}
 	}
 	return nil
@@ -77,27 +115,59 @@ func (v *Verifier) VerifyApplied(ctx context.Context, mappings []proxy.DomainMap
 
 // verifyAppliedMapping 在单个总超时窗口内重试系统映射，吸收 Hosts 更新后的短暂解析缓存延迟。
 func (v *Verifier) verifyAppliedMapping(ctx context.Context, mapping proxy.DomainMapping) error {
-	verificationContext, cancel := context.WithTimeout(ctx, v.timeout)
+	verificationContext, cancel := context.WithTimeout(ctx, v.appliedTimeout)
 	defer cancel()
 	address := net.JoinHostPort(mapping.Domain, "443")
+	candidateAddress := ""
+	if len(mapping.Addresses) > 0 {
+		candidateAddress = mapping.Addresses[0]
+	}
 	var lastErr error
+	lastKind := proxy.DomainVerificationCandidateUnreachable
 	for attempt := 1; attempt <= v.appliedMaxAttempts; attempt++ {
-		remote, err := v.requestConnection(verificationContext, mapping.Domain, address)
+		attemptContext, attemptCancel := context.WithTimeout(verificationContext, v.appliedAttemptTimeout)
+		remote, err := v.requestConnection(attemptContext, mapping.Domain, address)
+		attemptCancel()
 		if err != nil {
-			lastErr = fmt.Errorf("verify applied mapping: %w", err)
+			lastKind = proxy.DomainVerificationCandidateUnreachable
+			lastErr = fmt.Errorf("candidate %s HTTPS connection unavailable: %w", candidateAddress, err)
 		} else if mappingContainsAddress(mapping, remote) {
 			return nil
 		} else {
+			lastKind = proxy.DomainVerificationMappingNotPropagated
 			lastErr = fmt.Errorf("connected to %s instead of an optimized address", remote)
 		}
 		if attempt == v.appliedMaxAttempts {
 			break
 		}
-		if err := waitForAppliedRetry(verificationContext, v.appliedRetryInterval); err != nil {
-			return errors.Join(lastErr, fmt.Errorf("wait for applied mapping propagation: %w", err))
+		if err := waitForAppliedRetry(verificationContext, appliedRetryInterval(v.appliedRetryInterval, attempt)); err != nil {
+			break
 		}
 	}
-	return lastErr
+	if lastErr == nil {
+		lastErr = verificationContext.Err()
+	}
+	return &proxy.DomainVerificationError{
+		Domain: mapping.Domain, Address: candidateAddress, Kind: lastKind, Err: lastErr,
+	}
+}
+
+// appliedRetryInterval 使用指数退避限制重复请求密度，避免在总窗口内挤压请求。
+func appliedRetryInterval(base time.Duration, attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	interval := base
+	for step := 1; step < attempt && interval < appliedVerificationMaxBackoff; step++ {
+		if interval > appliedVerificationMaxBackoff/2 {
+			return appliedVerificationMaxBackoff
+		}
+		interval *= 2
+	}
+	if interval > appliedVerificationMaxBackoff {
+		return appliedVerificationMaxBackoff
+	}
+	return interval
 }
 
 // mappingContainsAddress 判断真实远端是否属于当前域名允许的优选地址集合。
@@ -124,8 +194,12 @@ func waitForAppliedRetry(ctx context.Context, interval time.Duration) error {
 
 // request 直连指定地址执行最小 HTTPS 请求，并返回握手后的真实远端 IP。
 func (v *Verifier) request(ctx context.Context, domain, address string) (string, error) {
-	requestContext, cancel := context.WithTimeout(ctx, v.timeout)
-	defer cancel()
+	requestContext := ctx
+	var cancel context.CancelFunc
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		requestContext, cancel = context.WithTimeout(ctx, v.timeout)
+		defer cancel()
+	}
 	connection, err := v.dial(requestContext, "tcp", address)
 	if err != nil {
 		return "", err

@@ -324,6 +324,10 @@ export interface AppConfig {
     auto_apply: boolean;
     discovery_interval: string;
     max_discovered_domains: number;
+    apply_verification_timeout: string;
+    apply_attempt_timeout: string;
+    apply_retry_interval: string;
+    apply_max_attempts: number;
   };
   proxy: Record<string, unknown>;
   hosts: { enabled: boolean; path: string; domains: string[] };

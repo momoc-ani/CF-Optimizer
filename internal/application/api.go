@@ -418,7 +418,7 @@ func (a *API) desiredConfig() (config.Config, error) {
 	if err != nil {
 		return config.Config{}, err
 	}
-	return persisted, nil
+	return mergeDetectedMihomoConfig(persisted, view.Config, a.runtime.mihomoAutoDetected), nil
 }
 
 func (a *API) tailLogs(raw json.RawMessage) ([]string, error) {

@@ -73,13 +73,17 @@ type Config struct {
 
 // AccelerationConfig 定义精确域名加速、自动发现和自动应用边界。
 type AccelerationConfig struct {
-	Enabled              bool     `yaml:"enabled" json:"enabled"`
-	ManualDomains        []string `yaml:"manual_domains" json:"manual_domains"`
-	ExcludedDomains      []string `yaml:"excluded_domains" json:"excluded_domains"`
-	AutoDiscover         bool     `yaml:"auto_discover" json:"auto_discover"`
-	AutoApply            bool     `yaml:"auto_apply" json:"auto_apply"`
-	DiscoveryInterval    Duration `yaml:"discovery_interval" json:"discovery_interval"`
-	MaxDiscoveredDomains int      `yaml:"max_discovered_domains" json:"max_discovered_domains"`
+	Enabled                  bool     `yaml:"enabled" json:"enabled"`
+	ManualDomains            []string `yaml:"manual_domains" json:"manual_domains"`
+	ExcludedDomains          []string `yaml:"excluded_domains" json:"excluded_domains"`
+	AutoDiscover             bool     `yaml:"auto_discover" json:"auto_discover"`
+	AutoApply                bool     `yaml:"auto_apply" json:"auto_apply"`
+	DiscoveryInterval        Duration `yaml:"discovery_interval" json:"discovery_interval"`
+	MaxDiscoveredDomains     int      `yaml:"max_discovered_domains" json:"max_discovered_domains"`
+	ApplyVerificationTimeout Duration `yaml:"apply_verification_timeout" json:"apply_verification_timeout"`
+	ApplyAttemptTimeout      Duration `yaml:"apply_attempt_timeout" json:"apply_attempt_timeout"`
+	ApplyRetryInterval       Duration `yaml:"apply_retry_interval" json:"apply_retry_interval"`
+	ApplyMaxAttempts         int      `yaml:"apply_max_attempts" json:"apply_max_attempts"`
 }
 
 // ScheduleConfig 定义周期任务与网络变化检测行为。
@@ -228,6 +232,8 @@ func Default() Config {
 		Acceleration: AccelerationConfig{
 			Enabled: true, ManualDomains: []string{}, ExcludedDomains: []string{}, AutoDiscover: true, AutoApply: true,
 			DiscoveryInterval: Duration(15 * time.Second), MaxDiscoveredDomains: 1000,
+			ApplyVerificationTimeout: Duration(20 * time.Second), ApplyAttemptTimeout: Duration(5 * time.Second),
+			ApplyRetryInterval: Duration(500 * time.Millisecond), ApplyMaxAttempts: 4,
 		},
 		Hosts:   HostsConfig{Path: defaultHostsPath()},
 		History: HistoryConfig{SummaryRetention: Duration(30 * 24 * time.Hour), DetailRetention: Duration(7 * 24 * time.Hour), MaxRuns: 500},
@@ -338,13 +344,22 @@ func (c Config) Validate() error {
 		"ranges.refresh_interval": c.Ranges.RefreshInterval,
 		"ranges.stale_after":      c.Ranges.StaleAfter, "benchmark.connect_timeout": c.Benchmark.ConnectTimeout,
 		"benchmark.latency_limit": c.Benchmark.LatencyLimit, "benchmark.tls_timeout": c.Benchmark.TLSTimeout,
-		"benchmark.failure_cooldown":      c.Benchmark.FailureCooldown,
-		"network.command_timeout":         c.Network.CommandTimeout,
-		"acceleration.discovery_interval": c.Acceleration.DiscoveryInterval,
+		"benchmark.failure_cooldown":              c.Benchmark.FailureCooldown,
+		"network.command_timeout":                 c.Network.CommandTimeout,
+		"acceleration.discovery_interval":         c.Acceleration.DiscoveryInterval,
+		"acceleration.apply_verification_timeout": c.Acceleration.ApplyVerificationTimeout,
+		"acceleration.apply_attempt_timeout":      c.Acceleration.ApplyAttemptTimeout,
+		"acceleration.apply_retry_interval":       c.Acceleration.ApplyRetryInterval,
 	} {
 		if value.Duration() <= 0 {
 			return fmt.Errorf("%s must be positive", name)
 		}
+	}
+	if c.Acceleration.ApplyMaxAttempts < 1 || c.Acceleration.ApplyMaxAttempts > 20 {
+		return errors.New("acceleration.apply_max_attempts must be between 1 and 20")
+	}
+	if c.Acceleration.ApplyAttemptTimeout > c.Acceleration.ApplyVerificationTimeout {
+		return errors.New("acceleration.apply_attempt_timeout must not exceed apply_verification_timeout")
 	}
 	for name, raw := range map[string]string{"ranges.api_url": c.Ranges.APIURL, "ranges.ipv4_url": c.Ranges.IPv4URL, "ranges.ipv6_url": c.Ranges.IPv6URL} {
 		if err := validateHTTPURL(raw); err != nil {

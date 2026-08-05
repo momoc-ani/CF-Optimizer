@@ -61,13 +61,17 @@ type receiptPayload struct {
 
 // Adapter 管理独立 Mihomo rule-provider 文件，并通过控制 API 重载和验证。
 type Adapter struct {
-	config             config.MihomoConfig
-	controller         *url.URL
-	endpoint           string
-	client             *http.Client
-	connectionVerifier func(context.Context, []proxy.DomainMapping) error
-	benchmarkDial      cfnetwork.DialContextFunc
-	benchmarkInterface string
+	config                     config.MihomoConfig
+	controller                 *url.URL
+	endpoint                   string
+	client                     *http.Client
+	connectionVerifier         func(context.Context, []proxy.DomainMapping) error
+	benchmarkDial              cfnetwork.DialContextFunc
+	benchmarkInterface         string
+	verificationTimeout        time.Duration
+	verificationAttemptTimeout time.Duration
+	verificationRetryInterval  time.Duration
+	verificationMaxAttempts    int
 }
 
 // New 创建强制禁用系统代理的 Mihomo 控制 API 客户端。
@@ -84,9 +88,30 @@ func New(cfg config.MihomoConfig) (*Adapter, error) {
 			return dialer.DialContext(ctx, unixControllerScheme, socketPath)
 		}
 	}
-	adapter := &Adapter{config: cfg, controller: controller, endpoint: endpoint, client: &http.Client{Transport: transport, Timeout: cfg.Timeout.Duration()}}
+	adapter := &Adapter{
+		config: cfg, controller: controller, endpoint: endpoint,
+		client:              &http.Client{Transport: transport, Timeout: cfg.Timeout.Duration()},
+		verificationTimeout: cfg.Timeout.Duration(), verificationAttemptTimeout: cfg.Timeout.Duration(),
+		verificationRetryInterval: mappedConnectionVerificationRetryInterval, verificationMaxAttempts: mappedConnectionVerificationAttempts,
+	}
 	adapter.connectionVerifier = adapter.verifyMappedConnections
 	return adapter, nil
+}
+
+// SetConnectionVerificationWindow 设置域名映射的 Mihomo 应用验证窗口，不改变普通控制 API 超时。
+func (a *Adapter) SetConnectionVerificationWindow(total, attempt, retry time.Duration, maxAttempts int) {
+	if total > 0 {
+		a.verificationTimeout = total
+	}
+	if attempt > 0 && (total <= 0 || attempt <= total) {
+		a.verificationAttemptTimeout = attempt
+	}
+	if retry > 0 {
+		a.verificationRetryInterval = retry
+	}
+	if maxAttempts > 0 {
+		a.verificationMaxAttempts = maxAttempts
+	}
 }
 
 // parseControllerEndpoint 将受支持的控制端转换为 HTTP 请求地址和可选 Unix Socket 路径。
@@ -320,7 +345,7 @@ func (a *Adapter) Verify(ctx context.Context, policy proxy.DirectPolicy, receipt
 			return errors.New("Mihomo managed metadata verification failed")
 		}
 	}
-	deadline := time.Now().Add(a.config.Timeout.Duration())
+	deadline := time.Now().Add(a.verificationTimeout)
 	for {
 		if err := a.verifyOnce(ctx, payload.Rules); err == nil {
 			if len(policy.DomainMappings) == 0 {

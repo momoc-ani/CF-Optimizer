@@ -55,6 +55,8 @@ type Runtime struct {
 	DomainResolver    *acceleration.PhysicalResolver
 	DomainVerifier    *acceleration.Verifier
 	Logger            *slog.Logger
+	// mihomoAutoDetected 标记当前运行时是否使用了自动探测到的 Mihomo 端点。
+	mihomoAutoDetected bool
 }
 
 // RuntimeView 提供可并发读取的当前运行配置和执行依赖快照。
@@ -106,6 +108,8 @@ func Build(cfg config.Config, configPath string, logger *slog.Logger) (*Runtime,
 		return nil, err
 	}
 	managedConfig := cfg
+	runtimeConfig := cfg
+	mihomoAutoDetected := false
 	if cfg.Network.ManageRoutes {
 		managedConfig.Hosts.Enabled = cfg.Acceleration.Enabled
 		if cfg.Proxy.AutoDetect {
@@ -113,6 +117,8 @@ func Build(cfg config.Config, configPath string, logger *slog.Logger) (*Runtime,
 			if detectErr == nil && detection.Present {
 				if detectedConfig, configureErr := mihomo.ConfigureDetected(cfg.Proxy.Mihomo, detection, cfg.DataDir); configureErr == nil {
 					managedConfig.Proxy.Mihomo = detectedConfig
+					runtimeConfig.Proxy.Mihomo = detectedConfig
+					mihomoAutoDetected = true
 				} else {
 					logger.Warn("已发现 Mihomo，但无法建立安全管理路径", "component", "proxy", "adapter", "mihomo", "error", configureErr)
 				}
@@ -129,7 +135,13 @@ func Build(cfg config.Config, configPath string, logger *slog.Logger) (*Runtime,
 	if err != nil {
 		return nil, err
 	}
-	domainVerifier, err := acceleration.NewVerifier(directDial, cfg.Benchmark.TLSTimeout.Duration())
+	domainVerifier, err := acceleration.NewVerifierWithOptions(directDial, acceleration.VerificationOptions{
+		PreflightTimeout: managedConfig.Benchmark.TLSTimeout.Duration(),
+		ApplyTimeout:     managedConfig.Acceleration.ApplyVerificationTimeout.Duration(),
+		AttemptTimeout:   managedConfig.Acceleration.ApplyAttemptTimeout.Duration(),
+		RetryInterval:    managedConfig.Acceleration.ApplyRetryInterval.Duration(),
+		MaxAttempts:      managedConfig.Acceleration.ApplyMaxAttempts,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -144,9 +156,9 @@ func Build(cfg config.Config, configPath string, logger *slog.Logger) (*Runtime,
 	}
 	runner.SetDomainResolver(domainResolver)
 	return &Runtime{
-		Config: cfg, ConfigPath: configPath, Store: stateStore, Ranges: rangeCatalog, Runner: runner,
+		Config: runtimeConfig, ConfigPath: configPath, Store: stateStore, Ranges: rangeCatalog, Runner: runner,
 		Routes: routeController, RouteBackend: routeBackend, PhysicalPath: physicalPath,
-		DirectDial: directDial, ProxyCoordinator: proxyCoordinator, Logger: logger,
+		DirectDial: directDial, ProxyCoordinator: proxyCoordinator, Logger: logger, mihomoAutoDetected: mihomoAutoDetected,
 		DomainResolver: domainResolver, DomainVerifier: domainVerifier,
 	}, nil
 }
@@ -576,7 +588,13 @@ func (r *Runtime) BuildManagedSession(physicalPath cfnetwork.PhysicalPath, detec
 	if err != nil {
 		return RuntimeSession{}, err
 	}
-	domainVerifier, err := acceleration.NewVerifier(directDial, managedConfig.Benchmark.TLSTimeout.Duration())
+	domainVerifier, err := acceleration.NewVerifierWithOptions(directDial, acceleration.VerificationOptions{
+		PreflightTimeout: managedConfig.Benchmark.TLSTimeout.Duration(),
+		ApplyTimeout:     managedConfig.Acceleration.ApplyVerificationTimeout.Duration(),
+		AttemptTimeout:   managedConfig.Acceleration.ApplyAttemptTimeout.Duration(),
+		RetryInterval:    managedConfig.Acceleration.ApplyRetryInterval.Duration(),
+		MaxAttempts:      managedConfig.Acceleration.ApplyMaxAttempts,
+	})
 	if err != nil {
 		return RuntimeSession{}, err
 	}
@@ -669,6 +687,15 @@ func configForDetectedAdapters(cfg config.Config, detections map[string]proxy.De
 	cfg.Proxy.External.Enabled = cfg.Proxy.External.Enabled && isPresent(cleanupAdapterExternal)
 	cfg.Hosts.Enabled = cfg.Acceleration.Enabled && isPresent(cleanupAdapterHosts)
 	return cfg
+}
+
+// mergeDetectedMihomoConfig 将自动探测到的有效控制端合并到界面配置快照，不覆盖用户的其他持久化设置。
+func mergeDetectedMihomoConfig(persisted, effective config.Config, autoDetected bool) config.Config {
+	if !autoDetected || !effective.Proxy.Mihomo.Enabled || !persisted.Proxy.AutoDetect {
+		return persisted
+	}
+	persisted.Proxy.Mihomo = effective.Proxy.Mihomo
+	return persisted
 }
 
 // BuildCleanup 创建不依赖当前物理出口的最小运行时，仅用于卸载前恢复持久化策略。
@@ -768,6 +795,12 @@ func buildProxyCoordinator(cfg config.Config, physicalPath cfnetwork.PhysicalPat
 		if err != nil {
 			return nil, err
 		}
+		adapter.SetConnectionVerificationWindow(
+			cfg.Acceleration.ApplyVerificationTimeout.Duration(),
+			cfg.Acceleration.ApplyAttemptTimeout.Duration(),
+			cfg.Acceleration.ApplyRetryInterval.Duration(),
+			cfg.Acceleration.ApplyMaxAttempts,
+		)
 		if benchmarkDial != nil {
 			adapter.SetBenchmarkDialer(physicalPath.Interface, benchmarkDial)
 		}

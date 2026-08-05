@@ -89,6 +89,10 @@ acceleration:
   auto_apply: false
   discovery_interval: 15s
   max_discovered_domains: 1000
+  apply_verification_timeout: 20s
+  apply_attempt_timeout: 5s
+  apply_retry_interval: 500ms
+  apply_max_attempts: 4
 
 hosts:
   enabled: false

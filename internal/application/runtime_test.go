@@ -81,6 +81,25 @@ func TestConfigForDetectedAdaptersUsesManageableDiscoveredMihomo(t *testing.T) {
 	}
 }
 
+func TestMergeDetectedMihomoConfigExposesEffectiveController(t *testing.T) {
+	persisted := config.Default()
+	persisted.Proxy.AutoDetect = true
+	effective := persisted
+	effective.Proxy.Mihomo.Enabled = true
+	effective.Proxy.Mihomo.Controller = "http://127.0.0.1:9097"
+	effective.Proxy.Mihomo.ProviderFile = filepath.Join(t.TempDir(), "provider.yaml")
+	effective.Proxy.Mihomo.ReloadConfig = filepath.Join(t.TempDir(), "config.yaml")
+
+	merged := mergeDetectedMihomoConfig(persisted, effective, true)
+	if !merged.Proxy.Mihomo.Enabled || merged.Proxy.Mihomo.Controller != "http://127.0.0.1:9097" || merged.Proxy.Mihomo.ProviderFile != effective.Proxy.Mihomo.ProviderFile {
+		t.Fatalf("effective Mihomo endpoint was not exposed: %#v", merged.Proxy.Mihomo)
+	}
+	unchanged := mergeDetectedMihomoConfig(persisted, effective, false)
+	if unchanged.Proxy.Mihomo.Enabled || unchanged.Proxy.Mihomo.Controller != persisted.Proxy.Mihomo.Controller {
+		t.Fatalf("disabled auto-detection must not change persisted config view: %#v", unchanged.Proxy.Mihomo)
+	}
+}
+
 func TestAllCloudflareAddressesRejectsMixedOwnership(t *testing.T) {
 	snapshot := ranges.Snapshot{IPv4: []string{"104.16.0.0/13"}, IPv6: []string{"2606:4700::/32"}}
 	if !allCloudflareAddresses(snapshot, []netip.Addr{netip.MustParseAddr("104.17.158.152"), netip.MustParseAddr("2606:4700::1")}) {
