@@ -38,6 +38,11 @@ install -m 0755 "$repo_root/packaging/macos/uninstall.sh" "$root_dir/usr/local/s
 install -m 0755 "$repo_root/packaging/macos/scripts/preinstall" "$scripts_dir/preinstall"
 install -m 0755 "$repo_root/packaging/macos/scripts/postinstall" "$scripts_dir/postinstall"
 
+app_info_plist="$root_dir/Applications/CF Optimizer.app/Contents/Info.plist"
+/usr/bin/plutil -replace CFBundleShortVersionString -string "$version" "$app_info_plist"
+/usr/bin/plutil -replace CFBundleVersion -string "$version" "$app_info_plist"
+/usr/bin/plutil -lint "$app_info_plist" >/dev/null
+
 if [[ -n "${MACOS_APP_SIGN_IDENTITY:-}" ]]; then
   codesign --force --options runtime --timestamp --sign "$MACOS_APP_SIGN_IDENTITY" \
     "$root_dir/usr/local/bin/cf-optimizer" "$root_dir/usr/local/bin/cf-optimizerd"
