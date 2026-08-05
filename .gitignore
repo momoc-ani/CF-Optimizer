@@ -1,6 +1,7 @@
 # Build output
 /dist/
 /bin/
+/.tmp/
 *.exe
 *.dmg
 *.deb
