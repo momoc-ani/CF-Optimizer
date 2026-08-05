@@ -17,6 +17,7 @@ func TestInstallerRepairsServiceAfterFilesAreReplaced(t *testing.T) {
 		"procedure ConfigureService;",
 		"install --daemon",
 		"(ExitCode <> 0)",
+		"CloseApplications=force",
 		`Source: "..\..\config.example.yaml"; DestDir: "{commonappdata}\CF Optimizer"; DestName: "config.yaml"; Flags: ignoreversion onlyifdoesntexist`,
 	} {
 		if !strings.Contains(script, expected) {

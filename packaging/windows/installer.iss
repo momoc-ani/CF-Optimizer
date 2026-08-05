@@ -37,7 +37,7 @@ UninstallDisplayIcon={app}\cf-optimizer-ui.exe
 OutputDir={#OutputDir}
 OutputBaseFilename=cf-optimizer-{#MyVersion}-windows-{#MyArch}-setup
 VersionInfoVersion={#MyVersion}
-CloseApplications=yes
+CloseApplications=force
 RestartApplications=no
 
 [Files]
