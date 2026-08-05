@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { BenchmarkResult, LatestBenchmark, RunReport } from '../api/types';
-import { selectBenchmarkSnapshot } from './benchmarkSnapshot';
+import { selectBenchmarkSnapshot, selectTopBenchmarkResults } from './benchmarkSnapshot';
 
 const result = (ip: string, score: number): BenchmarkResult => ({
   ip,
@@ -66,5 +66,19 @@ describe('selectBenchmarkSnapshot', () => {
     };
     const live = report('old', '2026-08-05T00:20:00Z', result('104.25.250.104', 93.31));
     expect(selectBenchmarkSnapshot(live, persisted)?.runId).toBe('scheduled');
+  });
+});
+
+describe('selectTopBenchmarkResults', () => {
+  it('按 download_top 截取前 N 个结果并保留评分顺序', () => {
+    const results = [result('104.25.241.29', 95), result('104.25.250.104', 93), result('172.66.44.18', 90)];
+    expect(selectTopBenchmarkResults(results, 2).map((item) => item.ip)).toEqual(['104.25.241.29', '104.25.250.104']);
+  });
+
+  it('限制值超出结果数量时返回全部结果，非法值返回空列表', () => {
+    const results = [result('104.25.241.29', 95), result('104.25.250.104', 93)];
+    expect(selectTopBenchmarkResults(results, 20)).toHaveLength(2);
+    expect(selectTopBenchmarkResults(results, 0)).toEqual([]);
+    expect(selectTopBenchmarkResults(results, Number.NaN)).toEqual([]);
   });
 });

@@ -4,8 +4,8 @@ import type { ColumnDef } from '@tanstack/react-table';
 import ReactECharts from 'echarts-for-react';
 import { Filter, Play, RotateCcw, Square } from 'lucide-react';
 import type { BenchmarkResult } from '../api/types';
-import { useLatestBenchmark, useStatus } from '../api/hooks';
-import { selectBenchmarkSnapshot } from '../lib/benchmarkSnapshot';
+import { useConfig, useLatestBenchmark, useStatus } from '../api/hooks';
+import { selectBenchmarkSnapshot, selectTopBenchmarkResults } from '../lib/benchmarkSnapshot';
 import { formatDate, formatDuration, formatMbps, formatPercent, formatScore } from '../lib/format';
 import { shouldApplyPolicy } from '../lib/policyAvailability';
 import { useUIStore } from '../state/ui';
@@ -17,6 +17,7 @@ import { useRun } from '../hooks/useRun';
 export function BenchmarkPage() {
   const run = useRun();
   const status = useStatus();
+  const config = useConfig();
   const latestBenchmark = useLatestBenchmark(status.data?.state.last_ended_at);
   const filter = useUIStore((state) => state.benchmarkFilter);
   const setFilter = useUIStore((state) => state.setBenchmarkFilter);
@@ -26,7 +27,9 @@ export function BenchmarkPage() {
   const policyAvailable = Boolean(status.data?.policy_available);
   const applyPolicy = shouldApplyPolicy(policyAvailable, policyRequested);
   const snapshot = useMemo(() => selectBenchmarkSnapshot(run.report, latestBenchmark.data), [latestBenchmark.data, run.report]);
-  const rows = useMemo(() => (snapshot?.results ?? []).filter((item) => (family === 'all' || item.family === Number(family)) && item.ip.toLowerCase().includes(filter.toLowerCase())), [family, filter, snapshot]);
+  const downloadTop = config.data?.benchmark.download_top ?? 20;
+  const topResults = useMemo(() => selectTopBenchmarkResults(snapshot?.results, downloadTop), [downloadTop, snapshot?.results]);
+  const rows = useMemo(() => topResults.filter((item) => (family === 'all' || item.family === Number(family)) && item.ip.toLowerCase().includes(filter.toLowerCase())), [family, filter, topResults]);
   const columns = useMemo<ColumnDef<BenchmarkResult>[]>(() => [
     { id: 'rank', header: '#', size: 44, enableSorting: false, cell: ({ row }) => <Text c="dimmed" className="tabular">{row.index + 1}</Text> },
     { accessorKey: 'ip', header: 'IP', size: 228, cell: ({ getValue }) => <Text ff="monospace" size="sm">{String(getValue())}</Text> },
@@ -48,7 +51,7 @@ export function BenchmarkPage() {
     series: [{ name: '评分', type: 'bar', data: rows.slice(0, 10).map((row) => row.score), itemStyle: { color: '#1677a6' } }, { name: '吞吐', type: 'line', yAxisIndex: 1, data: rows.slice(0, 10).map((row) => row.mbps ?? 0), itemStyle: { color: '#c47a12' } }],
   }), [rows]);
   const progress = run.event?.progress;
-  const qualified = snapshot?.results.filter((item) => item.qualified).length ?? 0;
+  const qualified = topResults.filter((item) => item.qualified).length;
   const currentPolicyVerified = Boolean(status.data?.state.current_ipv4?.policy_verified || status.data?.state.current_ipv6?.policy_verified);
   const reportMatchesSnapshot = Boolean(run.report && snapshot?.runId === run.report.id);
   const verifiedPolicy = Boolean((reportMatchesSnapshot && run.report?.policy_applied) || currentPolicyVerified);
@@ -69,10 +72,10 @@ export function BenchmarkPage() {
       <SimpleGrid cols={{ base: 2, md: 4 }} spacing="sm">
         <Metric label="阶段" value={run.event?.stage ?? (run.running ? '启动中' : snapshot ? '已完成' : '等待开始')} detail={run.event?.message ?? (snapshot ? `最近结果 ${formatDate(snapshot.finishedAt)}` : undefined)} accent="#1677a6" />
         <Metric label="进度" value={progress ? `${progress.completed} / ${progress.total}` : snapshot ? '已保存' : '—'} detail={progress ? `合格 ${progress.qualified}` : snapshot ? `合格 ${qualified}` : '尚无活动任务'} />
-        <Metric label="候选结果" value={snapshot?.results.length ?? 0} detail={`当前显示 ${rows.length}`} />
+        <Metric label="候选结果" value={topResults.length} detail={`前 ${downloadTop} 名 · 当前显示 ${rows.length}`} />
         <Metric label="策略" value={verifiedPolicy ? '已验证' : !policyAvailable ? '不可用' : applyPolicy ? '完成后应用' : '仅测速'} detail={verifiedPolicy ? '当前节点策略已有验证证据' : !policyAvailable ? '当前运行时没有已启用适配器' : '应用前不会修改系统'} accent={verifiedPolicy ? '#2b8a5a' : '#75808a'} />
       </SimpleGrid>
-      <Section title="候选结果" aside={snapshot && <Button variant="subtle" leftSection={<RotateCcw size={15} />} onClick={() => run.run({ force_range_refresh: false, apply_policy: false })}>仅复测</Button>}>
+      <Section title={`候选结果（前 ${downloadTop} 名）`} aside={snapshot && <Button variant="subtle" leftSection={<RotateCcw size={15} />} onClick={() => run.run({ force_range_refresh: false, apply_policy: false })}>仅复测</Button>}>
         {run.running && !snapshot ? <div className="running-placeholder"><div className="pulse-line" /><Text fw={600}>后台正在生成候选结果</Text><Text size="sm" c="dimmed">关闭此窗口不会停止任务；重新打开后会恢复当前阶段。</Text></div> : <DataTable columns={columns} data={rows} emptyTitle="尚无候选结果" emptyDetail="开始一次优选后，TCP、TLS 与下载指标会显示在这里。" minWidth={980} rowKey={(row) => row.ip} />}
       </Section>
       <Section title="前十名评分与吞吐">

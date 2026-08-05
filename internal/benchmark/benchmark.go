@@ -125,22 +125,24 @@ func (t *Tester) Run(ctx context.Context, addresses []netip.Addr, progress func(
 		return results[i].AvgLatency < results[j].AvgLatency
 	})
 	top := min(t.config.DownloadTop, qualified)
-	for i := 0; i < top; i++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+	downloadCompleted := 0
+	var downloadProgressMu sync.Mutex
+	if err := runConcurrentDownloadProbes(ctx, top, t.config.DownloadConcurrency, func(probeContext context.Context, index int) {
+		t.probeTLSAndDownload(probeContext, &results[index])
+		results[index].Score = Score(results[index], t.config.DownloadURL != "")
+		if progress == nil || probeContext.Err() != nil {
+			return
 		}
-		t.probeTLSAndDownload(ctx, &results[i])
-		results[i].Score = Score(results[i], t.config.DownloadURL != "")
-		if err := ctx.Err(); err != nil {
-			return nil, err
+		downloadProgressMu.Lock()
+		defer downloadProgressMu.Unlock()
+		downloadCompleted++
+		stage := StageTLS
+		if t.config.DownloadURL != "" {
+			stage = StageDownload
 		}
-		if progress != nil {
-			stage := StageTLS
-			if t.config.DownloadURL != "" {
-				stage = StageDownload
-			}
-			progress(Progress{Stage: stage, Completed: i + 1, Total: top, IP: results[i].IP.String(), Qualified: qualified})
-		}
+		progress(Progress{Stage: stage, Completed: downloadCompleted, Total: top, IP: results[index].IP.String(), Qualified: qualified})
+	}); err != nil {
+		return nil, err
 	}
 	for i := top; i < len(results); i++ {
 		results[i].Qualified = false
@@ -148,6 +150,48 @@ func (t *Tester) Run(ctx context.Context, addresses []netip.Addr, progress func(
 	}
 	sort.SliceStable(results, func(i, j int) bool { return results[i].Score > results[j].Score })
 	return results, nil
+}
+
+// runConcurrentDownloadProbes 使用受限 worker pool 执行 TLS/下载复筛，避免同时产生过多下载流量。
+func runConcurrentDownloadProbes(ctx context.Context, total, concurrency int, probe func(context.Context, int)) error {
+	if total <= 0 {
+		return nil
+	}
+	if concurrency < 1 {
+		return errors.New("download concurrency must be positive")
+	}
+	workerCount := min(total, concurrency)
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	for worker := 0; worker < workerCount; worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case index, ok := <-jobs:
+					if !ok {
+						return
+					}
+					probe(ctx, index)
+				}
+			}
+		}()
+	}
+	for index := 0; index < total; index++ {
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			workers.Wait()
+			return ctx.Err()
+		case jobs <- index:
+		}
+	}
+	close(jobs)
+	workers.Wait()
+	return ctx.Err()
 }
 
 func (t *Tester) testTCP(ctx context.Context, ip netip.Addr) Result {

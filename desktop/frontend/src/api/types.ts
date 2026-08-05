@@ -298,6 +298,7 @@ export interface AppConfig {
     latency_limit: string;
     loss_limit: number;
     download_top: number;
+    download_concurrency: number;
     download_url: string;
     tls_server_name: string;
     tls_timeout: string;

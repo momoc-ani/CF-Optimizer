@@ -29,6 +29,7 @@ benchmark:
   latency_limit: 300ms
   loss_limit: 0.25
   download_top: 20
+  download_concurrency: 5
   download_url: ""
   tls_server_name: speed.cloudflare.com
   tls_timeout: 5s

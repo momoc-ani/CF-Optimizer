@@ -1,18 +1,19 @@
-import { Alert, Button, Group, SimpleGrid, Stack, Text, ThemeIcon } from '@mantine/core';
+import { Alert, Button, Group, ScrollArea, SimpleGrid, Stack, Table, Text, ThemeIcon } from '@mantine/core';
 import { useMutation } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
 import { Activity, Cable, Clock3, Network, Play, Route, ShieldCheck } from 'lucide-react';
 import { request } from '../api/client';
-import { useHistory, useProxies, useRanges, useStatus } from '../api/hooks';
-import type { QuickStartMode, QuickStartPlan, Selection } from '../api/types';
-import { formatDate, formatScore } from '../lib/format';
+import { useConfig, useHistory, useLatestBenchmark, useProxies, useRanges, useStatus } from '../api/hooks';
+import type { BenchmarkResult, QuickStartMode, QuickStartPlan, Selection } from '../api/types';
+import { formatDate, formatDuration, formatMbps, formatScore } from '../lib/format';
 import { EmptyState, LoadingState, Metric, PageHeader, Section } from '../components/Page';
 import { StatusBadge } from '../components/StatusBadge';
 import { useRun } from '../hooks/useRun';
 import { QuickStartDialog } from '../components/QuickStartDialog';
 import { useUIStore } from '../state/ui';
 import { countCurrentVerifiedRoutes } from '../lib/routeSummary';
+import { selectTopBenchmarkResults } from '../lib/benchmarkSnapshot';
 import { describeQuickStartResult, formatRunEventDetail, formatRunEventTitle, presentLatestIPv4Decision, presentSchedule } from '../lib/overview';
 
 function SelectionRow({ title, selection, interfaceName }: { title: string; selection?: Selection; interfaceName?: string }) {
@@ -28,11 +29,33 @@ function SelectionRow({ title, selection, interfaceName }: { title: string; sele
   );
 }
 
+/** BenchmarkVerificationBadge 将测速阶段状态压缩成总览可扫描的验证结论。 */
+function BenchmarkVerificationBadge({ result }: { result: BenchmarkResult }) {
+  if (result.download_verified) return <StatusBadge label="下载已验证" tone="verified" />;
+  if (result.tls_verified) return <StatusBadge label="TLS 已验证" tone="verified" />;
+  if (result.qualified) return <StatusBadge label="TCP 合格" tone="pending" />;
+  return <StatusBadge label="未通过" tone="neutral" />;
+}
+
+/** LatestBenchmarkTable 展示最近成功保存结果的前 download_top 名。 */
+function LatestBenchmarkTable({ results }: { results: BenchmarkResult[] }) {
+  return (
+    <ScrollArea type="auto" className="table-scroll">
+      <Table striped highlightOnHover withRowBorders verticalSpacing="xs" miw={720} className="data-table">
+        <Table.Thead><Table.Tr><Table.Th>#</Table.Th><Table.Th>IP</Table.Th><Table.Th>平均延迟</Table.Th><Table.Th>吞吐</Table.Th><Table.Th>评分</Table.Th><Table.Th>验证</Table.Th></Table.Tr></Table.Thead>
+        <Table.Tbody>{results.map((result, index) => <Table.Tr key={result.ip}><Table.Td className="tabular">{index + 1}</Table.Td><Table.Td><Text ff="monospace" size="sm">{result.ip}</Text></Table.Td><Table.Td className="tabular">{formatDuration(result.avg_latency)}</Table.Td><Table.Td className="tabular">{formatMbps(result.mbps)}</Table.Td><Table.Td><Text fw={650} className="tabular">{formatScore(result.score)}</Text></Table.Td><Table.Td><BenchmarkVerificationBadge result={result} /></Table.Td></Table.Tr>)}</Table.Tbody>
+      </Table>
+    </ScrollArea>
+  );
+}
+
 export function OverviewPage() {
   const status = useStatus();
+  const config = useConfig();
   const proxies = useProxies();
   const ranges = useRanges();
   const history = useHistory();
+  const latestBenchmark = useLatestBenchmark(status.data?.state.last_ended_at);
   const run = useRun();
   const setPage = useUIStore((current) => current.setPage);
   const [isConfirming, setIsConfirming] = useState(false);
@@ -107,6 +130,8 @@ export function OverviewPage() {
   const verifiedRoutes = countCurrentVerifiedRoutes(state);
   const schedule = presentSchedule(status.data?.schedule, Boolean(state?.running), formatDate);
   const latestIPv4Decision = presentLatestIPv4Decision(history.data?.[0]);
+  const downloadTop = config.data?.benchmark.download_top ?? 20;
+  const latestResults = selectTopBenchmarkResults(latestBenchmark.data?.results, downloadTop);
   return (
     <Stack gap="lg">
       <PageHeader title="总览" description="后台服务、当前节点与已验证直连策略" actions={<Button leftSection={<Play size={16} />} loading={planMutation.isPending || run.running} onClick={() => void prepareQuickStart()}>一键优选</Button>} />
@@ -134,6 +159,10 @@ export function OverviewPage() {
             <div><Text size="xs" c="dimmed">切换决策</Text><Text fw={650}>{latestIPv4Decision.decision}</Text></div>
           </SimpleGrid>
         )}
+      </Section>
+
+      <Section title="上次优选测速结果" aside={latestBenchmark.data?.run_id && <Text size="xs" c="dimmed">前 {downloadTop} 名 · {formatDate(latestBenchmark.data.finished_at)}</Text>}>
+        {latestBenchmark.isLoading ? <LoadingState rows={3} /> : latestBenchmark.isError ? <Alert color="yellow" title="最近结果读取失败">{latestBenchmark.error.message}</Alert> : latestResults.length ? <LatestBenchmarkTable results={latestResults} /> : <EmptyState title="暂无已保存测速结果" detail="完成一次成功优选后，这里会保留最近一轮的前 N 名结果。" />}
       </Section>
 
       <div className="overview-grid">

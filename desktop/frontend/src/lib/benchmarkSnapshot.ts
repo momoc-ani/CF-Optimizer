@@ -8,6 +8,13 @@ export interface BenchmarkSnapshot {
   source: 'live' | 'persisted';
 }
 
+/** selectTopBenchmarkResults 按后台已经确定的评分顺序截取 download_top 个结果。 */
+export function selectTopBenchmarkResults(results: BenchmarkResult[] | undefined, limit: number): BenchmarkResult[] {
+  if (!results?.length || !Number.isFinite(limit)) return [];
+  const count = Math.floor(limit);
+  return count > 0 ? results.slice(0, count) : [];
+}
+
 function timestamp(value: string): number {
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? 0 : parsed;

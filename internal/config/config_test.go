@@ -23,7 +23,7 @@ func TestLoadMergesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Benchmark.Candidates != 42 || cfg.Benchmark.ConnectAttempts != 4 {
+	if cfg.Benchmark.Candidates != 42 || cfg.Benchmark.ConnectAttempts != 4 || cfg.Benchmark.DownloadConcurrency != 5 {
 		t.Fatalf("defaults were not merged: %#v", cfg.Benchmark)
 	}
 	if cfg.Schedule.Interval.Duration() != 6*time.Hour {
@@ -40,6 +40,16 @@ func TestLoadMergesDefaults(t *testing.T) {
 	}
 	if got := cfg.AccelerationDomains(); len(got) != 0 {
 		t.Fatalf("default acceleration domains = %#v, want empty", got)
+	}
+}
+
+func TestValidateRejectsInvalidDownloadConcurrency(t *testing.T) {
+	for _, value := range []int{0, 257} {
+		cfg := Default()
+		cfg.Benchmark.DownloadConcurrency = value
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("Validate() error = nil for download concurrency %d", value)
+		}
 	}
 }
 

@@ -110,25 +110,26 @@ type RangesConfig struct {
 
 // BenchmarkConfig 定义候选数量、测速边界和切换策略。
 type BenchmarkConfig struct {
-	IPv4              bool     `yaml:"ipv4" json:"ipv4"`
-	IPv6              bool     `yaml:"ipv6" json:"ipv6"`
-	Candidates        int      `yaml:"candidates" json:"candidates"`
-	ConnectAttempts   int      `yaml:"connect_attempts" json:"connect_attempts"`
-	Concurrency       int      `yaml:"concurrency" json:"concurrency"`
-	ConnectTimeout    Duration `yaml:"connect_timeout" json:"connect_timeout"`
-	LatencyLimit      Duration `yaml:"latency_limit" json:"latency_limit"`
-	LossLimit         float64  `yaml:"loss_limit" json:"loss_limit"`
-	DownloadTop       int      `yaml:"download_top" json:"download_top"`
-	DownloadURL       string   `yaml:"download_url" json:"download_url"`
-	TLSServerName     string   `yaml:"tls_server_name" json:"tls_server_name"`
-	TLSTimeout        Duration `yaml:"tls_timeout" json:"tls_timeout"`
-	DownloadDuration  Duration `yaml:"download_duration" json:"download_duration"`
-	DownloadMaxBytes  int64    `yaml:"download_max_bytes" json:"download_max_bytes"`
-	SwitchImprovement float64  `yaml:"switch_improvement" json:"switch_improvement"`
-	MinimumHold       Duration `yaml:"minimum_hold" json:"minimum_hold"`
-	FailureThreshold  int      `yaml:"failure_threshold" json:"failure_threshold"`
-	FailureCooldown   Duration `yaml:"failure_cooldown" json:"failure_cooldown"`
-	DailySeed         string   `yaml:"daily_seed" json:"daily_seed"`
+	IPv4                bool     `yaml:"ipv4" json:"ipv4"`
+	IPv6                bool     `yaml:"ipv6" json:"ipv6"`
+	Candidates          int      `yaml:"candidates" json:"candidates"`
+	ConnectAttempts     int      `yaml:"connect_attempts" json:"connect_attempts"`
+	Concurrency         int      `yaml:"concurrency" json:"concurrency"`
+	ConnectTimeout      Duration `yaml:"connect_timeout" json:"connect_timeout"`
+	LatencyLimit        Duration `yaml:"latency_limit" json:"latency_limit"`
+	LossLimit           float64  `yaml:"loss_limit" json:"loss_limit"`
+	DownloadTop         int      `yaml:"download_top" json:"download_top"`
+	DownloadConcurrency int      `yaml:"download_concurrency" json:"download_concurrency"`
+	DownloadURL         string   `yaml:"download_url" json:"download_url"`
+	TLSServerName       string   `yaml:"tls_server_name" json:"tls_server_name"`
+	TLSTimeout          Duration `yaml:"tls_timeout" json:"tls_timeout"`
+	DownloadDuration    Duration `yaml:"download_duration" json:"download_duration"`
+	DownloadMaxBytes    int64    `yaml:"download_max_bytes" json:"download_max_bytes"`
+	SwitchImprovement   float64  `yaml:"switch_improvement" json:"switch_improvement"`
+	MinimumHold         Duration `yaml:"minimum_hold" json:"minimum_hold"`
+	FailureThreshold    int      `yaml:"failure_threshold" json:"failure_threshold"`
+	FailureCooldown     Duration `yaml:"failure_cooldown" json:"failure_cooldown"`
+	DailySeed           string   `yaml:"daily_seed" json:"daily_seed"`
 }
 
 // NetworkConfig 定义物理接口、网关和路由修改开关。
@@ -217,7 +218,7 @@ func Default() Config {
 		Benchmark: BenchmarkConfig{
 			IPv4: true, IPv6: true, Candidates: 1000, ConnectAttempts: 4, Concurrency: 200,
 			ConnectTimeout: Duration(1500 * time.Millisecond), LatencyLimit: Duration(300 * time.Millisecond), LossLimit: 0.25,
-			DownloadTop: 20, TLSServerName: "speed.cloudflare.com", TLSTimeout: Duration(5 * time.Second), DownloadDuration: Duration(8 * time.Second),
+			DownloadTop: 20, DownloadConcurrency: 5, TLSServerName: "speed.cloudflare.com", TLSTimeout: Duration(5 * time.Second), DownloadDuration: Duration(8 * time.Second),
 			DownloadMaxBytes: 32 << 20, SwitchImprovement: 0.15, MinimumHold: Duration(30 * time.Minute),
 			FailureThreshold: 3, FailureCooldown: Duration(6 * time.Hour),
 		},
@@ -317,6 +318,9 @@ func (c Config) Validate() error {
 	}
 	if c.Benchmark.DownloadTop < 1 || c.Benchmark.DownloadTop > c.Benchmark.Candidates {
 		return errors.New("benchmark.download_top must be between 1 and benchmark.candidates")
+	}
+	if c.Benchmark.DownloadConcurrency < 1 || c.Benchmark.DownloadConcurrency > 256 {
+		return errors.New("benchmark.download_concurrency must be between 1 and 256")
 	}
 	if c.Benchmark.FailureThreshold < 1 || c.Benchmark.FailureThreshold > 100 {
 		return errors.New("benchmark.failure_threshold must be between 1 and 100")

@@ -34,6 +34,7 @@ const settingsSchema = z.object({
   ipv6: z.boolean(),
   candidates: z.number().int().min(1).max(100000),
   concurrency: z.number().int().min(1).max(2000),
+  downloadConcurrency: z.number().int().min(1).max(256),
   connectAttempts: z.number().int().min(1).max(20),
   lossLimitPercent: z.number().min(0).max(100),
   switchImprovementPercent: z.number().min(0).max(500),
@@ -69,6 +70,7 @@ function formFromConfig(config: AppConfig): SettingsForm {
     ipv6: config.benchmark.ipv6,
     candidates: config.benchmark.candidates,
     concurrency: config.benchmark.concurrency,
+    downloadConcurrency: config.benchmark.download_concurrency,
     connectAttempts: config.benchmark.connect_attempts,
     lossLimitPercent: config.benchmark.loss_limit * 100,
     switchImprovementPercent: config.benchmark.switch_improvement * 100,
@@ -97,6 +99,7 @@ function mergeSettings(config: AppConfig, form: SettingsForm): AppConfig {
       ipv6: form.ipv6,
       candidates: form.candidates,
       concurrency: form.concurrency,
+      download_concurrency: form.downloadConcurrency,
       connect_attempts: form.connectAttempts,
       loss_limit: form.lossLimitPercent / 100,
       switch_improvement: form.switchImprovementPercent / 100,
@@ -114,7 +117,7 @@ export function SettingsPage() {
   const queryClient = useQueryClient();
   const { colorScheme, setColorScheme } = useMantineColorScheme();
   const form = useForm<SettingsForm>({ resolver: zodResolver(settingsSchema), defaultValues: {
-    scheduleEnabled: true, scheduleInterval: '6h', runOnNetworkChange: true, ipv4: true, ipv6: true, candidates: 1000, concurrency: 200, connectAttempts: 4, lossLimitPercent: 25, switchImprovementPercent: 15, downloadURL: '', tlsServerName: '', rangeRefreshInterval: '24h', rangeInclude: '', rangeExclude: '', proxyAutoDetect: true, networkInterface: '', gatewayIPv4: '', gatewayIPv6: '', manageRoutes: false,
+    scheduleEnabled: true, scheduleInterval: '6h', runOnNetworkChange: true, ipv4: true, ipv6: true, candidates: 1000, concurrency: 200, downloadConcurrency: 5, connectAttempts: 4, lossLimitPercent: 25, switchImprovementPercent: 15, downloadURL: '', tlsServerName: '', rangeRefreshInterval: '24h', rangeInclude: '', rangeExclude: '', proxyAutoDetect: true, networkInterface: '', gatewayIPv4: '', gatewayIPv6: '', manageRoutes: false,
   } });
   useEffect(() => { if (config.data) form.reset(formFromConfig(config.data)); }, [config.data, form]);
   const save = useMutation({
@@ -161,6 +164,7 @@ export function SettingsPage() {
               <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
                 <Controller control={form.control} name="downloadURL" render={({ field }) => <TextInput {...field} label="HTTPS 测速地址" placeholder="留空则不产生下载流量" error={errors.downloadURL?.message} />} />
                 <Controller control={form.control} name="tlsServerName" render={({ field }) => <TextInput {...field} label="TLS Server Name" placeholder="与测速域名一致" error={errors.tlsServerName?.message} />} />
+                <Controller control={form.control} name="downloadConcurrency" render={({ field }) => <NumberInput label="TLS/下载并发数" min={1} max={256} value={field.value} onChange={(value) => field.onChange(Number(value))} error={errors.downloadConcurrency?.message} />} />
               </SimpleGrid>
             </Section>
 
