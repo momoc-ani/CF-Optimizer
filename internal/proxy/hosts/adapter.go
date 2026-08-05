@@ -42,7 +42,8 @@ type receiptPayload struct {
 
 // Adapter 只替换带标记的 Windows Hosts 区块，并为每次修改保留备份。
 type Adapter struct {
-	config config.HostsConfig
+	config          config.HostsConfig
+	refreshResolver func(context.Context) error
 }
 
 // New 创建受管 Hosts 适配器。
@@ -50,7 +51,7 @@ func New(cfg config.HostsConfig) (*Adapter, error) {
 	if cfg.Path == "" {
 		return nil, errors.New("Hosts path is required")
 	}
-	return &Adapter{config: cfg}, nil
+	return &Adapter{config: cfg, refreshResolver: refreshResolverCache}, nil
 }
 
 // Name 返回稳定的适配器标识。
@@ -159,7 +160,7 @@ func (a *Adapter) Apply(_ context.Context, plan proxy.Plan) (proxy.Receipt, erro
 }
 
 // Verify 确认 Hosts 文件仍是本次应用的完整版本。
-func (a *Adapter) Verify(_ context.Context, _ proxy.DirectPolicy, receipt proxy.Receipt) error {
+func (a *Adapter) Verify(ctx context.Context, _ proxy.DirectPolicy, receipt proxy.Receipt) error {
 	var payload receiptPayload
 	if err := json.Unmarshal(receipt.Payload, &payload); err != nil {
 		return err
@@ -171,11 +172,16 @@ func (a *Adapter) Verify(_ context.Context, _ proxy.DirectPolicy, receipt proxy.
 	if hash(content) != payload.AppliedHash {
 		return errors.New("Hosts verification failed")
 	}
+	if receipt.Changed {
+		if err := a.refreshResolver(ctx); err != nil {
+			return fmt.Errorf("refresh resolver cache after Hosts apply: %w", err)
+		}
+	}
 	return nil
 }
 
 // Rollback 在 Hosts 未被外部修改时恢复应用前的完整文件。
-func (a *Adapter) Rollback(_ context.Context, receipt proxy.Receipt) error {
+func (a *Adapter) Rollback(ctx context.Context, receipt proxy.Receipt) error {
 	if !receipt.Changed {
 		return nil
 	}
@@ -192,10 +198,12 @@ func (a *Adapter) Rollback(_ context.Context, receipt proxy.Receipt) error {
 		return errors.New("Hosts changed after apply; refusing rollback overwrite")
 	}
 	if payload.BackupAppliedHash == "" {
-		if hostsRestored {
-			return nil
+		if !hostsRestored {
+			if err := writeHostsFile(a.config.Path, payload.Previous, current, 0o644); err != nil {
+				return err
+			}
 		}
-		return writeHostsFile(a.config.Path, payload.Previous, current, 0o644)
+		return a.refreshResolverAfterRollback(ctx)
 	}
 	backupPath := a.config.Path + ".cf-optimizer.backup"
 	backupCurrent, backupExists, err := readOptionalFile(backupPath)
@@ -212,9 +220,18 @@ func (a *Adapter) Rollback(_ context.Context, receipt proxy.Receipt) error {
 		}
 	}
 	if backupRestored {
-		return nil
+		return a.refreshResolverAfterRollback(ctx)
 	}
-	return restoreOptionalFile(backupPath, payload.BackupPrevious, payload.BackupPreviousExists, 0o600)
+	restoreErr := restoreOptionalFile(backupPath, payload.BackupPrevious, payload.BackupPreviousExists, 0o600)
+	return errors.Join(restoreErr, a.refreshResolverAfterRollback(ctx))
+}
+
+// refreshResolverAfterRollback 让恢复后的 Hosts 内容立即进入系统解析路径，并为错误补充事务阶段。
+func (a *Adapter) refreshResolverAfterRollback(ctx context.Context) error {
+	if err := a.refreshResolver(ctx); err != nil {
+		return fmt.Errorf("refresh resolver cache after Hosts rollback: %w", err)
+	}
+	return nil
 }
 
 // CleanupConflict 在受管区块已消失时保留当前 Hosts，仅恢复可由收据链证明归属程序的备份文件。

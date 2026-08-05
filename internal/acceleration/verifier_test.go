@@ -2,12 +2,15 @@ package acceleration
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cf-optimizer/cf-optimizer/internal/proxy"
 )
 
 type deadlineRecordingConn struct {
@@ -48,6 +51,57 @@ func TestVerifierAppliesTimeoutToRawConnection(t *testing.T) {
 	}
 	if !connection.deadline.After(startedAt) || connection.deadline.After(startedAt.Add(time.Second)) {
 		t.Fatalf("unexpected connection deadline %s", connection.deadline)
+	}
+}
+
+func TestVerifyAppliedRetriesUntilSystemMappingPropagates(t *testing.T) {
+	verifier, err := NewVerifier(func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("unexpected raw dial")
+	}, time.Second)
+	if err != nil {
+		t.Fatalf("create verifier: %v", err)
+	}
+	verifier.appliedRetryInterval = time.Nanosecond
+	requests := 0
+	verifier.requestConnection = func(_ context.Context, domain, address string) (string, error) {
+		requests++
+		if domain != "ani.momoc.top" || address != "ani.momoc.top:443" {
+			t.Fatalf("unexpected verification target %s %s", domain, address)
+		}
+		if requests == 1 {
+			return "104.21.92.119", nil
+		}
+		return "172.64.154.64", nil
+	}
+	mappings := []proxy.DomainMapping{{Domain: "ani.momoc.top", Addresses: []string{"172.64.154.64"}}}
+	if err := verifier.VerifyApplied(context.Background(), mappings); err != nil {
+		t.Fatalf("verify propagated mapping: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("verification requests = %d, want 2", requests)
+	}
+}
+
+func TestVerifyAppliedRejectsStaleSystemMappingAfterRetryLimit(t *testing.T) {
+	verifier, err := NewVerifier(func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("unexpected raw dial")
+	}, time.Second)
+	if err != nil {
+		t.Fatalf("create verifier: %v", err)
+	}
+	verifier.appliedRetryInterval = time.Nanosecond
+	requests := 0
+	verifier.requestConnection = func(context.Context, string, string) (string, error) {
+		requests++
+		return "104.21.92.119", nil
+	}
+	mappings := []proxy.DomainMapping{{Domain: "ani.momoc.top", Addresses: []string{"172.64.154.64"}}}
+	err = verifier.VerifyApplied(context.Background(), mappings)
+	if err == nil || !strings.Contains(err.Error(), "connected to 104.21.92.119 instead of an optimized address") {
+		t.Fatalf("unexpected stale mapping result: %v", err)
+	}
+	if requests != appliedVerificationMaxAttempts {
+		t.Fatalf("verification requests = %d, want %d", requests, appliedVerificationMaxAttempts)
 	}
 }
 

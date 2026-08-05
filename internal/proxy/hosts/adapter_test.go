@@ -13,15 +13,28 @@ import (
 	"github.com/cf-optimizer/cf-optimizer/internal/proxy"
 )
 
+// newTestAdapter 为临时 Hosts 文件关闭真实系统缓存刷新，避免测试修改开发机解析状态。
+func newTestAdapter(t *testing.T, path string) *Adapter {
+	t.Helper()
+	adapter, err := New(config.HostsConfig{Enabled: true, Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.refreshResolver = func(context.Context) error { return nil }
+	return adapter
+}
+
 func TestHostsLifecyclePreservesUnmanagedLines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hosts")
 	previous := "127.0.0.1 localhost\r\n"
 	if err := os.WriteFile(path, []byte(previous), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	adapter, err := New(config.HostsConfig{Enabled: true, Path: path})
-	if err != nil {
-		t.Fatal(err)
+	adapter := newTestAdapter(t, path)
+	refreshes := 0
+	adapter.refreshResolver = func(context.Context) error {
+		refreshes++
+		return nil
 	}
 	policy := proxy.DirectPolicy{DomainMappings: []proxy.DomainMapping{{Domain: "cdn.example.com", Addresses: []string{"1.1.1.1"}}}}
 	plan, err := adapter.Plan(context.Background(), policy)
@@ -45,12 +58,49 @@ func TestHostsLifecyclePreservesUnmanagedLines(t *testing.T) {
 	if err := adapter.Rollback(context.Background(), receipt); err != nil {
 		t.Fatalf("rollback should be idempotent: %v", err)
 	}
+	if refreshes != 3 {
+		t.Fatalf("resolver cache refreshes = %d, want 3", refreshes)
+	}
 	restored, _ := os.ReadFile(path)
 	if string(restored) != previous {
 		t.Fatalf("Hosts was not restored: %q", restored)
 	}
 	if _, err := os.Stat(path + ".cf-optimizer.backup"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("new backup file was not removed: %v", err)
+	}
+}
+
+func TestHostsVerifyReportsResolverRefreshFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hosts")
+	previous := []byte("127.0.0.1 localhost\n")
+	if err := os.WriteFile(path, previous, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	adapter := newTestAdapter(t, path)
+	policy := proxy.DirectPolicy{DomainMappings: []proxy.DomainMapping{{Domain: "ani.momoc.top", Addresses: []string{"172.64.154.64"}}}}
+	plan, err := adapter.Plan(context.Background(), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := adapter.Apply(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("resolver refresh failed")
+	adapter.refreshResolver = func(context.Context) error { return wantErr }
+	if err := adapter.Verify(context.Background(), policy, receipt); !errors.Is(err, wantErr) {
+		t.Fatalf("verify error = %v, want %v", err, wantErr)
+	}
+	adapter.refreshResolver = func(context.Context) error { return nil }
+	if err := adapter.Rollback(context.Background(), receipt); err != nil {
+		t.Fatalf("rollback Hosts after refresh failure: %v", err)
+	}
+	restored, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(restored, previous) {
+		t.Fatalf("Hosts was not restored after refresh failure: %q", restored)
 	}
 }
 
@@ -65,10 +115,7 @@ func TestHostsRollbackChainRestoresOriginalBackup(t *testing.T) {
 	if err := os.WriteFile(backupPath, backupPrevious, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	adapter, err := New(config.HostsConfig{Enabled: true, Path: path})
-	if err != nil {
-		t.Fatal(err)
-	}
+	adapter := newTestAdapter(t, path)
 	var receipts []proxy.Receipt
 	for _, address := range []string{"1.1.1.1", "1.0.0.1"} {
 		policy := proxy.DirectPolicy{DomainMappings: []proxy.DomainMapping{{Domain: "cdn.example.com", Addresses: []string{address}}}}
@@ -113,10 +160,7 @@ func TestHostsLifecycleTemporarilySuppressesConflictingMapping(t *testing.T) {
 	if err := os.WriteFile(path, []byte(previous), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	adapter, err := New(config.HostsConfig{Enabled: true, Path: path})
-	if err != nil {
-		t.Fatal(err)
-	}
+	adapter := newTestAdapter(t, path)
 	policy := proxy.DirectPolicy{DomainMappings: []proxy.DomainMapping{{Domain: "ani.momoc.top", Addresses: []string{"104.16.145.180"}}}}
 	plan, err := adapter.Plan(context.Background(), policy)
 	if err != nil {
@@ -159,10 +203,7 @@ func TestHostsCleanupConflictPreservesCurrentFileAndRestoresManagedBackup(t *tes
 	if err := os.WriteFile(backupPath, backupPrevious, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	adapter, err := New(config.HostsConfig{Enabled: true, Path: path})
-	if err != nil {
-		t.Fatal(err)
-	}
+	adapter := newTestAdapter(t, path)
 	policy := proxy.DirectPolicy{DomainMappings: []proxy.DomainMapping{{Domain: "ani.momoc.top", Addresses: []string{"104.25.254.143"}}}}
 	plan, err := adapter.Plan(context.Background(), policy)
 	if err != nil {
@@ -197,10 +238,7 @@ func TestHostsCleanupConflictRejectsUnprovenBackup(t *testing.T) {
 	if err := os.WriteFile(path, []byte("127.0.0.1 localhost\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	adapter, err := New(config.HostsConfig{Enabled: true, Path: path})
-	if err != nil {
-		t.Fatal(err)
-	}
+	adapter := newTestAdapter(t, path)
 	policy := proxy.DirectPolicy{DomainMappings: []proxy.DomainMapping{{Domain: "ani.momoc.top", Addresses: []string{"104.25.254.143"}}}}
 	plan, err := adapter.Plan(context.Background(), policy)
 	if err != nil {
