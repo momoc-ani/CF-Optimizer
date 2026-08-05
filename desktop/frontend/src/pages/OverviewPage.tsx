@@ -13,7 +13,7 @@ import { useRun } from '../hooks/useRun';
 import { QuickStartDialog } from '../components/QuickStartDialog';
 import { useUIStore } from '../state/ui';
 import { countCurrentVerifiedRoutes } from '../lib/routeSummary';
-import { describeQuickStartResult, formatRunEventDetail, formatRunEventTitle, presentSchedule } from '../lib/overview';
+import { describeQuickStartResult, formatRunEventDetail, formatRunEventTitle, presentLatestIPv4Decision, presentSchedule } from '../lib/overview';
 
 function SelectionRow({ title, selection, interfaceName }: { title: string; selection?: Selection; interfaceName?: string }) {
   if (!selection) return <div className="selection-row"><Text fw={650}>{title}</Text><Text c="dimmed" size="sm">尚未选择节点</Text><StatusBadge label="未验证" /></div>;
@@ -106,6 +106,7 @@ export function OverviewPage() {
   const detected = Object.values(proxies.data ?? {}).filter((item) => item.present).length;
   const verifiedRoutes = countCurrentVerifiedRoutes(state);
   const schedule = presentSchedule(status.data?.schedule, Boolean(state?.running), formatDate);
+  const latestIPv4Decision = presentLatestIPv4Decision(history.data?.[0]);
   return (
     <Stack gap="lg">
       <PageHeader title="总览" description="后台服务、当前节点与已验证直连策略" actions={<Button leftSection={<Play size={16} />} loading={planMutation.isPending || run.running} onClick={() => void prepareQuickStart()}>一键优选</Button>} />
@@ -121,11 +122,18 @@ export function OverviewPage() {
         <Metric label="Cloudflare 网段" value={`${(ranges.data?.ipv4.length ?? 0) + (ranges.data?.ipv6.length ?? 0)} 条`} detail={`${ranges.data?.source ?? '读取中'} · ${formatDate(ranges.data?.fetched_at)}`} accent="#c47a12" />
       </SimpleGrid>
 
-      <Section title="当前优选节点" aside={<StatusBadge label={verifiedRoutes > 0 ? `${verifiedRoutes} 条路由已验证` : '无已验证路由'} tone={verifiedRoutes > 0 ? 'verified' : 'warning'} />}>
+      <Section title="当前生效节点" aside={<StatusBadge label={verifiedRoutes > 0 ? `${verifiedRoutes} 条路由已验证` : '无已验证路由'} tone={verifiedRoutes > 0 ? 'verified' : 'warning'} />}>
         <Stack gap={0} className="selection-list">
           <SelectionRow title="IPv4" selection={state?.current_ipv4} interfaceName={path?.interface} />
           <SelectionRow title="IPv6" selection={state?.current_ipv6} interfaceName={path?.interface} />
         </Stack>
+        {latestIPv4Decision && (
+          <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="sm" className="selection-summary">
+            <div><Text size="xs" c="dimmed">最近测速第一名</Text><Text ff="monospace" fw={650}>{latestIPv4Decision.best.ip}</Text></div>
+            <div><Text size="xs" c="dimmed">本轮选定节点</Text><Text ff="monospace" fw={650}>{latestIPv4Decision.selectedIP}</Text></div>
+            <div><Text size="xs" c="dimmed">切换决策</Text><Text fw={650}>{latestIPv4Decision.decision}</Text></div>
+          </SimpleGrid>
+        )}
       </Section>
 
       <div className="overview-grid">

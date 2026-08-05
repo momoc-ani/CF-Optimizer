@@ -33,6 +33,10 @@ test('总览展示后台调度时间和真实运行摘要', async ({ page }, tes
   await expect(page.getByText('周期 6h0m0s · 周期执行', { exact: true })).toBeVisible();
   await expect(page.getByText('约 5 小时 54 分', { exact: true })).toHaveCount(0);
   await expect(page.getByText('已完成 · 27/1000 合格', { exact: true })).toBeVisible();
+  await expect(page.getByText('当前生效节点', { exact: true })).toBeVisible();
+  await expect(page.getByText('最近测速第一名', { exact: true })).toBeVisible();
+  await expect(page.getByText('本轮选定节点', { exact: true })).toBeVisible();
+  await expect(page.getByText('切换决策', { exact: true })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('overview-schedule.png'), fullPage: false });
 });
 

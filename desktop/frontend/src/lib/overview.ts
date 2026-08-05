@@ -1,4 +1,4 @@
-import type { QuickStartResult, RunSummary, ScheduleStatus } from '../api/types';
+import type { QuickStartResult, ResultSummary, RunSummary, ScheduleStatus } from '../api/types';
 
 const scheduleTriggerLabels: Record<string, string> = {
   startup: '服务启动后执行',
@@ -8,9 +8,26 @@ const scheduleTriggerLabels: Record<string, string> = {
   running: '正在执行',
 };
 
+const ipv4DecisionLabels: Record<string, string> = {
+  'initial-selection': '首次选择节点',
+  'current-remains-best': '保持当前节点：仍为第一名',
+  'minimum-hold-active': '未切换：最短保持期内',
+  'improvement-below-threshold': '未切换：提升未达阈值',
+  'current-failure-threshold': '已切换：当前节点连续失败',
+  'current-not-qualified': '已切换：当前节点不再合格',
+  'better-candidate': '已切换：新节点提升达标',
+  'no-qualified-candidate': '未选出合格节点',
+};
+
 export interface SchedulePresentation {
   value: string;
   detail: string;
+}
+
+export interface LatestIPv4DecisionPresentation {
+  best: ResultSummary;
+  selectedIP: string;
+  decision: string;
 }
 
 /** presentSchedule 将后台真实调度承诺转换为总览展示文本。 */
@@ -46,6 +63,18 @@ export function formatRunEventDetail(summary: RunSummary): string {
     summary.selected_ipv6 ? `IPv6 ${summary.selected_ipv6}` : '',
   ].filter(Boolean);
   return selections.length > 0 ? selections.join(' · ') : '本次没有选出节点';
+}
+
+/** presentLatestIPv4Decision 区分本轮测速第一名与经过迟滞规则选定的 IPv4 节点。 */
+export function presentLatestIPv4Decision(summary?: RunSummary): LatestIPv4DecisionPresentation | undefined {
+  const best = summary?.best?.find((result) => !result.ip.includes(':'));
+  if (!summary || !best) return undefined;
+  const reason = summary.switch_reason?.split(';', 1)[0].trim() ?? '';
+  return {
+    best,
+    selectedIP: summary.selected_ipv4 ?? '—',
+    decision: ipv4DecisionLabels[reason] ?? (reason || '未记录切换原因'),
+  };
 }
 
 /** describeQuickStartResult 只根据后端连接证据描述测速 DIRECT 状态和维护结果。 */

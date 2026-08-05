@@ -255,6 +255,10 @@ select {
   border-bottom: 1px solid var(--border);
 }
 
+.selection-summary {
+  padding: 10px 2px 2px;
+}
+
 .overview-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.65fr) minmax(280px, 0.85fr);

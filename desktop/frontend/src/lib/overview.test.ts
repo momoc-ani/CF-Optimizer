@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { QuickStartResult, RunSummary } from '../api/types';
-import { describeQuickStartResult, formatRunEventDetail, formatRunEventTitle, presentSchedule } from './overview';
+import { describeQuickStartResult, formatRunEventDetail, formatRunEventTitle, presentLatestIPv4Decision, presentSchedule } from './overview';
 
 describe('overview presentation', () => {
   it('shows the exact next execution time promised by the daemon', () => {
@@ -27,6 +27,24 @@ describe('overview presentation', () => {
     };
     expect(formatRunEventTitle(summary)).toBe('部分完成 · 27/1000 合格');
     expect(formatRunEventDetail(summary)).toBe('IPv6 未选出合格节点');
+  });
+
+  it('区分最近测速第一名与本轮实际选定节点', () => {
+    const summary: RunSummary = {
+      id: 'run-2', started_at: '2026-08-05T03:25:33Z', finished_at: '2026-08-05T03:26:20Z',
+      candidates: 1000, qualified: 20, selected_ipv4: '104.18.44.43',
+      switch_reason: 'improvement-below-threshold; no-qualified-candidate',
+      best: [
+        { ip: '162.159.61.137', score: 94.8, avg_latency: 46_073_179, loss: 0, mbps: 0 },
+        { ip: '104.18.44.43', score: 94.47, avg_latency: 48_061_130, loss: 0, mbps: 0 },
+      ],
+    };
+
+    expect(presentLatestIPv4Decision(summary)).toEqual({
+      best: summary.best![0],
+      selectedIP: '104.18.44.43',
+      decision: '未切换：提升未达阈值',
+    });
   });
 
   it('describes DIRECT only when benchmark connection evidence is verified', () => {

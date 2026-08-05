@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
 import { request, subscribeOptimizerEvents } from '../api/client';
 import { queryKeys } from '../api/hooks';
+import { invalidateRunCompletionQueries } from '../api/runCompletion';
 import type { OptimizerEvent, QuickStartResult, RunReport, SystemStatus } from '../api/types';
 import { RunContext, type QuickStartRunOptions, type RunOptions } from '../state/run';
 
@@ -17,11 +18,7 @@ export function RunProvider({ children }: { children: ReactNode }) {
     if (next.type === 'run.finished') {
       setEvent(undefined);
       queryClient.setQueryData<SystemStatus>(queryKeys.status, (current) => current ? { ...current, active_event: undefined, state: { ...current.state, running: false } } : current);
-      void Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.status }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.history }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.latestBenchmark }),
-      ]);
+      void invalidateRunCompletionQueries(queryClient);
       return;
     }
     setEvent(next);
@@ -38,7 +35,7 @@ export function RunProvider({ children }: { children: ReactNode }) {
     onError: (error: Error) => { setRunError(error); notifications.show({ color: error.message.includes('cancelled') ? 'gray' : 'red', title: error.message.includes('cancelled') ? '优选已取消' : '优选失败', message: error.message }); },
     onSettled: async () => {
       setEvent(undefined);
-      await Promise.all([queryClient.invalidateQueries({ queryKey: queryKeys.status }), queryClient.invalidateQueries({ queryKey: queryKeys.history }), queryClient.invalidateQueries({ queryKey: queryKeys.latestBenchmark }), queryClient.invalidateQueries({ queryKey: queryKeys.routes })]);
+      await invalidateRunCompletionQueries(queryClient);
     },
   });
   const quickStartMutation = useMutation({
@@ -57,7 +54,7 @@ export function RunProvider({ children }: { children: ReactNode }) {
     onError: (error: Error) => { setRunError(error); notifications.show({ color: error.message.includes('cancelled') ? 'gray' : 'red', title: error.message.includes('cancelled') ? '优选已取消' : '一键优选未完成', message: error.message }); },
     onSettled: async () => {
       setEvent(undefined);
-      await Promise.all([queryClient.invalidateQueries({ queryKey: queryKeys.status }), queryClient.invalidateQueries({ queryKey: queryKeys.history }), queryClient.invalidateQueries({ queryKey: queryKeys.latestBenchmark }), queryClient.invalidateQueries({ queryKey: queryKeys.routes }), queryClient.invalidateQueries({ queryKey: queryKeys.config })]);
+      await invalidateRunCompletionQueries(queryClient, { includeConfig: true });
     },
   });
   const cancelMutation = useMutation({
