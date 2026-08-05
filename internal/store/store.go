@@ -169,6 +169,16 @@ func Open(dataDir string, maxRuns int) (*Store, error) {
 	return s, nil
 }
 
+// SetMaxRuns 热更新后续状态写入采用的历史摘要数量上限。
+func (s *Store) SetMaxRuns(maxRuns int) {
+	if maxRuns < 1 {
+		maxRuns = 500
+	}
+	s.mu.Lock()
+	s.maxRuns = maxRuns
+	s.mu.Unlock()
+}
+
 // NewPolicyTransaction 创建当前状态格式支持的待恢复策略事务。
 func NewPolicyTransaction(startedAt time.Time, policy, receipts json.RawMessage) *PolicyTransaction {
 	return &PolicyTransaction{Version: policyTransactionVersion, StartedAt: startedAt.UTC(), Policy: policy, Receipts: receipts}

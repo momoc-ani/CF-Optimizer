@@ -76,6 +76,18 @@ type candidateRejectingPolicy struct {
 	rejectAll       bool
 }
 
+type failingPolicy struct{}
+
+func (failingPolicy) Capabilities() proxy.Capabilities {
+	return proxy.Capabilities{IPv4: true}
+}
+
+func (failingPolicy) Apply(context.Context, proxy.DirectPolicy) (proxy.ApplyResult, error) {
+	return proxy.ApplyResult{}, errors.New("policy refresh failed")
+}
+
+func (failingPolicy) Rollback(context.Context, proxy.ApplyResult) error { return nil }
+
 type guardedRecordingPolicy struct {
 	recordingPolicy
 	events      []string
@@ -969,6 +981,58 @@ func TestRefreshPolicyIsolatesFailedAutomaticDomainAndRetries(t *testing.T) {
 	}
 	if !state.DiscoveredDomains["good.example"].Active {
 		t.Fatalf("healthy automatic domain was disabled: %#v", state.DiscoveredDomains["good.example"])
+	}
+}
+
+func TestReconfigureUpdatesIdleRunnerAndRejectsBusyRunner(t *testing.T) {
+	runner, _ := newTestRunner(t, nil)
+	next := runner.config
+	next.Benchmark.Candidates = 3
+	snapshot := ranges.Snapshot{Version: 1, Source: "reload", Hash: "reload", IPv4: []string{"1.1.1.0/30"}}
+	refreshed, err := runner.Reconfigure(
+		context.Background(), next, staticRanges{snapshot: snapshot}, staticBenchmark{}, nil,
+		cfnetwork.PhysicalPath{}, nil, nil, nil, false,
+	)
+	if err != nil || refreshed || runner.config.Benchmark.Candidates != 3 {
+		t.Fatalf("idle Reconfigure() = refreshed %t, error %v, config %#v", refreshed, err, runner.config.Benchmark)
+	}
+	if !runner.operationGate.tryAcquire() {
+		t.Fatal("failed to hold operation gate for busy reload test")
+	}
+	_, err = runner.Reconfigure(
+		context.Background(), next, staticRanges{snapshot: snapshot}, staticBenchmark{}, nil,
+		cfnetwork.PhysicalPath{}, nil, nil, nil, false,
+	)
+	runner.operationGate.release()
+	if !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("busy Reconfigure() error = %v, want ErrAlreadyRunning", err)
+	}
+}
+
+func TestReconfigureRestoresPreviousDependenciesWhenPolicyRefreshFails(t *testing.T) {
+	runner, stateStore := newTestRunner(t, nil)
+	previousConfig := runner.config
+	previousRanges := runner.ranges
+	previousBenchmark := runner.benchmark
+	if err := stateStore.Update(func(state *store.State) error {
+		state.CurrentIPv4 = &store.Selection{IP: "1.1.1.1", Family: 4, PolicyVerified: true}
+		state.Policy = &store.PolicySnapshot{IPv4CIDRs: []string{"1.1.1.1/32"}, Receipts: json.RawMessage(`{"receipts":[]}`)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	next := previousConfig
+	next.Benchmark.Candidates = 3
+	_, err := runner.Reconfigure(
+		context.Background(), next,
+		staticRanges{snapshot: ranges.Snapshot{Version: 1, Source: "reload", Hash: "reload", IPv4: []string{"1.1.1.0/24"}}},
+		staticBenchmark{}, nil, cfnetwork.PhysicalPath{}, failingPolicy{}, nil, nil, true,
+	)
+	if err == nil {
+		t.Fatal("policy refresh failure was not returned")
+	}
+	if !reflect.DeepEqual(runner.config, previousConfig) || !reflect.DeepEqual(runner.ranges, previousRanges) || !reflect.DeepEqual(runner.benchmark, previousBenchmark) || runner.policy != nil {
+		t.Fatalf("failed reconfiguration retained new dependencies: config=%#v policy=%#v", runner.config, runner.policy)
 	}
 }
 

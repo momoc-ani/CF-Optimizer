@@ -38,6 +38,9 @@ const (
 	cleanupAdapterHosts    = "windows-hosts"
 )
 
+// ErrRuntimeRestartRequired 表示配置触及无法在现有 IPC/状态目录上热切换的进程边界。
+var ErrRuntimeRestartRequired = errors.New("runtime reload requires service restart")
+
 // Runtime 汇总一个进程共享的核心组件和已验证依赖关系。
 type Runtime struct {
 	mutex             sync.RWMutex
@@ -55,17 +58,24 @@ type Runtime struct {
 	DomainResolver    *acceleration.PhysicalResolver
 	DomainVerifier    *acceleration.Verifier
 	Logger            *slog.Logger
+	configChanged     chan struct{}
 	// mihomoAutoDetected 标记当前运行时是否使用了自动探测到的 Mihomo 端点。
 	mihomoAutoDetected bool
 }
 
 // RuntimeView 提供可并发读取的当前运行配置和执行依赖快照。
 type RuntimeView struct {
-	Config           config.Config
-	Runner           *optimizer.Runner
-	PhysicalPath     cfnetwork.PhysicalPath
-	DirectDial       cfnetwork.DialContextFunc
-	ProxyCoordinator *proxy.Coordinator
+	Config             config.Config
+	Ranges             *ranges.Catalog
+	Runner             *optimizer.Runner
+	Routes             *cfnetwork.RouteController
+	RouteBackend       cfnetwork.RouteBackend
+	PhysicalPath       cfnetwork.PhysicalPath
+	DirectDial         cfnetwork.DialContextFunc
+	ProxyCoordinator   *proxy.Coordinator
+	DomainResolver     *acceleration.PhysicalResolver
+	DomainVerifier     *acceleration.Verifier
+	MihomoAutoDetected bool
 }
 
 // RuntimeSession 描述一次快速流程使用且可在验证后激活的完整运行会话。
@@ -160,6 +170,7 @@ func Build(cfg config.Config, configPath string, logger *slog.Logger) (*Runtime,
 		Routes: routeController, RouteBackend: routeBackend, PhysicalPath: physicalPath,
 		DirectDial: directDial, ProxyCoordinator: proxyCoordinator, Logger: logger, mihomoAutoDetected: mihomoAutoDetected,
 		DomainResolver: domainResolver, DomainVerifier: domainVerifier,
+		configChanged: make(chan struct{}),
 	}, nil
 }
 
@@ -168,9 +179,133 @@ func (r *Runtime) View() RuntimeView {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 	return RuntimeView{
-		Config: r.Config, Runner: r.Runner, PhysicalPath: r.PhysicalPath,
-		DirectDial: r.DirectDial, ProxyCoordinator: r.ProxyCoordinator,
+		Config: r.Config, Ranges: r.Ranges, Runner: r.Runner, Routes: r.Routes, RouteBackend: r.RouteBackend,
+		PhysicalPath: r.PhysicalPath, DirectDial: r.DirectDial, ProxyCoordinator: r.ProxyCoordinator,
+		DomainResolver: r.DomainResolver, DomainVerifier: r.DomainVerifier, MihomoAutoDetected: r.mihomoAutoDetected,
 	}
+}
+
+// ConfigChanges 返回下一次运行配置切换时关闭的广播通道。
+func (r *Runtime) ConfigChanges() <-chan struct{} {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	if r.configChanged == nil {
+		r.configChanged = make(chan struct{})
+	}
+	return r.configChanged
+}
+
+// ReloadConfig 在无活动任务时重建运行依赖并热切换完整配置。
+func (r *Runtime) ReloadConfig(ctx context.Context, cfg config.Config, refreshPolicy bool) (bool, error) {
+	cfg.ApplyDefaults()
+	if err := cfg.Validate(); err != nil {
+		return false, err
+	}
+	if !r.accelerationMutex.TryLock() {
+		return false, optimizer.ErrAlreadyRunning
+	}
+	defer r.accelerationMutex.Unlock()
+	view := r.View()
+	if view.Runner == nil {
+		return false, errors.New("optimizer runner is unavailable for runtime reload")
+	}
+	if cfg.DataDir != view.Config.DataDir || cfg.IPC.Endpoint != view.Config.IPC.Endpoint {
+		return false, ErrRuntimeRestartRequired
+	}
+	physicalPath, pathErr := cfnetwork.DiscoverPhysicalPath(
+		ctx, cfg.Network.Interface, cfg.Network.GatewayIPv4, cfg.Network.GatewayIPv6, cfg.Network.CommandTimeout.Duration(),
+	)
+	if pathErr != nil {
+		if cfg.Network.ManageRoutes {
+			return false, fmt.Errorf("discover physical path for runtime reload: %w", pathErr)
+		}
+		physicalPath = view.PhysicalPath
+		r.Logger.Warn("热重载时物理出口发现失败，继续使用上一条只读路径", "component", "network", "error", pathErr)
+	}
+	directDial, err := cfnetwork.NewBoundDialer(physicalPath.Interface, cfg.Benchmark.ConnectTimeout.Duration())
+	if err != nil {
+		return false, fmt.Errorf("create reloaded physical interface dialer: %w", err)
+	}
+	routeBackend := cfnetwork.NewPlatformRouteBackend(cfg.Network.CommandTimeout.Duration())
+	routeController, err := cfnetwork.NewRouteController(cfg.DataDir, routeBackend, true, r.Logger)
+	if err != nil {
+		return false, fmt.Errorf("create reloaded route controller: %w", err)
+	}
+	managedConfig := cfg
+	runtimeConfig := cfg
+	mihomoAutoDetected := false
+	if cfg.Network.ManageRoutes {
+		managedConfig.Hosts.Enabled = cfg.Acceleration.Enabled
+		if cfg.Proxy.AutoDetect {
+			detection, detectErr := mihomo.AutoDetect(ctx, cfg.Proxy.Mihomo)
+			if detectErr == nil && detection.Present {
+				if detectedConfig, configureErr := mihomo.ConfigureDetected(cfg.Proxy.Mihomo, detection, cfg.DataDir); configureErr == nil {
+					managedConfig.Proxy.Mihomo = detectedConfig
+					runtimeConfig.Proxy.Mihomo = detectedConfig
+					mihomoAutoDetected = true
+				} else {
+					r.Logger.Warn("热重载已发现 Mihomo，但无法建立安全管理路径", "component", "proxy", "adapter", "mihomo", "error", configureErr)
+				}
+			}
+		}
+	}
+	proxyCoordinator, err := buildProxyCoordinator(managedConfig, physicalPath, routeController, directDial, r.Logger)
+	if err != nil {
+		return false, err
+	}
+	rangeCatalog := ranges.NewCatalog(cfg.Ranges, cfg.DataDir)
+	benchmarker := benchmark.New(managedConfig.Benchmark, directDial)
+	domainVerifier, err := acceleration.NewVerifierWithOptions(directDial, acceleration.VerificationOptions{
+		PreflightTimeout: managedConfig.Benchmark.TLSTimeout.Duration(),
+		ApplyTimeout:     managedConfig.Acceleration.ApplyVerificationTimeout.Duration(),
+		AttemptTimeout:   managedConfig.Acceleration.ApplyAttemptTimeout.Duration(),
+		RetryInterval:    managedConfig.Acceleration.ApplyRetryInterval.Duration(),
+		MaxAttempts:      managedConfig.Acceleration.ApplyMaxAttempts,
+	})
+	if err != nil {
+		return false, err
+	}
+	dnsServers, err := cfnetwork.DiscoverPhysicalDNSServers(ctx, physicalPath, cfg.Network.CommandTimeout.Duration())
+	if err != nil {
+		return false, fmt.Errorf("discover physical DNS servers for runtime reload: %w", err)
+	}
+	domainResolver, err := acceleration.NewPhysicalResolver(directDial, dnsServers, cfg.Ranges.RequestTimeout.Duration())
+	if err != nil {
+		return false, err
+	}
+	policyRefreshed, err := view.Runner.Reconfigure(
+		ctx, managedConfig, rangeCatalog, benchmarker, routeController, physicalPath,
+		proxyCoordinator, domainResolver, domainVerifier, refreshPolicy,
+	)
+	if err != nil {
+		return false, err
+	}
+	r.mutex.Lock()
+	r.Config = runtimeConfig
+	r.Ranges = rangeCatalog
+	r.Routes = routeController
+	r.RouteBackend = routeBackend
+	r.PhysicalPath = physicalPath
+	r.DirectDial = directDial
+	r.ProxyCoordinator = proxyCoordinator
+	r.DomainResolver = domainResolver
+	r.DomainVerifier = domainVerifier
+	r.mihomoAutoDetected = mihomoAutoDetected
+	r.notifyConfigChangedLocked()
+	r.mutex.Unlock()
+	r.Store.SetMaxRuns(cfg.History.MaxRuns)
+	r.Logger.Info("后台运行配置热重载完成", "component", "config", "policy_refreshed", policyRefreshed, "result", "completed")
+	return policyRefreshed, nil
+}
+
+// notifyConfigChangedLocked 在已持有运行时写锁时广播新的配置版本。
+func (r *Runtime) notifyConfigChangedLocked() {
+	if r.configChanged == nil {
+		r.configChanged = make(chan struct{})
+		return
+	}
+	close(r.configChanged)
+	r.configChanged = make(chan struct{})
 }
 
 // DetectManagedAdapters 只读检测快速流程可用的路由和代理适配器。
@@ -189,7 +324,7 @@ func (r *Runtime) DetectManagedAdapters(ctx context.Context, physicalPath cfnetw
 	if err := managedConfig.Validate(); err != nil {
 		return nil, fmt.Errorf("validate managed runtime config: %w", err)
 	}
-	coordinator, err := buildProxyCoordinator(managedConfig, physicalPath, r.Routes, nil, r.Logger)
+	coordinator, err := buildProxyCoordinator(managedConfig, physicalPath, view.Routes, nil, r.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -254,15 +389,13 @@ func (r *Runtime) DiscoverAccelerationDomains(ctx context.Context) (DomainDiscov
 	if err != nil {
 		return r.domainDiscoverySnapshot(), err
 	}
-	r.mutex.RLock()
-	resolver := r.DomainResolver
-	verifier := r.DomainVerifier
-	runner := r.Runner
-	r.mutex.RUnlock()
+	resolver := view.DomainResolver
+	verifier := view.DomainVerifier
+	runner := view.Runner
 	if resolver == nil || verifier == nil {
 		return r.domainDiscoverySnapshot(), errors.New("domain discovery verification is unavailable")
 	}
-	rangeSnapshot, err := r.Ranges.Load()
+	rangeSnapshot, err := view.Ranges.Load()
 	if err != nil {
 		return r.domainDiscoverySnapshot(), err
 	}
@@ -579,12 +712,12 @@ func (r *Runtime) BuildManagedSession(physicalPath cfnetwork.PhysicalPath, detec
 	if err != nil {
 		return RuntimeSession{}, fmt.Errorf("create confirmed physical interface dialer: %w", err)
 	}
-	proxyCoordinator, err := buildProxyCoordinator(managedConfig, physicalPath, r.Routes, directDial, r.Logger)
+	proxyCoordinator, err := buildProxyCoordinator(managedConfig, physicalPath, view.Routes, directDial, r.Logger)
 	if err != nil {
 		return RuntimeSession{}, err
 	}
 	benchmarker := benchmark.New(managedConfig.Benchmark, directDial)
-	runner, err := optimizer.NewRunner(managedConfig, r.Ranges, benchmarker, r.Store, r.Routes, physicalPath, proxyCoordinator, r.Logger)
+	runner, err := optimizer.NewRunner(managedConfig, view.Ranges, benchmarker, r.Store, view.Routes, physicalPath, proxyCoordinator, r.Logger)
 	if err != nil {
 		return RuntimeSession{}, err
 	}
@@ -625,6 +758,7 @@ func (r *Runtime) ActivateSession(session RuntimeSession) {
 	r.ProxyCoordinator = session.ProxyCoordinator
 	r.DomainResolver = session.DomainResolver
 	r.DomainVerifier = session.DomainVerifier
+	r.notifyConfigChangedLocked()
 	r.mutex.Unlock()
 }
 
@@ -728,12 +862,13 @@ func BuildCleanup(cfg config.Config, configPath string, logger *slog.Logger) (*R
 
 // CleanupManagedPolicy 执行卸载专用运行时的路由恢复和累计收据回滚。
 func (r *Runtime) CleanupManagedPolicy(ctx context.Context) error {
-	return optimizer.CleanupManagedPolicy(ctx, r.Store, r.Routes, r.ProxyCoordinator)
+	view := r.View()
+	return optimizer.CleanupManagedPolicy(ctx, r.Store, view.Routes, view.ProxyCoordinator)
 }
 
 // RecoverPendingPolicy 恢复进程退出前已应用但尚未提交的代理策略事务。
 func (r *Runtime) RecoverPendingPolicy(ctx context.Context) error {
-	return optimizer.RecoverPendingPolicy(ctx, r.Store, r.ProxyCoordinator)
+	return optimizer.RecoverPendingPolicy(ctx, r.Store, r.View().ProxyCoordinator)
 }
 
 func configForStoredReceipts(cfg config.Config, state store.State) (config.Config, error) {

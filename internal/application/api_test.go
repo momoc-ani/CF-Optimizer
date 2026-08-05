@@ -264,16 +264,16 @@ func TestConfigUpdateHotAppliesClearedManualDomains(t *testing.T) {
 	}
 }
 
-func TestConfigGetReturnsSavedSettingsPendingRestart(t *testing.T) {
+func TestConfigGetReturnsHotReloadedSettings(t *testing.T) {
 	api, runtimeState := newConfigUpdateTestAPI(t)
 	next := runtimeState.View().Config
 	next.Schedule.Interval = config.Duration(7 * time.Hour)
 	result := updateConfigForTest(t, api, next)
-	if !result["saved"] || result["hot_applied"] || !result["restart_required"] {
+	if !result["saved"] || !result["hot_applied"] || result["restart_required"] {
 		t.Fatalf("unexpected update result: %#v", result)
 	}
-	if runtimeState.View().Config.Schedule.Interval == next.Schedule.Interval {
-		t.Fatal("restart-only setting was incorrectly applied to the active runtime")
+	if runtimeState.View().Config.Schedule.Interval != next.Schedule.Interval {
+		t.Fatal("saved setting was not hot-reloaded into the active runtime")
 	}
 	response, err := api.Handle(context.Background(), ipc.Request{Method: "config.get"}, nil)
 	if err != nil {
@@ -281,6 +281,72 @@ func TestConfigGetReturnsSavedSettingsPendingRestart(t *testing.T) {
 	}
 	if persisted := response.(config.Config); persisted.Schedule.Interval != next.Schedule.Interval {
 		t.Fatalf("config.get did not return the saved desired config: %#v", persisted.Schedule)
+	}
+}
+
+func TestConfigUpdateDefaultsBlankDownloadURL(t *testing.T) {
+	api, runtimeState := newConfigUpdateTestAPI(t)
+	next := runtimeState.View().Config
+	next.Benchmark.DownloadURL = ""
+	next.Benchmark.DownloadMaxBytes = 0
+	result := updateConfigForTest(t, api, next)
+	if !result["saved"] || result["restart_required"] {
+		t.Fatalf("unexpected update result: %#v", result)
+	}
+	persisted, err := config.Load(runtimeState.ConfigPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Benchmark.DownloadURL != config.DefaultDownloadURL || persisted.Benchmark.DownloadMaxBytes != config.DefaultDownloadMaxBytes {
+		t.Fatalf("blank download settings were not defaulted: %#v", persisted.Benchmark)
+	}
+}
+
+func TestConfigUpdateRestoresPersistedConfigWhenHotReloadFails(t *testing.T) {
+	api, runtimeState := newConfigUpdateTestAPI(t)
+	before := runtimeState.View().Config
+	api.reloadConfig = func(context.Context, config.Config, bool) (bool, error) {
+		return false, errors.New("runtime reload failed")
+	}
+	next := before
+	next.Schedule.Interval = config.Duration(7 * time.Hour)
+	payload, err := json.Marshal(map[string]any{"config": next})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.Handle(context.Background(), ipc.Request{Method: "config.update", Params: payload}, nil); err == nil {
+		t.Fatal("hot reload failure was not returned")
+	}
+	persisted, err := config.Load(runtimeState.ConfigPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Schedule.Interval != before.Schedule.Interval {
+		t.Fatalf("failed hot reload left new disk configuration: %s", persisted.Schedule.Interval)
+	}
+	if runtimeState.View().Config.Schedule.Interval != before.Schedule.Interval {
+		t.Fatal("failed hot reload changed the active runtime")
+	}
+}
+
+func TestConfigUpdateRefreshesPolicyForPhysicalPathChange(t *testing.T) {
+	api, runtimeState := newConfigUpdateTestAPI(t)
+	refreshRequested := false
+	api.reloadConfig = func(_ context.Context, next config.Config, refreshPolicy bool) (bool, error) {
+		refreshRequested = refreshPolicy
+		runtimeState.mutex.Lock()
+		runtimeState.Config = next
+		runtimeState.notifyConfigChangedLocked()
+		runtimeState.mutex.Unlock()
+		return refreshPolicy, nil
+	}
+	next := runtimeState.View().Config
+	next.Network.Interface = "Ethernet 3"
+	next.Network.GatewayIPv4 = "192.168.15.1"
+	next.Network.ManageRoutes = true
+	result := updateConfigForTest(t, api, next)
+	if !refreshRequested || !result["policy_refreshed"] || !result["hot_applied"] || result["restart_required"] {
+		t.Fatalf("physical path update did not request a verified policy refresh: result=%#v requested=%t", result, refreshRequested)
 	}
 }
 
@@ -339,6 +405,13 @@ func newConfigUpdateTestAPI(t *testing.T) (*API, *Runtime) {
 	api, err := NewAPI(runtimeState)
 	if err != nil {
 		t.Fatal(err)
+	}
+	api.reloadConfig = func(_ context.Context, next config.Config, _ bool) (bool, error) {
+		runtimeState.mutex.Lock()
+		runtimeState.Config = next
+		runtimeState.notifyConfigChangedLocked()
+		runtimeState.mutex.Unlock()
+		return false, nil
 	}
 	return api, runtimeState
 }

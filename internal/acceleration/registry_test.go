@@ -12,6 +12,7 @@ func TestEffectiveDomainsMergesManualAuthorizedAndExcluded(t *testing.T) {
 	cfg := config.Default()
 	cfg.Acceleration.ManualDomains = []string{"Ani.Momoc.Top", "manual.example"}
 	cfg.Acceleration.ExcludedDomains = []string{"manual.example", "blocked.example"}
+	cfg.Acceleration.AutoDiscover = true
 	cfg.Acceleration.AutoApply = true
 	cfg.Hosts.Domains = []string{"legacy.example"}
 	state := store.State{DiscoveredDomains: map[string]store.DomainDiscovery{
@@ -29,6 +30,7 @@ func TestEffectiveDomainsMergesManualAuthorizedAndExcluded(t *testing.T) {
 
 func TestEffectiveDomainsKeepsDiscoveriesInactiveWhenAutoApplyIsDisabled(t *testing.T) {
 	cfg := config.Default()
+	cfg.Acceleration.AutoDiscover = true
 	cfg.Acceleration.AutoApply = false
 	state := store.State{DiscoveredDomains: map[string]store.DomainDiscovery{
 		"auto.example": {Domain: "auto.example", CloudflareVerified: true, PreflightVerified: true, Active: true},
@@ -42,6 +44,7 @@ func TestEffectiveDomainsKeepsDiscoveriesInactiveWhenAutoApplyIsDisabled(t *test
 func TestEffectiveDiscoveriesExcludesManualDomainsAndPreservesResolvedAddresses(t *testing.T) {
 	cfg := config.Default()
 	cfg.Acceleration.ManualDomains = []string{"manual.example"}
+	cfg.Acceleration.AutoDiscover = true
 	cfg.Acceleration.AutoApply = true
 	state := store.State{DiscoveredDomains: map[string]store.DomainDiscovery{
 		"manual.example": {Domain: "manual.example", CloudflareVerified: true, PreflightVerified: true, Active: true, LastResolvedAddresses: []string{"104.18.1.1"}},

@@ -20,6 +20,10 @@ import (
 const (
 	SchemaVersion              = 1
 	mihomoUnixControllerScheme = "unix"
+	// DefaultDownloadURL 是未配置测速地址时使用的 Cloudflare 官方 50 MiB 测速资源。
+	DefaultDownloadURL = "https://speed.cloudflare.com/__down?bytes=52428800"
+	// DefaultDownloadMaxBytes 是默认下载测速上限，单位为字节（50 MiB）。
+	DefaultDownloadMaxBytes int64 = 50 << 20
 )
 
 // Duration 为配置中的可读时间长度提供 YAML 与 JSON 编解码。
@@ -204,7 +208,7 @@ type HistoryConfig struct {
 	MaxRuns          int      `yaml:"max_runs" json:"max_runs"`
 }
 
-// Default 返回不修改系统路由、不产生下载流量的安全默认配置。
+// Default 返回不修改系统路由、默认启用 50 MiB 下载复筛的安全默认配置。
 func Default() Config {
 	return Config{
 		Version:  SchemaVersion,
@@ -216,10 +220,10 @@ func Default() Config {
 			MaxChangePercent: 30, RequestTimeout: Duration(20 * time.Second), Include: []string{}, Exclude: []string{},
 		},
 		Benchmark: BenchmarkConfig{
-			IPv4: true, IPv6: true, Candidates: 1000, ConnectAttempts: 4, Concurrency: 200,
-			ConnectTimeout: Duration(1500 * time.Millisecond), LatencyLimit: Duration(300 * time.Millisecond), LossLimit: 0.25,
+			IPv4: true, IPv6: true, Candidates: 6000, ConnectAttempts: 4, Concurrency: 200,
+			ConnectTimeout: Duration(1500 * time.Millisecond), LatencyLimit: Duration(300 * time.Millisecond), LossLimit: 0.25, DownloadURL: DefaultDownloadURL,
 			DownloadTop: 20, DownloadConcurrency: 5, TLSServerName: "speed.cloudflare.com", TLSTimeout: Duration(5 * time.Second), DownloadDuration: Duration(8 * time.Second),
-			DownloadMaxBytes: 32 << 20, SwitchImprovement: 0.15, MinimumHold: Duration(30 * time.Minute),
+			DownloadMaxBytes: DefaultDownloadMaxBytes, SwitchImprovement: 0.15, MinimumHold: Duration(30 * time.Minute),
 			FailureThreshold: 3, FailureCooldown: Duration(6 * time.Hour),
 		},
 		Network: NetworkConfig{CommandTimeout: Duration(10 * time.Second)},
@@ -231,7 +235,7 @@ func Default() Config {
 			External: ExternalProxyConfig{Timeout: Duration(15 * time.Second)},
 		},
 		Acceleration: AccelerationConfig{
-			Enabled: true, ManualDomains: []string{}, ExcludedDomains: []string{}, AutoDiscover: true, AutoApply: true,
+			Enabled: true, ManualDomains: []string{}, ExcludedDomains: []string{}, AutoDiscover: false, AutoApply: true,
 			DiscoveryInterval: Duration(15 * time.Second), MaxDiscoveredDomains: 1000,
 			ApplyVerificationTimeout: Duration(20 * time.Second), ApplyAttemptTimeout: Duration(5 * time.Second),
 			ApplyRetryInterval: Duration(500 * time.Millisecond), ApplyMaxAttempts: 4,
@@ -260,6 +264,7 @@ func Load(path, dataDirOverride string) (Config, error) {
 	if dataDirOverride != "" {
 		cfg.DataDir = dataDirOverride
 	}
+	cfg.ApplyDefaults()
 	if cfg.DataDir == "" {
 		cfg.DataDir = DefaultDataDir()
 	}
@@ -275,12 +280,23 @@ func Load(path, dataDirOverride string) (Config, error) {
 
 // Save 以原子方式保存 YAML 配置。
 func Save(path string, cfg Config) error {
+	cfg.ApplyDefaults()
 	cfg.normalizeCollections()
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return err
 	}
 	return fsutil.WriteFileAtomic(path, data, 0o600)
+}
+
+// ApplyDefaults 将可选测速配置归一化为可运行的默认值。
+func (c *Config) ApplyDefaults() {
+	if strings.TrimSpace(c.Benchmark.DownloadURL) == "" {
+		c.Benchmark.DownloadURL = DefaultDownloadURL
+		if c.Benchmark.DownloadMaxBytes <= 0 {
+			c.Benchmark.DownloadMaxBytes = DefaultDownloadMaxBytes
+		}
+	}
 }
 
 // normalizeCollections 保证 JSON/YAML 边界使用空数组而不是 null，兼容旧配置迁移和前端表单。

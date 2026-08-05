@@ -76,18 +76,26 @@ func (s *Service) Run(ctx context.Context) error {
 
 // observeDomains 按配置周期执行只读发现，并记录验证与策略刷新结果。
 func (s *Service) observeDomains(ctx context.Context) error {
-	initialConfig := s.runtime.View().Config
-	if !initialConfig.Acceleration.Enabled || !initialConfig.Acceleration.AutoDiscover {
-		<-ctx.Done()
-		return nil
-	}
-	ticker := time.NewTicker(initialConfig.Acceleration.DiscoveryInterval.Duration())
-	defer ticker.Stop()
 	for {
+		currentConfig := s.runtime.View().Config
+		configChanges := s.runtime.ConfigChanges()
+		if !currentConfig.Acceleration.Enabled || !currentConfig.Acceleration.AutoDiscover {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-configChanges:
+				continue
+			}
+		}
+		timer := time.NewTimer(currentConfig.Acceleration.DiscoveryInterval.Duration())
 		select {
 		case <-ctx.Done():
+			stopTimer(timer)
 			return nil
-		case <-ticker.C:
+		case <-configChanges:
+			stopTimer(timer)
+			continue
+		case <-timer.C:
 			result, err := s.runtime.DiscoverAccelerationDomains(ctx)
 			if err != nil {
 				s.logger.Debug("自动发现加速域名未完成", "component", "acceleration", "error", err)
@@ -101,24 +109,59 @@ func (s *Service) observeDomains(ctx context.Context) error {
 }
 
 func (s *Service) schedule(ctx context.Context) error {
-	initialConfig := s.runtime.View().Config
-	if !initialConfig.Schedule.Enabled {
-		s.setScheduleStatus(false, initialConfig.Schedule.Interval.Duration(), time.Time{}, "disabled")
-		<-ctx.Done()
-		return nil
+	var optimizationTimer *time.Timer
+	var optimizationChannel <-chan time.Time
+	var networkTimer *time.Timer
+	var networkChannel <-chan time.Time
+	defer func() {
+		stopTimer(optimizationTimer)
+		stopTimer(networkTimer)
+	}()
+	resetOptimization := func(delay time.Duration) {
+		resetTimer(&optimizationTimer, delay)
+		optimizationChannel = optimizationTimer.C
 	}
-	optimizationTimer := time.NewTimer(initialRunDelay)
-	defer optimizationTimer.Stop()
-	s.setScheduleStatus(true, initialConfig.Schedule.Interval.Duration(), time.Now().UTC().Add(initialRunDelay), "startup")
-	networkTicker := time.NewTicker(initialConfig.Schedule.NetworkPoll.Duration())
-	defer networkTicker.Stop()
-	fingerprint, _ := cfnetwork.NetworkFingerprint(ctx, initialConfig.Network.CommandTimeout.Duration())
+	resetNetworkPoll := func(delay time.Duration) {
+		resetTimer(&networkTimer, delay)
+		networkChannel = networkTimer.C
+	}
+	disableTimers := func() {
+		stopTimer(optimizationTimer)
+		stopTimer(networkTimer)
+		optimizationChannel = nil
+		networkChannel = nil
+	}
+	currentConfig := s.runtime.View().Config
+	configChanges := s.runtime.ConfigChanges()
+	fingerprint, _ := cfnetwork.NetworkFingerprint(ctx, currentConfig.Network.CommandTimeout.Duration())
+	if currentConfig.Schedule.Enabled {
+		resetOptimization(initialRunDelay)
+		resetNetworkPoll(currentConfig.Schedule.NetworkPoll.Duration())
+		s.setScheduleStatus(true, currentConfig.Schedule.Interval.Duration(), time.Now().UTC().Add(initialRunDelay), "startup")
+	} else {
+		disableTimers()
+		s.setScheduleStatus(false, currentConfig.Schedule.Interval.Duration(), time.Time{}, "disabled")
+	}
 	failureCount := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-optimizationTimer.C:
+		case <-configChanges:
+			configChanges = s.runtime.ConfigChanges()
+			currentConfig = s.runtime.View().Config
+			fingerprint, _ = cfnetwork.NetworkFingerprint(ctx, currentConfig.Network.CommandTimeout.Duration())
+			failureCount = 0
+			if !currentConfig.Schedule.Enabled {
+				disableTimers()
+				s.setScheduleStatus(false, currentConfig.Schedule.Interval.Duration(), time.Time{}, "disabled")
+				continue
+			}
+			resetOptimization(currentConfig.Schedule.Interval.Duration())
+			resetNetworkPoll(currentConfig.Schedule.NetworkPoll.Duration())
+			s.setScheduleStatus(true, currentConfig.Schedule.Interval.Duration(), time.Now().UTC().Add(currentConfig.Schedule.Interval.Duration()), "interval")
+		case <-optimizationChannel:
+			optimizationChannel = nil
 			s.setScheduleStatus(true, s.runtime.View().Config.Schedule.Interval.Duration(), time.Time{}, "running")
 			err := s.runScheduled(ctx)
 			currentConfig := s.runtime.View().Config
@@ -135,10 +178,12 @@ func (s *Service) schedule(ctx context.Context) error {
 			} else {
 				failureCount = 0
 			}
-			optimizationTimer.Reset(delay)
+			resetOptimization(delay)
 			s.setScheduleStatus(true, currentConfig.Schedule.Interval.Duration(), time.Now().UTC().Add(delay), trigger)
-		case <-networkTicker.C:
+		case <-networkChannel:
+			networkChannel = nil
 			currentConfig := s.runtime.View().Config
+			resetNetworkPoll(currentConfig.Schedule.NetworkPoll.Duration())
 			if !currentConfig.Schedule.RunOnNetworkChange {
 				continue
 			}
@@ -148,18 +193,33 @@ func (s *Service) schedule(ctx context.Context) error {
 				continue
 			}
 			if fingerprint != "" && current != fingerprint {
-				if !optimizationTimer.Stop() {
-					select {
-					case <-optimizationTimer.C:
-					default:
-					}
-				}
-				optimizationTimer.Reset(networkChangeDebounce)
+				resetOptimization(networkChangeDebounce)
 				s.setScheduleStatus(true, currentConfig.Schedule.Interval.Duration(), time.Now().UTC().Add(networkChangeDebounce), "network_change")
 				s.logger.Info("检测到默认网络路径变化", "action", "schedule_retest")
 			}
 			fingerprint = current
 		}
+	}
+}
+
+// resetTimer 安全复用计时器，并清空可能残留的到期信号。
+func resetTimer(timer **time.Timer, delay time.Duration) {
+	if *timer == nil {
+		*timer = time.NewTimer(delay)
+		return
+	}
+	stopTimer(*timer)
+	(*timer).Reset(delay)
+}
+
+// stopTimer 停止计时器并排空已经投递的信号。
+func stopTimer(timer *time.Timer) {
+	if timer == nil || timer.Stop() {
+		return
+	}
+	select {
+	case <-timer.C:
+	default:
 	}
 }
 

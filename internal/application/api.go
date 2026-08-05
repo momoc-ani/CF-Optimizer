@@ -10,7 +10,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -42,6 +41,7 @@ type API struct {
 	detectManagedAdapters managedAdapterDetector
 	buildManagedSession   managedSessionBuilder
 	saveConfig            func(string, config.Config) error
+	reloadConfig          func(context.Context, config.Config, bool) (bool, error)
 	now                   func() time.Time
 }
 
@@ -86,6 +86,7 @@ func NewAPI(runtime *Runtime) (*API, error) {
 		detectManagedAdapters: runtime.DetectManagedAdapters,
 		buildManagedSession:   runtime.BuildManagedSession,
 		saveConfig:            config.Save,
+		reloadConfig:          runtime.ReloadConfig,
 		now:                   time.Now,
 	}, nil
 }
@@ -104,15 +105,15 @@ func (a *API) Handle(ctx context.Context, request ipc.Request, emit func(any) er
 	case "quickstart.run":
 		return a.runQuickStart(ctx, request.Params, emit)
 	case "ranges.get":
-		return a.runtime.Ranges.Load()
+		return a.runtime.View().Ranges.Load()
 	case "ranges.update":
-		return a.runtime.Ranges.Update(ctx, true)
+		return a.runtime.View().Ranges.Update(ctx, true)
 	case "history.list":
 		return newestHistoryFirst(a.runtime.Store.Snapshot().History), nil
 	case "history.latest":
 		return a.latestBenchmark(request.Params)
 	case "routes.list":
-		return a.runtime.Routes.Transactions(), nil
+		return a.runtime.View().Routes.Transactions(), nil
 	case "proxy.detect":
 		return a.runtime.DetectProxyAdapters(ctx), nil
 	case "acceleration.domains":
@@ -321,7 +322,7 @@ func (a *API) routeDiagnostics(ctx context.Context, raw json.RawMessage) (diagno
 		return diagnostics.Report{}, invalidParams(errors.New("target must be a global unicast IP address"))
 	}
 	view := a.runtime.View()
-	return diagnostics.Generate(ctx, target, view.PhysicalPath, a.runtime.RouteBackend, view.DirectDial, view.Config.Network.CommandTimeout.Duration()), nil
+	return diagnostics.Generate(ctx, target, view.PhysicalPath, view.RouteBackend, view.DirectDial, view.Config.Network.CommandTimeout.Duration()), nil
 }
 
 func (a *API) updateConfig(ctx context.Context, raw json.RawMessage) (map[string]bool, error) {
@@ -337,6 +338,7 @@ func (a *API) updateConfig(ctx context.Context, raw json.RawMessage) (map[string
 	defer a.configurationMutex.Unlock()
 	view := a.runtime.View()
 	parameters.Config.Proxy.Mihomo.Secret = view.Config.Proxy.Mihomo.Secret
+	parameters.Config.ApplyDefaults()
 	if parameters.Config.DataDir == "" {
 		parameters.Config.DataDir = view.Config.DataDir
 	}
@@ -350,15 +352,12 @@ func (a *API) updateConfig(ctx context.Context, raw json.RawMessage) (map[string
 	if err != nil {
 		return nil, fmt.Errorf("load persisted config before update: %w", err)
 	}
-	domainsChanged := !slices.Equal(view.Config.Acceleration.ManualDomains, parameters.Config.Acceleration.ManualDomains) ||
-		!slices.Equal(view.Config.Acceleration.ExcludedDomains, parameters.Config.Acceleration.ExcludedDomains)
-	activeAfterUpdate := view.Config
-	activeAfterUpdate.Acceleration.ManualDomains = slices.Clone(parameters.Config.Acceleration.ManualDomains)
-	activeAfterUpdate.Acceleration.ExcludedDomains = slices.Clone(parameters.Config.Acceleration.ExcludedDomains)
-	restartRequired := !reflect.DeepEqual(activeAfterUpdate, parameters.Config)
+	policyRefreshRequired := policyRuntimeConfigChanged(view.Config, parameters.Config)
+	restartRequired := parameters.Config.DataDir != view.Config.DataDir || parameters.Config.IPC.Endpoint != view.Config.IPC.Endpoint
+	reloadRequired := !configsEqual(view.Config, parameters.Config)
 
 	updateContext := ctx
-	if domainsChanged {
+	if reloadRequired && !restartRequired {
 		var cancel context.CancelFunc
 		updateContext, cancel = context.WithCancel(ctx)
 		if !a.setActiveCancel(cancel) {
@@ -374,33 +373,53 @@ func (a *API) updateConfig(ctx context.Context, raw json.RawMessage) (map[string
 		return nil, err
 	}
 	policyRefreshed := false
-	if domainsChanged {
-		var updateErr error
-		policyRefreshed, updateErr = a.runtime.UpdateAccelerationDomains(
-			updateContext, parameters.Config.Acceleration.ManualDomains, parameters.Config.Acceleration.ExcludedDomains,
-		)
-		if updateErr != nil {
+	hotApplied := false
+	if reloadRequired && !restartRequired {
+		var reloadErr error
+		policyRefreshed, reloadErr = a.reloadConfig(updateContext, parameters.Config, policyRefreshRequired)
+		if reloadErr != nil {
 			restoreErr := a.saveConfig(a.runtime.ConfigPath, persistedBefore)
 			if a.runtime.Logger != nil {
 				result := "rolled_back"
 				if restoreErr != nil {
 					result = "rollback_failed"
 				}
-				a.runtime.Logger.Warn("域名配置热更新失败", "component", "config", "rollback_succeeded", restoreErr == nil, "result", result, "error", updateErr)
+				a.runtime.Logger.Warn("运行配置热重载失败", "component", "config", "rollback_succeeded", restoreErr == nil, "result", result, "error", reloadErr)
 			}
-			if restoreErr == nil && errors.Is(updateErr, optimizer.ErrAlreadyRunning) {
+			if restoreErr == nil && errors.Is(reloadErr, optimizer.ErrAlreadyRunning) {
 				return nil, &ipc.Error{Code: "conflict", Message: optimizer.ErrAlreadyRunning.Error()}
 			}
 			if restoreErr != nil {
-				updateErr = errors.Join(updateErr, fmt.Errorf("restore persisted config: %w", restoreErr))
+				reloadErr = errors.Join(reloadErr, fmt.Errorf("restore persisted config: %w", restoreErr))
 			}
-			return nil, updateErr
+			return nil, reloadErr
 		}
+		hotApplied = true
 	}
 	if a.runtime.Logger != nil {
-		a.runtime.Logger.Info("配置保存完成", "component", "config", "manual_domains", len(parameters.Config.Acceleration.ManualDomains), "excluded_domains", len(parameters.Config.Acceleration.ExcludedDomains), "hot_applied", domainsChanged, "policy_refreshed", policyRefreshed, "restart_required", restartRequired, "result", "completed")
+		a.runtime.Logger.Info("配置保存完成", "component", "config", "manual_domains", len(parameters.Config.Acceleration.ManualDomains), "excluded_domains", len(parameters.Config.Acceleration.ExcludedDomains), "hot_applied", hotApplied, "policy_refreshed", policyRefreshed, "restart_required", restartRequired, "result", "completed")
 	}
-	return map[string]bool{"saved": true, "hot_applied": domainsChanged, "policy_refreshed": policyRefreshed, "restart_required": restartRequired}, nil
+	return map[string]bool{"saved": true, "hot_applied": hotApplied, "policy_refreshed": policyRefreshed, "restart_required": restartRequired}, nil
+}
+
+// configsEqual 比较保存目标与当前运行配置，忽略切片底层数组差异。
+func configsEqual(left, right config.Config) bool {
+	return valuesEqual(left, right)
+}
+
+// policyRuntimeConfigChanged 判断是否需要用新物理路径和适配器重新验证当前策略。
+func policyRuntimeConfigChanged(left, right config.Config) bool {
+	return !valuesEqual(left.Network, right.Network) ||
+		!valuesEqual(left.Proxy, right.Proxy) ||
+		!valuesEqual(left.Hosts, right.Hosts) ||
+		!valuesEqual(left.Acceleration, right.Acceleration)
+}
+
+// valuesEqual 使用稳定 JSON 表达比较仅包含配置字段的值。
+func valuesEqual(left, right any) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
 }
 
 // desiredConfig 返回磁盘中的期望配置；配置文件尚未建立时回退到当前运行时快照。
@@ -418,7 +437,7 @@ func (a *API) desiredConfig() (config.Config, error) {
 	if err != nil {
 		return config.Config{}, err
 	}
-	return mergeDetectedMihomoConfig(persisted, view.Config, a.runtime.mihomoAutoDetected), nil
+	return mergeDetectedMihomoConfig(persisted, view.Config, view.MihomoAutoDetected), nil
 }
 
 func (a *API) tailLogs(raw json.RawMessage) ([]string, error) {

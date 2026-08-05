@@ -22,7 +22,7 @@ ranges:
 benchmark:
   ipv4: true
   ipv6: true
-  candidates: 1000
+  candidates: 6000
   connect_attempts: 4
   concurrency: 200
   connect_timeout: 1500ms
@@ -30,11 +30,11 @@ benchmark:
   loss_limit: 0.25
   download_top: 20
   download_concurrency: 5
-  download_url: ""
+  download_url: "https://speed.cloudflare.com/__down?bytes=52428800"
   tls_server_name: speed.cloudflare.com
   tls_timeout: 5s
   download_duration: 8s
-  download_max_bytes: 33554432
+  download_max_bytes: 52428800
   switch_improvement: 0.15
   minimum_hold: 30m
   failure_threshold: 3
@@ -86,7 +86,7 @@ acceleration:
   enabled: true
   manual_domains: []
   excluded_domains: []
-  auto_discover: true
+  auto_discover: false
   auto_apply: false
   discovery_interval: 15s
   max_discovered_domains: 1000

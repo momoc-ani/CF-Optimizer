@@ -14,6 +14,22 @@ import (
 	"github.com/cf-optimizer/cf-optimizer/internal/store"
 )
 
+func TestActivateSessionBroadcastsConfigChange(t *testing.T) {
+	runtimeState := &Runtime{Config: config.Default()}
+	changes := runtimeState.ConfigChanges()
+	next := config.Default()
+	next.Schedule.Interval = config.Duration(7 * time.Hour)
+	runtimeState.ActivateSession(RuntimeSession{Config: next})
+	select {
+	case <-changes:
+	case <-time.After(time.Second):
+		t.Fatal("runtime config change was not broadcast")
+	}
+	if runtimeState.View().Config.Schedule.Interval != next.Schedule.Interval {
+		t.Fatal("activated session did not replace runtime configuration")
+	}
+}
+
 func TestConfigForStoredReceiptsEnablesOnlyRequiredAdapters(t *testing.T) {
 	cfg := config.Default()
 	cfg.Proxy.Mihomo.ProviderFile = "/tmp/cf-optimizer-mihomo.yaml"

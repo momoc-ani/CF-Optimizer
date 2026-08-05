@@ -29,6 +29,7 @@ func TestTCPQuality(t *testing.T) {
 	cfg.ConnectAttempts = 2
 	cfg.Concurrency = 1
 	cfg.TLSServerName = ""
+	cfg.DownloadURL = ""
 	dial := func(context.Context, string, string) (net.Conn, error) { return fakeConn{}, nil }
 	tester := New(cfg, dial)
 	results, err := tester.Run(context.Background(), []netip.Addr{netip.MustParseAddr("1.1.1.1")}, nil)

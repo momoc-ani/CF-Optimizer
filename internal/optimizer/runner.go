@@ -156,21 +156,84 @@ func NewRunner(cfg config.Config, rangeSource RangeSource, benchmarker Benchmark
 	if rangeSource == nil || benchmarker == nil || stateStore == nil || logger == nil {
 		return nil, errors.New("range source, benchmarker, store and logger are required")
 	}
-	// Go 接口可能携带 nil 具体指针；在构造边界归一化，避免无适配器配置被误判为可应用策略。
-	if policy != nil {
-		policyValue := reflect.ValueOf(policy)
-		if policyValue.Kind() == reflect.Pointer && policyValue.IsNil() {
-			policy = nil
-		}
-	}
-	if journaledPolicy, ok := policy.(policyReceiptJournalSetter); ok {
-		journaledPolicy.SetReceiptJournal(newPolicyReceiptJournal(stateStore))
-	}
+	policy = normalizePolicyApplier(policy)
+	configurePolicyJournal(policy, stateStore)
 	return &Runner{
 		config: cfg, ranges: rangeSource, benchmark: benchmarker, store: stateStore,
 		routes: routes, physicalPath: physicalPath, policy: policy,
 		logger: logger.With("component", "optimizer"), now: time.Now,
 	}, nil
+}
+
+// Reconfigure 在无运行任务时原子替换 Runner 的运行依赖，并可刷新当前策略。
+func (r *Runner) Reconfigure(
+	ctx context.Context,
+	cfg config.Config,
+	rangeSource RangeSource,
+	benchmarker Benchmarker,
+	routes *cfnetwork.RouteController,
+	physicalPath cfnetwork.PhysicalPath,
+	policy PolicyApplier,
+	domainResolver DomainResolver,
+	domainVerifier DomainMappingVerifier,
+	refreshPolicy bool,
+) (bool, error) {
+	if rangeSource == nil || benchmarker == nil {
+		return false, errors.New("range source and benchmarker are required for runtime reload")
+	}
+	if !r.tryAcquireMaintenance() {
+		return false, ErrAlreadyRunning
+	}
+	defer r.operationGate.release()
+
+	policy = normalizePolicyApplier(policy)
+	configurePolicyJournal(policy, r.store)
+	previousConfig, previousRanges, previousBenchmark := r.config, r.ranges, r.benchmark
+	previousRoutes, previousPath, previousPolicy := r.routes, r.physicalPath, r.policy
+	previousResolver, previousVerifier := r.domainResolver, r.domainVerifier
+	r.config, r.ranges, r.benchmark = cfg, rangeSource, benchmarker
+	r.routes, r.physicalPath, r.policy = routes, physicalPath, policy
+	r.domainResolver, r.domainVerifier = domainResolver, domainVerifier
+
+	rollback := func() {
+		r.config, r.ranges, r.benchmark = previousConfig, previousRanges, previousBenchmark
+		r.routes, r.physicalPath, r.policy = previousRoutes, previousPath, previousPolicy
+		r.domainResolver, r.domainVerifier = previousResolver, previousVerifier
+	}
+	if refreshPolicy && r.store.Snapshot().Policy != nil {
+		if r.policy == nil {
+			r.logger.Warn("运行配置已热重载但当前策略无法刷新", "policy_snapshot_present", true, "result", "deferred")
+			return false, nil
+		}
+		if err := r.refreshPolicyLocked(ctx); err != nil {
+			rollback()
+			return false, fmt.Errorf("refresh policy after runtime reload: %w", err)
+		}
+		r.logger.Info("运行配置与当前策略已热重载", "policy_refreshed", true, "result", "completed")
+		return true, nil
+	}
+	r.logger.Info("运行配置已热重载", "policy_refreshed", false, "result", "completed")
+	return false, nil
+}
+
+// normalizePolicyApplier 将带 nil 具体指针的接口归一化为 nil。
+func normalizePolicyApplier(policy PolicyApplier) PolicyApplier {
+	// Go 接口可能携带 nil 具体指针；在构造边界归一化，避免无适配器配置被误判为可应用策略。
+	if policy == nil {
+		return nil
+	}
+	policyValue := reflect.ValueOf(policy)
+	if policyValue.Kind() == reflect.Pointer && policyValue.IsNil() {
+		return nil
+	}
+	return policy
+}
+
+// configurePolicyJournal 为支持事务日志的策略适配器注入持久化边界。
+func configurePolicyJournal(policy PolicyApplier, stateStore *store.Store) {
+	if journaledPolicy, ok := policy.(policyReceiptJournalSetter); ok {
+		journaledPolicy.SetReceiptJournal(newPolicyReceiptJournal(stateStore))
+	}
 }
 
 // Run 执行一次可取消优选；同一 Runner 同时只允许一个任务。

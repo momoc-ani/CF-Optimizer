@@ -12,6 +12,16 @@ import (
 	"github.com/cf-optimizer/cf-optimizer/internal/fsutil"
 )
 
+func TestDefaultBenchmarkAndDiscoverySettings(t *testing.T) {
+	cfg := Default()
+	if cfg.Benchmark.Candidates != 6000 || cfg.Benchmark.DownloadURL != DefaultDownloadURL || cfg.Benchmark.DownloadMaxBytes != DefaultDownloadMaxBytes {
+		t.Fatalf("unexpected default benchmark configuration: %#v", cfg.Benchmark)
+	}
+	if cfg.Acceleration.AutoDiscover {
+		t.Fatal("automatic domain discovery must be disabled by default")
+	}
+}
+
 func TestLoadMergesDefaults(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -23,14 +33,14 @@ func TestLoadMergesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Benchmark.Candidates != 42 || cfg.Benchmark.ConnectAttempts != 4 || cfg.Benchmark.DownloadConcurrency != 5 {
+	if cfg.Benchmark.Candidates != 42 || cfg.Benchmark.ConnectAttempts != 4 || cfg.Benchmark.DownloadConcurrency != 5 || cfg.Benchmark.DownloadURL != DefaultDownloadURL || cfg.Benchmark.DownloadMaxBytes != DefaultDownloadMaxBytes {
 		t.Fatalf("defaults were not merged: %#v", cfg.Benchmark)
 	}
 	if cfg.Schedule.Interval.Duration() != 6*time.Hour {
 		t.Fatalf("unexpected interval: %s", cfg.Schedule.Interval)
 	}
-	if !cfg.Acceleration.Enabled || !cfg.Acceleration.AutoDiscover || !cfg.Acceleration.AutoApply {
-		t.Fatalf("域名加速默认值未启用自动发现和自动应用：%#v", cfg.Acceleration)
+	if !cfg.Acceleration.Enabled || cfg.Acceleration.AutoDiscover || !cfg.Acceleration.AutoApply {
+		t.Fatalf("域名加速默认值未关闭自动发现或未保留自动应用：%#v", cfg.Acceleration)
 	}
 	if cfg.Acceleration.ApplyVerificationTimeout.Duration() != 20*time.Second ||
 		cfg.Acceleration.ApplyAttemptTimeout.Duration() != 5*time.Second ||
@@ -40,6 +50,22 @@ func TestLoadMergesDefaults(t *testing.T) {
 	}
 	if got := cfg.AccelerationDomains(); len(got) != 0 {
 		t.Fatalf("default acceleration domains = %#v, want empty", got)
+	}
+}
+
+func TestLoadEnablesDefaultDownloadWhenURLIsBlank(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := []byte("version: 1\nbenchmark:\n  download_url: \"\"\n")
+	if err := osWriteFile(path, data); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Benchmark.DownloadURL != DefaultDownloadURL || cfg.Benchmark.DownloadMaxBytes != DefaultDownloadMaxBytes {
+		t.Fatalf("blank download URL did not enable the default 50 MiB probe: url=%q bytes=%d", cfg.Benchmark.DownloadURL, cfg.Benchmark.DownloadMaxBytes)
 	}
 }
 

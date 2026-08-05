@@ -175,7 +175,8 @@ func (a *API) runQuickStart(ctx context.Context, raw json.RawMessage, emit func(
 	if err != nil {
 		return QuickStartResult{}, fmt.Errorf("build confirmed quick-start session: %w", err)
 	}
-	transactionOffset := len(a.runtime.Routes.Transactions())
+	routes := a.runtime.View().Routes
+	transactionOffset := len(routes.Transactions())
 	report, runErr := a.runWithRunner(ctx, session.Runner, optimizer.RunOptions{
 		ForceRangeRefresh: parameters.ForceRangeRefresh, ApplyPolicy: true,
 	}, func(event optimizer.Event) error {
@@ -190,7 +191,7 @@ func (a *API) runQuickStart(ctx context.Context, raw json.RawMessage, emit func(
 		if errors.As(runErr, &protocolError) && (protocolError.Code == "conflict" || protocolError.Code == "cancelled") {
 			return result, runErr
 		}
-		result.Status = classifyQuickStartFailure(a.runtime.Routes.Transactions()[transactionOffset:], runErr)
+		result.Status = classifyQuickStartFailure(routes.Transactions()[transactionOffset:], runErr)
 		result.Error = runErr.Error()
 		a.runtime.Logger.Warn("快速流程执行失败", "component", "quickstart", "run_id", report.ID, "interface", path.Interface, "result", result.Status, "error", runErr)
 		return result, nil

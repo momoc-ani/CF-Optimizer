@@ -97,9 +97,9 @@ export const mockConfig: AppConfig = {
   data_dir: '/var/lib/cf-optimizer',
   schedule: { enabled: true, interval: '6h0m0s', run_on_network_change: true, network_poll: '30s' },
   ranges: { source: 'cloudflare-api', api_url: 'https://api.cloudflare.com/client/v4/ips', ipv4_url: 'https://www.cloudflare.com/ips-v4', ipv6_url: 'https://www.cloudflare.com/ips-v6', refresh_interval: '24h0m0s', stale_after: '168h0m0s', max_change_percent: 30, request_timeout: '20s', include: [], exclude: ['104.16.10.0/24'] },
-  benchmark: { ipv4: true, ipv6: true, candidates: 1000, connect_attempts: 4, concurrency: 200, connect_timeout: '1.5s', latency_limit: '300ms', loss_limit: 0.25, download_top: 20, download_concurrency: 5, download_url: 'https://speed.example.net/10mb.bin', tls_server_name: 'speed.example.net', tls_timeout: '5s', download_duration: '8s', download_max_bytes: 33554432, switch_improvement: 0.15, minimum_hold: '30m0s', failure_threshold: 3, failure_cooldown: '6h0m0s', daily_seed: '' },
+  benchmark: { ipv4: true, ipv6: true, candidates: 6000, connect_attempts: 4, concurrency: 200, connect_timeout: '1.5s', latency_limit: '300ms', loss_limit: 0.25, download_top: 20, download_concurrency: 5, download_url: 'https://speed.cloudflare.com/__down?bytes=52428800', tls_server_name: 'speed.cloudflare.com', tls_timeout: '5s', download_duration: '8s', download_max_bytes: 52428800, switch_improvement: 0.15, minimum_hold: '30m0s', failure_threshold: 3, failure_cooldown: '6h0m0s', daily_seed: '' },
   network: { interface: 'Ethernet 2', gateway_ipv4: '192.168.50.1', gateway_ipv6: 'fe80::1', manage_routes: true, command_timeout: '10s' },
-  acceleration: { enabled: true, manual_domains: ['ani.momoc.top'], excluded_domains: [], auto_discover: true, auto_apply: true, discovery_interval: '15s', max_discovered_domains: 1000, apply_verification_timeout: '20s', apply_attempt_timeout: '5s', apply_retry_interval: '500ms', apply_max_attempts: 4 },
+  acceleration: { enabled: true, manual_domains: ['ani.momoc.top'], excluded_domains: [], auto_discover: false, auto_apply: true, discovery_interval: '15s', max_discovered_domains: 1000, apply_verification_timeout: '20s', apply_attempt_timeout: '5s', apply_retry_interval: '500ms', apply_max_attempts: 4 },
   proxy: { auto_detect: true, generic: { enabled: true }, mihomo: { enabled: true, controller: 'http://127.0.0.1:9090', provider_file: '/etc/mihomo/rules/cf-optimizer.yaml', reload_config: '', timeout: '5s' }, sing_box: { enabled: false }, xray: { enabled: false }, external: { enabled: false } },
   hosts: { enabled: false, path: 'C:\\Windows\\System32\\drivers\\etc\\hosts', domains: [] },
   ipc: { endpoint: '\\\\.\\pipe\\cf-optimizer-v1' },
@@ -195,7 +195,7 @@ export async function mockRequest<T>(method: string, parameters: Record<string, 
       return { cleared, accelerations_removed: cleared, policy_refreshed: cleared > 0 } as T;
     }
     case 'config.get': return mockConfig as T;
-    case 'config.update': return { saved: true, hot_applied: false, policy_refreshed: false, restart_required: true } as T;
+    case 'config.update': return { saved: true, hot_applied: true, policy_refreshed: false, restart_required: false } as T;
     case 'logs.tail': return [
       JSON.stringify({ time: iso(-3), level: 'INFO', component: 'optimizer', msg: '优选任务结束', run_id: 'run-20260801-0930', result: 'completed', duration: '2m41s' }),
       JSON.stringify({ time: iso(-4), level: 'INFO', component: 'proxy', msg: '代理策略验证完成', transaction_id: 'px-41c8b3', adapter: 'mihomo', result: 'verified' }),

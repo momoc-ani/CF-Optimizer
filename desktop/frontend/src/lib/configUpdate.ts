@@ -5,13 +5,10 @@ export interface ConfigUpdateResult {
   restart_required: boolean;
 }
 
-/** describeConfigUpdateResult 区分即时生效的域名列表与仍需重启的其他配置。 */
+/** describeConfigUpdateResult 区分热重载、策略刷新和少量进程边界配置。 */
 export function describeConfigUpdateResult(result: ConfigUpdateResult): string {
-  if (result.hot_applied && !result.policy_refreshed) {
-    if (result.restart_required) return '域名列表已保存但当前没有活动策略；其余更改将在后台服务重启后应用。';
-    return '域名列表已保存；当前没有活动策略，尚未应用。';
-  }
-  if (result.restart_required && result.hot_applied) return '域名列表已即时应用；其余更改将在后台服务重启后应用。';
-  if (result.restart_required) return '已保存；后台服务重启后应用更改。';
-  return '更改已经应用。';
+  if (result.restart_required) return result.hot_applied ? '可热重载的更改已应用；IPC 端点或数据目录将在后台服务重启后应用。' : '已保存；IPC 端点或数据目录将在后台服务重启后应用。';
+  if (result.hot_applied && result.policy_refreshed) return '配置已热重载，当前策略也已重新验证。';
+  if (result.hot_applied) return '配置已热重载，当前无需刷新策略。';
+  return '配置没有运行时变化。';
 }

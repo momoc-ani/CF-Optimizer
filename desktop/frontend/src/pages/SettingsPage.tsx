@@ -15,6 +15,7 @@ import { describeConfigUpdateResult, type ConfigUpdateResult } from '../lib/conf
 
 const sourceRepositoryURL = 'https://github.com/momoc-ani/CF-Optimizer';
 const projectCopyright = 'Copyright (c) 2026 CF Optimizer Contributors';
+const defaultDownloadURL = 'https://speed.cloudflare.com/__down?bytes=52428800';
 
 /** openSourceRepository 使用 Wails 打开外部仓库，开发预览时回退到浏览器标签页。 */
 function openSourceRepository() {
@@ -74,7 +75,7 @@ function formFromConfig(config: AppConfig): SettingsForm {
     connectAttempts: config.benchmark.connect_attempts,
     lossLimitPercent: config.benchmark.loss_limit * 100,
     switchImprovementPercent: config.benchmark.switch_improvement * 100,
-    downloadURL: config.benchmark.download_url,
+    downloadURL: config.benchmark.download_url || defaultDownloadURL,
     tlsServerName: config.benchmark.tls_server_name,
     rangeRefreshInterval: config.ranges.refresh_interval,
     rangeInclude: joinConfigLines(config.ranges.include),
@@ -103,7 +104,7 @@ function mergeSettings(config: AppConfig, form: SettingsForm): AppConfig {
       connect_attempts: form.connectAttempts,
       loss_limit: form.lossLimitPercent / 100,
       switch_improvement: form.switchImprovementPercent / 100,
-      download_url: form.downloadURL,
+      download_url: form.downloadURL.trim() || defaultDownloadURL,
       tls_server_name: form.tlsServerName,
     },
     network: { ...config.network, interface: form.networkInterface.trim(), gateway_ipv4: form.gatewayIPv4.trim(), gateway_ipv6: form.gatewayIPv6.trim(), manage_routes: form.manageRoutes },
@@ -117,7 +118,7 @@ export function SettingsPage() {
   const queryClient = useQueryClient();
   const { colorScheme, setColorScheme } = useMantineColorScheme();
   const form = useForm<SettingsForm>({ resolver: zodResolver(settingsSchema), defaultValues: {
-    scheduleEnabled: true, scheduleInterval: '6h', runOnNetworkChange: true, ipv4: true, ipv6: true, candidates: 1000, concurrency: 200, downloadConcurrency: 5, connectAttempts: 4, lossLimitPercent: 25, switchImprovementPercent: 15, downloadURL: '', tlsServerName: '', rangeRefreshInterval: '24h', rangeInclude: '', rangeExclude: '', proxyAutoDetect: true, networkInterface: '', gatewayIPv4: '', gatewayIPv6: '', manageRoutes: false,
+    scheduleEnabled: true, scheduleInterval: '6h', runOnNetworkChange: true, ipv4: true, ipv6: true, candidates: 6000, concurrency: 200, downloadConcurrency: 5, connectAttempts: 4, lossLimitPercent: 25, switchImprovementPercent: 15, downloadURL: defaultDownloadURL, tlsServerName: 'speed.cloudflare.com', rangeRefreshInterval: '24h', rangeInclude: '', rangeExclude: '', proxyAutoDetect: true, networkInterface: '', gatewayIPv4: '', gatewayIPv6: '', manageRoutes: false,
   } });
   useEffect(() => { if (config.data) form.reset(formFromConfig(config.data)); }, [config.data, form]);
   const save = useMutation({
@@ -162,7 +163,7 @@ export function SettingsPage() {
 
             <Section title="TLS 与下载复筛">
               <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
-                <Controller control={form.control} name="downloadURL" render={({ field }) => <TextInput {...field} label="HTTPS 测速地址" placeholder="留空则不产生下载流量" error={errors.downloadURL?.message} />} />
+                <Controller control={form.control} name="downloadURL" render={({ field }) => <TextInput {...field} label="HTTPS 测速地址" placeholder="默认使用 Cloudflare 50 MiB 测速地址" error={errors.downloadURL?.message} />} />
                 <Controller control={form.control} name="tlsServerName" render={({ field }) => <TextInput {...field} label="TLS Server Name" placeholder="与测速域名一致" error={errors.tlsServerName?.message} />} />
                 <Controller control={form.control} name="downloadConcurrency" render={({ field }) => <NumberInput label="TLS/下载并发数" min={1} max={256} value={field.value} onChange={(value) => field.onChange(Number(value))} error={errors.downloadConcurrency?.message} />} />
               </SimpleGrid>
