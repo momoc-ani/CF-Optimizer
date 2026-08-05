@@ -1,0 +1,109 @@
+version: 1
+data_dir: ""
+
+schedule:
+  enabled: true
+  interval: 6h
+  run_on_network_change: true
+  network_poll: 30s
+
+ranges:
+  source: cloudflare-api
+  api_url: https://api.cloudflare.com/client/v4/ips
+  ipv4_url: https://www.cloudflare.com/ips-v4
+  ipv6_url: https://www.cloudflare.com/ips-v6
+  refresh_interval: 24h
+  stale_after: 168h
+  max_change_percent: 30
+  request_timeout: 20s
+  include: []
+  exclude: []
+
+benchmark:
+  ipv4: true
+  ipv6: true
+  candidates: 6000
+  connect_attempts: 4
+  concurrency: 200
+  download_concurrency: 5
+  connect_timeout: 1500ms
+  latency_limit: 300ms
+  loss_limit: 0.25
+  download_top: 20
+  download_url: "https://speed.cloudflare.com/__down?bytes=52428800"
+  tls_server_name: speed.cloudflare.com
+  tls_timeout: 5s
+  download_duration: 8s
+  download_max_bytes: 33554432
+  switch_improvement: 0.15
+  minimum_hold: 30m
+  failure_threshold: 3
+  failure_cooldown: 6h
+  daily_seed: ""
+
+network:
+  interface: ""
+  gateway_ipv4: ""
+  gateway_ipv6: ""
+  manage_routes: false
+  command_timeout: 10s
+
+proxy:
+  auto_detect: true
+  generic:
+    enabled: true
+  mihomo:
+    enabled: false
+    # Use a loopback HTTP(S) URL, or unix:///absolute/socket/path on macOS/Linux.
+    controller: http://127.0.0.1:9090
+    secret: ""
+    provider_file: ""
+    reload_config: ""
+    timeout: 5s
+  sing_box:
+    enabled: false
+    executable: sing-box
+    managed_file: ""
+    direct_outbound: direct
+    validate_args: [check, -C, "{{dir}}"]
+    reload_args: []
+    timeout: 10s
+  xray:
+    enabled: false
+    executable: xray
+    managed_file: ""
+    direct_outbound: direct
+    validate_args: [run, -test, -confdir, "{{dir}}"]
+    reload_args: []
+    timeout: 10s
+  external:
+    enabled: false
+    executable: ""
+    args: []
+    timeout: 15s
+
+acceleration:
+  enabled: true
+  manual_domains: []
+  excluded_domains: []
+  auto_discover: true
+  auto_apply: false
+  discovery_interval: 15s
+  max_discovered_domains: 1000
+  apply_verification_timeout: 20s
+  apply_attempt_timeout: 5s
+  apply_retry_interval: 500ms
+  apply_max_attempts: 4
+
+hosts:
+  enabled: false
+  path: /etc/hosts
+  domains: []
+
+ipc:
+  endpoint: ""
+
+history:
+  summary_retention: 720h
+  detail_retention: 168h
+  max_runs: 500
