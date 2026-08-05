@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +47,9 @@ func TestAdapterApplyVerifyRollbackAndIdempotency(t *testing.T) {
 	}
 	activePrevious := []byte("dns:\n  use-hosts: false\nhosts:\n  existing.example: 9.9.9.9\nrules:\n  - MATCH,proxy\n")
 	if err := os.WriteFile(activeConfigPath, activePrevious, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(activeConfigPath, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Default().Proxy.Mihomo
@@ -97,6 +101,7 @@ func TestAdapterApplyVerifyRollbackAndIdempotency(t *testing.T) {
 	if !strings.Contains(string(activeContent), "example.com: 1.1.1.1") || !strings.Contains(string(activeContent), "- DOMAIN,example.com,DIRECT") {
 		t.Fatalf("active config was not patched: %s", activeContent)
 	}
+	assertThirdPartyConfigPermission(t, activeConfigPath, 0o644)
 	if err := adapter.Verify(context.Background(), policy, receipt); err != nil {
 		t.Fatal(err)
 	}
@@ -131,6 +136,7 @@ func TestAdapterApplyVerifyRollbackAndIdempotency(t *testing.T) {
 	if string(restoredConfig) != string(activePrevious) {
 		t.Fatalf("active config was not restored: %q", restoredConfig)
 	}
+	assertThirdPartyConfigPermission(t, activeConfigPath, 0o644)
 	if _, err := os.Stat(managedMetadataPath(providerPath)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("new managed metadata was not removed: %v", err)
 	}
@@ -153,6 +159,9 @@ func TestCleanupConflictRemovesManagedDescendantWithoutOverwritingOtherConfig(t 
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(activeConfigPath, configPrevious, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(activeConfigPath, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Default().Proxy.Mihomo
@@ -228,6 +237,7 @@ func TestCleanupConflictRemovesManagedDescendantWithoutOverwritingOtherConfig(t 
 			t.Fatalf("unrelated config %q was not preserved: %s", expected, cleanedConfig)
 		}
 	}
+	assertThirdPartyConfigPermission(t, activeConfigPath, 0o644)
 	if _, err := os.Stat(managedMetadataPath(providerPath)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("managed metadata was not removed: %v", err)
 	}
@@ -303,6 +313,76 @@ func TestCleanupManagedConfigRejectsNonAddressHostEdit(t *testing.T) {
 func TestControllerUnavailableRejectsNonNetworkProtocolError(t *testing.T) {
 	if controllerUnavailable(errors.New("Mihomo reload returned 401")) {
 		t.Fatal("HTTP or authentication failure was treated as an offline controller")
+	}
+}
+
+func TestApplyFailureRestoresThirdPartyConfigPermission(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/configs" {
+			response.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		response.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	directory := t.TempDir()
+	providerPath := filepath.Join(directory, "cf-optimizer.yaml")
+	activeConfigPath := filepath.Join(directory, "config.yaml")
+	activePrevious := []byte("rules:\n  - MATCH,proxy\n")
+	if err := os.WriteFile(providerPath, []byte("payload: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(activeConfigPath, activePrevious, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(activeConfigPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default().Proxy.Mihomo
+	cfg.Enabled = true
+	cfg.Controller = server.URL
+	cfg.ProviderFile = providerPath
+	cfg.ReloadConfig = activeConfigPath
+	cfg.Timeout = config.Duration(time.Second)
+	adapter, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := (proxy.DirectPolicy{
+		Domains:        []string{"example.com"},
+		DomainMappings: []proxy.DomainMapping{{Domain: "example.com", Addresses: []string{"1.1.1.1"}}},
+	}).Normalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := adapter.Plan(context.Background(), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Apply(context.Background(), plan); err == nil {
+		t.Fatal("Mihomo reload failure must fail apply")
+	}
+	restored, err := os.ReadFile(activeConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restored) != string(activePrevious) {
+		t.Fatalf("active config after failed apply = %q", restored)
+	}
+	assertThirdPartyConfigPermission(t, activeConfigPath, 0o644)
+}
+
+func assertThirdPartyConfigPermission(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != want {
+		t.Fatalf("third-party config permission = %o, want %o", info.Mode().Perm(), want)
 	}
 }
 

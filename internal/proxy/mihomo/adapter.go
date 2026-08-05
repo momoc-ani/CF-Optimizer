@@ -260,7 +260,7 @@ func (a *Adapter) Apply(ctx context.Context, plan proxy.Plan) (proxy.Receipt, er
 	changed := providerChanged || configChanged || metadataChanged
 	restoreAll := func() {
 		if len(payload.ConfigContent) > 0 {
-			_ = restoreOptionalFile(a.config.ReloadConfig, configPrevious, configExisted)
+			_ = restoreOptionalFilePreservingMetadata(a.config.ReloadConfig, configPrevious, configExisted)
 			_ = restoreOptionalFile(managedMetadataPath(a.config.ProviderFile), metadataPrevious, metadataExisted)
 		}
 		_ = restoreOptionalFile(a.config.ProviderFile, previous, existed)
@@ -277,7 +277,7 @@ func (a *Adapter) Apply(ctx context.Context, plan proxy.Plan) (proxy.Receipt, er
 		}
 	}
 	if configChanged {
-		if err := fsutil.WriteFileAtomic(a.config.ReloadConfig, payload.ConfigContent, 0o640); err != nil {
+		if err := fsutil.WriteFileAtomicPreservingMetadata(a.config.ReloadConfig, payload.ConfigContent, 0o640); err != nil {
 			restoreAll()
 			return proxy.Receipt{}, fmt.Errorf("write Mihomo active config: %w", err)
 		}
@@ -395,7 +395,7 @@ func (a *Adapter) Rollback(ctx context.Context, receipt proxy.Receipt) error {
 		return errors.New("Mihomo managed metadata changed after apply; refusing to overwrite it during rollback")
 	}
 	if payload.ConfigAppliedHash != "" {
-		if err := restoreOptionalFile(configFile, payload.ConfigPrevious, payload.ConfigPreviousExists); err != nil {
+		if err := restoreOptionalFilePreservingMetadata(configFile, payload.ConfigPrevious, payload.ConfigPreviousExists); err != nil {
 			return err
 		}
 	}
@@ -477,7 +477,7 @@ func (a *Adapter) CleanupConflict(ctx context.Context, receipts []proxy.Receipt)
 	baselineMetadata, baselineMetadataExists := managedBaseline(payloads, true)
 	restoreCurrent := func() {
 		if configExists {
-			_ = fsutil.WriteFileAtomic(configFile, currentConfig, 0o640)
+			_ = fsutil.WriteFileAtomicPreservingMetadata(configFile, currentConfig, 0o640)
 		}
 		_ = restoreOptionalFile(providerFile, currentProvider, providerExists)
 		if metadataFile != "" {
@@ -485,7 +485,7 @@ func (a *Adapter) CleanupConflict(ctx context.Context, receipts []proxy.Receipt)
 		}
 	}
 	if configExists && !bytes.Equal(currentConfig, cleanedConfig) {
-		if err := fsutil.WriteFileAtomic(configFile, cleanedConfig, 0o640); err != nil {
+		if err := fsutil.WriteFileAtomicPreservingMetadata(configFile, cleanedConfig, 0o640); err != nil {
 			return fmt.Errorf("write cleaned Mihomo active config: %w", err)
 		}
 	}
@@ -682,6 +682,17 @@ func restoreOptionalFile(path string, content []byte, existed bool) error {
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove newly created provider: %w", err)
+	}
+	return nil
+}
+
+// restoreOptionalFilePreservingMetadata 恢复第三方活动配置时保留其 owner、group 和权限。
+func restoreOptionalFilePreservingMetadata(path string, content []byte, existed bool) error {
+	if existed {
+		return fsutil.WriteFileAtomicPreservingMetadata(path, content, 0o640)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove newly created third-party config: %w", err)
 	}
 	return nil
 }

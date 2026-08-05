@@ -10,6 +10,31 @@ import (
 
 // WriteFileAtomic 先写入同目录临时文件，再原子替换目标文件。
 func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+	return writeFileAtomic(path, data, perm, fileOwnership{})
+}
+
+// WriteFileAtomicPreservingMetadata 替换第三方已有文件时保留其 owner、group 和权限，新文件使用回退权限。
+func WriteFileAtomicPreservingMetadata(path string, data []byte, fallbackPerm os.FileMode) error {
+	permission := fallbackPerm
+	ownership := fileOwnership{}
+	info, err := os.Lstat(path)
+	if err == nil {
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("preserve metadata for non-regular file %s", path)
+		}
+		permission = info.Mode().Perm()
+		ownership, err = ownershipFromFileInfo(info)
+		if err != nil {
+			return fmt.Errorf("read ownership of %s: %w", path, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read metadata of %s: %w", path, err)
+	}
+	return writeFileAtomic(path, data, permission, ownership)
+}
+
+// writeFileAtomic 在同目录准备完整临时文件，并在提交前应用指定所有权和权限。
+func writeFileAtomic(path string, data []byte, perm os.FileMode, ownership fileOwnership) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return fmt.Errorf("create parent directory: %w", err)
 	}
@@ -25,6 +50,9 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 			_ = os.Remove(tmp)
 		}
 	}()
+	if err := applyFileOwnership(f, ownership); err != nil {
+		return fmt.Errorf("set temporary file ownership: %w", err)
+	}
 	if err := f.Chmod(perm); err != nil {
 		return fmt.Errorf("set temporary file permissions: %w", err)
 	}
