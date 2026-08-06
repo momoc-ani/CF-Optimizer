@@ -71,6 +71,12 @@ Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix
 - `ranges.max_change_percent` 限制远程网段异常变化。
 - 代理密钥不会写入诊断导出；日志和导出还会再次脱敏。
 
+### 手动域名复测失败
+
+手动域名复测会使用候选 IP 建立临时物理主机路由，同时保留目标域名的 TLS SNI 和 HTTP Host。首页或同域资源返回 `502 Bad Gateway` 等 HTTP `5xx`、TLS 超时、资源不可下载或速度低于阈值时，当前候选不会应用，程序会继续尝试下一名候选。候选池全部失败时，任务报告“手动域名未全部生效”，但上一份已验证映射和策略保持不变。
+
+计划任务失败后会按指数退避自动重试。短暂 `502` 通常表示目标站点或 Cloudflare 边缘在复测瞬间不可用；应以随后使用相同 SNI/Host 的直连结果判断是否恢复，不能把单次规则写入或普通 DNS 解析视为加速已生效。
+
 一键优选会先自动发现物理接口和网关，并在确认框中显示影响范围；自动发现失败时才需要手工覆盖。不要尝试绕过 VPN Kill Switch；无法验证物理出口时应保持路由管理关闭。
 
 ### 开源许可
@@ -193,6 +199,12 @@ See [config.example.yaml](config.example.yaml) for every field. Important defaul
 - Benchmark dialers do not read `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY`.
 - `ranges.max_change_percent` limits abnormal remote range changes.
 - Proxy secrets are excluded from diagnostics, and exported logs are redacted again.
+
+### Manual hostname retest failures
+
+Manual hostname retests create a temporary physical host route for each candidate IP while preserving the hostname's TLS SNI and HTTP Host. A candidate is rejected and the next ranked address is tried when the page or same-origin resource returns an HTTP `5xx` such as `502 Bad Gateway`, times out during TLS, cannot provide a downloadable resource, or falls below the configured speed threshold. If the pool is exhausted, the run reports that not every manual hostname became effective while retaining the last verified mapping and policy.
+
+Scheduled maintenance retries failures with exponential backoff. A transient `502` usually means the target site or Cloudflare edge was unavailable at the instant of the retest. Recovery must be confirmed by a later direct request using the same SNI and Host; writing a rule or observing ordinary DNS resolution is not proof that acceleration is effective.
 
 One-click Optimize discovers the physical interface and gateway first and shows the effects for confirmation. Manual overrides are needed only when automatic discovery fails. Do not try to bypass a VPN Kill Switch; keep route management disabled when physical egress cannot be verified.
 
