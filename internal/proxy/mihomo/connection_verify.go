@@ -23,6 +23,8 @@ const (
 	mappedConnectionVerificationMaxBackoff    = 4 * time.Second
 )
 
+var errMixedPortUnavailable = errors.New("Mihomo mixed-port is unavailable")
+
 // mappingNotPropagatedError 表示连接已建立，但 Mihomo 尚未暴露目标域名的 DIRECT 连接证据。
 type mappingNotPropagatedError struct{ err error }
 
@@ -164,9 +166,60 @@ func (a *Adapter) mixedPort(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("decode Mihomo runtime config: %w", err)
 	}
 	if runtimeConfig.MixedPort < 1 || runtimeConfig.MixedPort > 65535 {
-		return 0, errors.New("Mihomo mixed-port is unavailable for connection verification")
+		return 0, fmt.Errorf("%w for connection verification", errMixedPortUnavailable)
 	}
 	return runtimeConfig.MixedPort, nil
+}
+
+// verifyMappedConnectionsViaTUN 在没有 mixed-port 时通过普通无代理 Socket 触发 TUN，并核对控制面 DIRECT 证据。
+func (a *Adapter) verifyMappedConnectionsViaTUN(ctx context.Context, mappings []proxy.DomainMapping) error {
+	for _, mapping := range mappings {
+		err := verifyWithTransientRetryWindow(ctx, a.verificationTimeout, a.verificationAttemptTimeout, a.verificationRetryInterval, a.verificationMaxAttempts, func(verifyContext context.Context) error {
+			return a.verifyTUNMappedConnection(verifyContext, mapping)
+		})
+		if err != nil {
+			kind := proxy.DomainVerificationCandidateUnreachable
+			var propagationErr *mappingNotPropagatedError
+			if errors.As(err, &propagationErr) {
+				kind = proxy.DomainVerificationMappingNotPropagated
+			}
+			address := ""
+			if len(mapping.Addresses) > 0 {
+				address = mapping.Addresses[0]
+			}
+			return &proxy.DomainVerificationError{Domain: mapping.Domain, Address: address, Kind: kind, Err: err}
+		}
+	}
+	return nil
+}
+
+// verifyTUNMappedConnection 建立不读取代理环境的 HTTPS 连接，依赖 TUN 接管后再查询连接证据。
+func (a *Adapter) verifyTUNMappedConnection(ctx context.Context, mapping proxy.DomainMapping) error {
+	connection, err := (&net.Dialer{Timeout: a.config.Timeout.Duration()}).DialContext(ctx, "tcp", net.JoinHostPort(mapping.Domain, "443"))
+	if err != nil {
+		return fmt.Errorf("connect TUN path for %s: %w", mapping.Domain, err)
+	}
+	defer connection.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = connection.SetDeadline(deadline)
+	}
+	tlsConnection := tls.Client(connection, &tls.Config{ServerName: mapping.Domain, MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}})
+	if err := tlsConnection.HandshakeContext(ctx); err != nil {
+		return fmt.Errorf("TUN TLS handshake for %s: %w", mapping.Domain, err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodHead, "https://"+mapping.Domain+"/", nil)
+	if err != nil {
+		return err
+	}
+	request.Host = mapping.Domain
+	request.Header.Set("Connection", "keep-alive")
+	request.Header.Set("User-Agent", "CF-Optimizer/1")
+	if err := request.Write(tlsConnection); err != nil {
+		return fmt.Errorf("send TUN HTTPS verification request for %s: %w", mapping.Domain, err)
+	}
+	return verifyMappedHTTPSResponse(bufio.NewReader(tlsConnection), request, mapping.Domain, func() error {
+		return a.verifyConnectionEvidence(ctx, mapping)
+	})
 }
 
 // verifyMappedConnection 经 Mihomo 发起 HTTPS 请求，并确认 TLS、Host 和实际远端地址一致。
@@ -223,6 +276,9 @@ func verifyMappedHTTPSResponse(reader *bufio.Reader, request *http.Request, doma
 		return fmt.Errorf("read HTTPS verification response for %s: %w", domain, err)
 	}
 	_ = response.Body.Close()
+	if response.StatusCode >= http.StatusInternalServerError {
+		return fmt.Errorf("HTTPS verification response for %s returned %s", domain, response.Status)
+	}
 	return verifyEvidence()
 }
 

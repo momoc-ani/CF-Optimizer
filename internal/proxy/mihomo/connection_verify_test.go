@@ -97,6 +97,21 @@ func TestReadMappedHTTPSResponseCompletesBeforeConnectionEvidence(t *testing.T) 
 	}
 }
 
+func TestReadMappedHTTPSResponseRejectsServerFailure(t *testing.T) {
+	request, err := http.NewRequest(http.MethodHead, "https://ani.example/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidenceCalled := false
+	err = verifyMappedHTTPSResponse(bufio.NewReader(strings.NewReader("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")), request, "ani.example", func() error {
+		evidenceCalled = true
+		return nil
+	})
+	if err == nil || evidenceCalled || !strings.Contains(err.Error(), "502") {
+		t.Fatalf("502 response was not rejected before connection evidence: err=%v evidence=%t", err, evidenceCalled)
+	}
+}
+
 type responseTrackingReader struct {
 	*strings.Reader
 	read *bool

@@ -19,6 +19,7 @@ import (
 	cfnetwork "github.com/cf-optimizer/cf-optimizer/internal/network"
 	"github.com/cf-optimizer/cf-optimizer/internal/optimizer"
 	"github.com/cf-optimizer/cf-optimizer/internal/proxy"
+	"github.com/cf-optimizer/cf-optimizer/internal/proxy/guard"
 	"github.com/cf-optimizer/cf-optimizer/internal/ranges"
 	"github.com/cf-optimizer/cf-optimizer/internal/store"
 )
@@ -222,6 +223,30 @@ func TestSystemStatusIncludesIsolatedSchedulePromise(t *testing.T) {
 	want := time.Date(2026, time.August, 2, 18, 30, 0, 0, time.UTC)
 	if status.NextScheduledAt == nil || !status.NextScheduledAt.Equal(want) {
 		t.Fatalf("unexpected next scheduled time: %#v", status.NextScheduledAt)
+	}
+}
+
+func TestSystemStatusIncludesIsolatedPolicyGuardStatus(t *testing.T) {
+	stateStore, err := store.Open(t.TempDir(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api, err := NewAPI(&Runtime{Store: stateStore})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasons := []string{"活动配置缺少规则"}
+	api.SetPolicyGuardStatus(guard.Status{ID: "mihomo", State: guard.StateDrifted, Activity: guard.ActivityActive, DriftReasons: reasons, Transition: 2})
+	reasons[0] = "调用方修改"
+
+	response := api.systemStatus()
+	statuses, ok := response["policy_guards"].(map[string]guard.Status)
+	if !ok {
+		t.Fatalf("unexpected policy guard response: %#v", response["policy_guards"])
+	}
+	status := statuses["mihomo"]
+	if status.State != guard.StateDrifted || len(status.DriftReasons) != 1 || status.DriftReasons[0] != "活动配置缺少规则" {
+		t.Fatalf("policy guard status was not isolated: %#v", status)
 	}
 }
 

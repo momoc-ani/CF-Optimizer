@@ -6,6 +6,7 @@ import { RunProvider } from './components/RunContext';
 import { Shell } from './components/Shell';
 import { TaskStrip } from './components/TaskStrip';
 import { LoadingState } from './components/Page';
+import { PolicyGuardNotifications } from './components/PolicyGuardNotifications';
 import { useUIStore } from './state/ui';
 import { useRun } from './hooks/useRun';
 
@@ -29,6 +30,7 @@ function Workspace() {
   const activeEvent = run.running ? run.event : status.data?.state.running ? status.data.active_event : undefined;
   return (
     <Shell status={status.data} disconnected={status.isError} taskStrip={<TaskStrip event={activeEvent} cancelling={run.cancelling} onCancel={run.cancel} />}>
+      <PolicyGuardNotifications guards={status.data?.policy_guards} />
       {status.isError && (
         <Alert mb="md" color="red" icon={<PlugZap size={18} />} title="无法连接后台服务">
           <span>{status.error.message}</span>

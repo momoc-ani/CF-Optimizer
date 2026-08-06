@@ -57,6 +57,12 @@ Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix
 
 确认前不会修改路由、Hosts、代理策略或持续维护配置。后台负责网段更新、测速、策略应用、实际选路验证和失败回滚；界面只显示“已验证”“仅测速完成”“部分完成”或“已回滚”，不会把配置写入描述为直连成功。
 
+### 规则守护
+
+规则守护按代理内核采用策略实现。当前首个策略是 Mihomo，Clash Verge、FLClash 等客户端只负责提供控制端、活动配置和系统代理状态探测，不复制一套规则逻辑。Mihomo 离线或系统代理/TUN 未启用时，守护只读观察，不写配置、不重载、不测速；代理重新启用、订阅重载或活动规则漂移时，才按最后一份已验证策略执行 `Plan -> Apply -> Verify`，并通过维护锁与优选任务串行。守护不会触发网段更新、候选生成、TCP/TLS/下载测速、重新选点或域名重新分配。
+
+恢复验证包含活动规则顺序、Mihomo 内部域名映射、`dns.use-hosts`、实际连接命中的 `DIRECT`、目标优选 IP 以及物理接口/网关。临时网络超时只进入退避重试，不把规则写入成功直接显示为直连成功。
+
 自动预检失败时仍可选择“仅测速”。只有此时才需要进入高级设置手工填写物理接口/网关，或使用网络路由页和 CLI 收集更多诊断证据。
 
 ### 安全默认值
@@ -145,6 +151,7 @@ The project does not treat a successful configuration write as proof that traffi
 - Plan, apply, verify, audit, and roll back temporary range routes and final `/32` or `/128` host routes when route management is enabled.
 - Integrate with Generic Route, Mihomo, sing-box, Xray, versioned External JSON-RPC, and optional Windows Hosts adapters.
 - Map manually configured or verified auto-discovered Cloudflare hostnames to the selected IP while preserving TLS SNI and HTTP Host. Mihomo can discover its active controller and configuration; other cores consume the same domain policy through managed fragments.
+- Guard proxy-core rules through a shared strategy lifecycle. Mihomo is the first guarded core; clients such as Clash Verge and FLClash provide discovery evidence and reuse the Mihomo strategy instead of duplicating rule semantics. The guard only restores the last verified policy and never starts a benchmark or node reselection.
 - Run under Windows Service, systemd, or LaunchDaemon. Closing the desktop window hides it to the system tray; quitting the UI does not stop the service or an active task.
 - Provide nine operational views: overview, benchmark, domain acceleration, proxy adapters, routes, ranges, history, logs/diagnostics, and settings.
 

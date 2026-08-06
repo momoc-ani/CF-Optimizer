@@ -702,6 +702,21 @@ func (r *Runner) tryAcquireMaintenance() bool {
 	return true
 }
 
+// TryPolicyMaintenance 在不排队抢占完整优选的前提下执行一次窄策略维护操作。
+func (r *Runner) TryPolicyMaintenance(ctx context.Context, maintain func(context.Context) error) error {
+	if maintain == nil {
+		return errors.New("policy maintenance callback is required")
+	}
+	if !r.tryAcquireMaintenance() {
+		return ErrAlreadyRunning
+	}
+	defer r.operationGate.release()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return maintain(ctx)
+}
+
 // refreshPolicyLocked 使用已持有的单任务锁刷新策略，避免配置切换期间并行运行测速。
 func (r *Runner) refreshPolicyLocked(ctx context.Context) error {
 	return r.refreshPolicyWithStateMutationLocked(ctx, nil)

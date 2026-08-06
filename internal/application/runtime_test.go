@@ -30,6 +30,29 @@ func TestActivateSessionBroadcastsConfigChange(t *testing.T) {
 	}
 }
 
+func TestDesiredPolicyFromSnapshotPreservesVerifiedMapping(t *testing.T) {
+	appliedAt := time.Date(2026, time.August, 6, 10, 0, 0, 0, time.UTC)
+	snapshot := &store.PolicySnapshot{
+		IPv4CIDRs: []string{"104.25.241.29/32"}, Domains: []string{"ani.momoc.top"},
+		DomainMappings: []store.DomainMappingSnapshot{{Domain: "ani.momoc.top", Addresses: []string{"104.25.241.29"}}},
+		AppliedAt:      appliedAt,
+	}
+	desired, exists, err := desiredPolicyFromSnapshot(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists || desired.Revision == "" || !desired.AppliedAt.Equal(appliedAt) {
+		t.Fatalf("unexpected desired policy metadata: %#v", desired)
+	}
+	if len(desired.Policy.DomainMappings) != 1 || desired.Policy.DomainMappings[0].Addresses[0] != "104.25.241.29" {
+		t.Fatalf("stored mapping was recalculated instead of preserved: %#v", desired.Policy.DomainMappings)
+	}
+	second, _, err := desiredPolicyFromSnapshot(snapshot)
+	if err != nil || second.Revision != desired.Revision {
+		t.Fatalf("desired policy revision is not deterministic: first=%q second=%q err=%v", desired.Revision, second.Revision, err)
+	}
+}
+
 func TestConfigForStoredReceiptsEnablesOnlyRequiredAdapters(t *testing.T) {
 	cfg := config.Default()
 	cfg.Proxy.Mihomo.ProviderFile = "/tmp/cf-optimizer-mihomo.yaml"

@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"github.com/cf-optimizer/cf-optimizer/internal/proxy"
 	"github.com/cf-optimizer/cf-optimizer/internal/proxy/external"
 	"github.com/cf-optimizer/cf-optimizer/internal/proxy/generic"
+	"github.com/cf-optimizer/cf-optimizer/internal/proxy/guard"
 	"github.com/cf-optimizer/cf-optimizer/internal/proxy/hosts"
 	"github.com/cf-optimizer/cf-optimizer/internal/proxy/mihomo"
 	"github.com/cf-optimizer/cf-optimizer/internal/proxy/singbox"
@@ -200,6 +202,81 @@ func (r *Runtime) View() RuntimeView {
 		PhysicalPath: r.PhysicalPath, DirectDial: r.DirectDial, ProxyCoordinator: r.ProxyCoordinator,
 		DomainResolver: r.DomainResolver, DomainVerifier: r.DomainVerifier, DomainDownload: r.DomainDownload, MihomoAutoDetected: r.mihomoAutoDetected,
 	}
+}
+
+// CurrentDesiredPolicy 返回规则守护可原样恢复的最后一份已验证策略。
+func (r *Runtime) CurrentDesiredPolicy(ctx context.Context) (guard.DesiredPolicy, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return guard.DesiredPolicy{}, false, err
+	}
+	state := r.Store.Snapshot()
+	return desiredPolicyFromSnapshot(state.Policy)
+}
+
+// TryExecute 在现有优选维护锁内核对策略版本并执行一次规则修复。
+func (r *Runtime) TryExecute(ctx context.Context, expectedRevision string, action func(context.Context, guard.DesiredPolicy) error) error {
+	if action == nil {
+		return errors.New("policy guard maintenance action is required")
+	}
+	view := r.View()
+	if view.Runner == nil {
+		return errors.New("optimizer runner is unavailable for policy guard maintenance")
+	}
+	err := view.Runner.TryPolicyMaintenance(ctx, func(maintenanceContext context.Context) error {
+		desired, exists, loadErr := r.CurrentDesiredPolicy(maintenanceContext)
+		if loadErr != nil {
+			return loadErr
+		}
+		if !exists || desired.Revision != expectedRevision {
+			return guard.ErrDesiredPolicyChanged
+		}
+		return action(maintenanceContext, desired)
+	})
+	if errors.Is(err, optimizer.ErrAlreadyRunning) {
+		return guard.ErrMaintenanceBusy
+	}
+	return err
+}
+
+// RuleGuardStrategies 构造当前配置启用的按内核划分规则守护策略。
+func (r *Runtime) RuleGuardStrategies() ([]guard.Strategy, error) {
+	view := r.View()
+	if !view.Config.Proxy.Mihomo.Enabled && (!view.Config.Proxy.AutoDetect || !view.Config.Network.ManageRoutes) {
+		return []guard.Strategy{}, nil
+	}
+	strategy, err := mihomo.NewRuleGuardStrategy(view.Config.Proxy, view.Config.DataDir, view.RouteBackend, view.PhysicalPath, view.MihomoAutoDetected)
+	if err != nil {
+		return nil, err
+	}
+	return []guard.Strategy{strategy}, nil
+}
+
+func desiredPolicyFromSnapshot(snapshot *store.PolicySnapshot) (guard.DesiredPolicy, bool, error) {
+	if snapshot == nil {
+		return guard.DesiredPolicy{}, false, nil
+	}
+	policy := proxy.DirectPolicy{
+		IPv4CIDRs: append([]string(nil), snapshot.IPv4CIDRs...), IPv6CIDRs: append([]string(nil), snapshot.IPv6CIDRs...),
+		Domains: append([]string(nil), snapshot.Domains...), Processes: append([]string(nil), snapshot.Processes...),
+		DomainMappings: make([]proxy.DomainMapping, 0, len(snapshot.DomainMappings)),
+	}
+	for _, mapping := range snapshot.DomainMappings {
+		policy.DomainMappings = append(policy.DomainMappings, proxy.DomainMapping{Domain: mapping.Domain, Addresses: append([]string(nil), mapping.Addresses...)})
+	}
+	normalized, err := policy.Normalize()
+	if err != nil {
+		return guard.DesiredPolicy{}, false, fmt.Errorf("normalize stored desired policy: %w", err)
+	}
+	revisionDocument := struct {
+		Policy    proxy.DirectPolicy `json:"policy"`
+		AppliedAt time.Time          `json:"applied_at"`
+	}{Policy: normalized, AppliedAt: snapshot.AppliedAt.UTC()}
+	encoded, err := json.Marshal(revisionDocument)
+	if err != nil {
+		return guard.DesiredPolicy{}, false, err
+	}
+	revision := fmt.Sprintf("%x", sha256.Sum256(encoded))
+	return guard.DesiredPolicy{Revision: revision, Policy: normalized, AppliedAt: snapshot.AppliedAt.UTC()}, true, nil
 }
 
 // ConfigChanges 返回下一次运行配置切换时关闭的广播通道。
