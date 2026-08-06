@@ -11,6 +11,7 @@ import { ErrorState, LoadingState, PageHeader, Section } from '../components/Pag
 import { StatusBadge } from '../components/StatusBadge';
 import { routeDiagnosticPresentation } from '../lib/diagnostics';
 import { formatDate } from '../lib/format';
+import { sortLogsNewestFirst } from '../lib/logs';
 import { redactLogLine } from '../lib/redact';
 import { useUIStore } from '../state/ui';
 
@@ -52,7 +53,7 @@ export function LogsPage() {
   const [level, setLevel] = useState('all');
   const [target, setTarget] = useState('104.16.132.229');
   const diagnostic = useMutation({ mutationFn: () => request<DiagnosticReport>('diagnostics.route', { target: target.trim() }) });
-  const entries = useMemo(() => (logs.data ?? []).map(parseLogLine), [logs.data]);
+  const entries = useMemo(() => sortLogsNewestFirst((logs.data ?? []).map(parseLogLine)), [logs.data]);
   const filtered = useMemo(() => entries.filter((entry) => (level === 'all' || entry.level === level) && `${entry.time ?? ''} ${entry.level} ${entry.component} ${entry.msg} ${entry.run_id ?? ''} ${entry.transaction_id ?? ''}`.toLowerCase().includes(search.toLowerCase())), [entries, level, search]);
   const columns = useMemo<ColumnDef<LogEntry>[]>(() => [
     { accessorKey: 'time', header: '时间', size: 160, cell: ({ getValue }) => formatDate(String(getValue() ?? '')) },
@@ -96,7 +97,9 @@ export function LogsPage() {
             <Select label="级别" value={level} onChange={(value) => setLevel(value ?? 'all')} data={[{ label: '全部', value: 'all' }, { label: 'INFO', value: 'INFO' }, { label: 'WARN', value: 'WARN' }, { label: 'ERROR', value: 'ERROR' }, { label: 'DEBUG', value: 'DEBUG' }]} w={120} />
             <Select label="读取行数" value={lineCount} onChange={(value) => setLineCount(value ?? '500')} data={['200', '500', '1000', '2000']} w={120} />
           </Group>
-          <DataTable columns={columns} data={filtered} minWidth={1030} rowKey={(row, index) => `${row.time ?? 'log'}-${index}`} emptyTitle="没有匹配日志" emptyDetail={entries.length ? '调整级别或搜索条件。' : '日志文件尚未产生记录。'} footer={`显示 ${filtered.length} / ${entries.length} 条；导出时再次过滤认证字段。`} />
+          <div className="logs-table-window">
+            <DataTable columns={columns} data={filtered} minWidth={1030} rowKey={(row, index) => `${row.time ?? 'log'}-${index}`} emptyTitle="没有匹配日志" emptyDetail={entries.length ? '调整级别或搜索条件。' : '日志文件尚未产生记录。'} footer={`显示 ${filtered.length} / ${entries.length} 条；导出时再次过滤认证字段。`} />
+          </div>
         </Section>
       </div>
     </Stack>

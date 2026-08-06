@@ -470,6 +470,13 @@ select {
   align-items: start;
 }
 
+.logs-table-window {
+  height: 520px;
+  min-height: 300px;
+  max-height: calc(100vh - 290px);
+  overflow: auto;
+}
+
 .grow-control {
   min-width: 220px;
   flex: 1 1 320px;
@@ -558,6 +565,11 @@ select {
 
   .logs-layout > .inspector-section {
     order: 2;
+  }
+
+  .logs-table-window {
+    height: 420px;
+    max-height: calc(100vh - 330px);
   }
 }
 
