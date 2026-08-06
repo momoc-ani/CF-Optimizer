@@ -26,6 +26,26 @@ func TestExponentialDelayIsBounded(t *testing.T) {
 	}
 }
 
+func TestScheduledRunErrorCodeClassifiesCancellationAndConflict(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "none", want: ""},
+		{name: "context cancellation", err: context.Canceled, want: "cancelled"},
+		{name: "IPC cancellation", err: &ipc.Error{Code: "cancelled", Message: "optimization was cancelled"}, want: "cancelled"},
+		{name: "IPC conflict", err: &ipc.Error{Code: "conflict", Message: "already running"}, want: "conflict"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := scheduledRunErrorCode(test.err); got != test.want {
+				t.Fatalf("scheduledRunErrorCode() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestScheduleRespondsToRuntimeConfigChanges(t *testing.T) {
 	stateStore, err := store.Open(t.TempDir(), 10)
 	if err != nil {

@@ -208,7 +208,10 @@ func (s *Service) schedule(ctx context.Context) error {
 			currentConfig := s.runtime.View().Config
 			delay := currentConfig.Schedule.Interval.Duration()
 			trigger := "interval"
-			if errors.Is(err, optimizer.ErrAlreadyRunning) {
+			errorCode := scheduledRunErrorCode(err)
+			if errorCode == "cancelled" {
+				failureCount = 0
+			} else if errorCode == "conflict" {
 				delay = minimumRetryDelay
 				trigger = "retry"
 			} else if err != nil {
@@ -278,6 +281,24 @@ func (s *Service) runScheduled(ctx context.Context) error {
 	applyPolicy := s.runtime.View().ProxyCoordinator != nil
 	_, err := s.api.RunOptimization(ctx, optimizer.RunOptions{ApplyPolicy: applyPolicy}, nil)
 	return err
+}
+
+// scheduledRunErrorCode 统一识别内部错误和 IPC 分类错误，避免取消任务被当作失败重试。
+func scheduledRunErrorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	var protocolError *ipc.Error
+	if errors.As(err, &protocolError) {
+		return protocolError.Code
+	}
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	if errors.Is(err, optimizer.ErrAlreadyRunning) {
+		return "conflict"
+	}
+	return ""
 }
 
 func exponentialDelay(failures int, maximum time.Duration) time.Duration {

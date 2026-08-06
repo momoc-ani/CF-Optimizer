@@ -285,7 +285,9 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 			runErr = errors.Join(runErr, finalizeErr)
 		}
 		result := "completed"
-		if runErr != nil {
+		if errors.Is(runErr, context.Canceled) {
+			result = "cancelled"
+		} else if runErr != nil {
 			result = "failed"
 		} else if manualDomainAllocationFailure(report) != "" {
 			result = "partial"
@@ -1781,7 +1783,10 @@ func (r *Runner) finalize(report RunReport, runErr error) error {
 	return r.store.Update(func(state *store.State) error {
 		state.Running = false
 		state.LastEndedAt = report.FinishedAt
-		if runErr != nil {
+		cancelled := errors.Is(runErr, context.Canceled)
+		if cancelled {
+			state.LastError = ""
+		} else if runErr != nil {
 			state.LastError = runErr.Error()
 		}
 		summary := store.RunSummary{
@@ -1805,7 +1810,9 @@ func (r *Runner) finalize(report RunReport, runErr error) error {
 		if report.IPv6Decision.HasSelection {
 			summary.SelectedIPv6 = report.IPv6Decision.Selected.IP.String()
 		}
-		if runErr != nil {
+		if cancelled {
+			summary.Error = "optimization was cancelled"
+		} else if runErr != nil {
 			summary.Error = runErr.Error()
 		}
 		state.History = append(state.History, summary)

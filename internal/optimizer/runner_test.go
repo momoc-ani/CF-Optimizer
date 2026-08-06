@@ -363,6 +363,32 @@ func TestRunnerCancelsWhileWaitingForPolicyRefresh(t *testing.T) {
 	}
 }
 
+func TestFinalizeCancellationClearsLastTaskError(t *testing.T) {
+	stateStore, err := store.Open(t.TempDir(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Update(func(state *store.State) error {
+		state.Running = true
+		state.LastError = "previous failure"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	runner := &Runner{store: stateStore}
+	if err := runner.finalize(RunReport{ID: "cancelled-run", StartedAt: now.Add(-time.Second), FinishedAt: now}, fmt.Errorf("query route: %w", context.Canceled)); err != nil {
+		t.Fatal(err)
+	}
+	state := stateStore.Snapshot()
+	if state.Running || state.LastError != "" {
+		t.Fatalf("cancelled run remained failed: %#v", state)
+	}
+	if len(state.History) != 1 || state.History[0].Error != "optimization was cancelled" {
+		t.Fatalf("cancelled run audit summary is missing: %#v", state.History)
+	}
+}
+
 func TestRunnerAppliesAndPersistsVerifiedSelection(t *testing.T) {
 	policy := &recordingPolicy{}
 	runner, stateStore := newTestRunner(t, policy)
