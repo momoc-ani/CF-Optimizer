@@ -13,6 +13,8 @@ import (
 	"net/netip"
 	"net/url"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +31,9 @@ const (
 	StageTLS      Stage = "tls"
 	StageDownload Stage = "download"
 )
+
+// cloudflareDownloadChunkBytes 是 Cloudflare 官方测速端点单次请求的保守上限，单位为字节。
+const cloudflareDownloadChunkBytes int64 = 5_000_000
 
 // Progress 汇总高频测速过程，避免为每次连接写入 Info 日志。
 type Progress struct {
@@ -126,6 +131,7 @@ func (t *Tester) Run(ctx context.Context, addresses []netip.Addr, progress func(
 	})
 	top := min(t.config.DownloadTop, qualified)
 	downloadCompleted := 0
+	downloadQualified := 0
 	var downloadProgressMu sync.Mutex
 	if err := runConcurrentDownloadProbes(ctx, top, t.config.DownloadConcurrency, func(probeContext context.Context, index int) {
 		t.probeTLSAndDownload(probeContext, &results[index])
@@ -136,11 +142,14 @@ func (t *Tester) Run(ctx context.Context, addresses []netip.Addr, progress func(
 		downloadProgressMu.Lock()
 		defer downloadProgressMu.Unlock()
 		downloadCompleted++
+		if results[index].Qualified {
+			downloadQualified++
+		}
 		stage := StageTLS
 		if t.config.DownloadURL != "" {
 			stage = StageDownload
 		}
-		progress(Progress{Stage: stage, Completed: downloadCompleted, Total: top, IP: results[index].IP.String(), Qualified: qualified})
+		progress(Progress{Stage: stage, Completed: downloadCompleted, Total: top, IP: results[index].IP.String(), Qualified: downloadQualified})
 	}); err != nil {
 		return nil, err
 	}
@@ -285,53 +294,121 @@ func (t *Tester) probeTLSAndDownload(ctx context.Context, result *Result) {
 	t.download(ctx, tlsConn, targetURL, result)
 }
 
-func (t *Tester) download(ctx context.Context, conn *tls.Conn, target *url.URL, result *Result) {
-	request := &http.Request{
-		Method: http.MethodGet, URL: target, Host: target.Host,
-		Header: http.Header{"User-Agent": []string{"CF-Optimizer/1"}, "Accept-Encoding": []string{"identity"}, "Connection": []string{"close"}},
-	}
-	if err := request.Write(conn); err != nil {
-		result.Qualified = false
-		result.Error = "write download request: " + err.Error()
-		return
-	}
+func (t *Tester) download(ctx context.Context, conn net.Conn, target *url.URL, result *Result) {
 	started := t.now()
 	deadline := started.Add(t.config.DownloadDuration.Duration())
 	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
 		deadline = contextDeadline
 	}
 	_ = conn.SetDeadline(deadline)
-	response, err := http.ReadResponse(bufio.NewReader(conn), request)
-	if err != nil {
-		result.Qualified = false
-		result.Error = "read download response: " + err.Error()
-		return
+	reader := bufio.NewReader(conn)
+	officialEndpoint := isCloudflareDownloadEndpoint(target)
+	remaining := t.config.DownloadMaxBytes
+	var downloaded int64
+	for remaining > 0 {
+		if err := ctx.Err(); err != nil {
+			if downloaded == 0 {
+				result.Qualified = false
+				result.Error = "download canceled: " + err.Error()
+			}
+			break
+		}
+		requestURL := target
+		if officialEndpoint {
+			requestURL = cloudflareDownloadChunkURL(target, remaining)
+		}
+		request := &http.Request{
+			Method: http.MethodGet, URL: requestURL, Host: requestURL.Host,
+			Header: http.Header{"User-Agent": []string{"CF-Optimizer/1"}, "Accept-Encoding": []string{"identity"}, "Connection": []string{"keep-alive"}},
+		}
+		if err := request.Write(conn); err != nil {
+			if downloaded == 0 {
+				result.Qualified = false
+				result.Error = "write download request: " + err.Error()
+			}
+			break
+		}
+		response, err := http.ReadResponse(reader, request)
+		if err != nil {
+			if downloaded == 0 {
+				result.Qualified = false
+				result.Error = "read download response: " + err.Error()
+			} else if !isExpectedDeadline(err) {
+				result.Error = "read download response after partial body: " + err.Error()
+			}
+			break
+		}
+		if result.TTFB == 0 {
+			result.TTFB = t.now().Sub(started)
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			_ = response.Body.Close()
+			if downloaded == 0 {
+				result.Qualified = false
+				result.Error = fmt.Sprintf("download returned %s", response.Status)
+			} else {
+				result.Error = fmt.Sprintf("download stopped after partial body: %s", response.Status)
+			}
+			break
+		}
+		limit := remaining
+		if response.ContentLength >= 0 && response.ContentLength < limit {
+			limit = response.ContentLength
+		}
+		written, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, limit))
+		_ = response.Body.Close()
+		downloaded += written
+		remaining -= written
+		if readErr != nil && !isExpectedDeadline(readErr) {
+			if downloaded == 0 {
+				result.Qualified = false
+			}
+			result.Error = "download: " + readErr.Error()
+			break
+		}
+		if written == 0 {
+			if downloaded == 0 {
+				result.Qualified = false
+			}
+			result.Error = "download returned an empty body"
+			break
+		}
+		if !officialEndpoint || t.now().After(deadline) {
+			break
+		}
 	}
-	defer response.Body.Close()
-	result.TTFB = t.now().Sub(started)
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		result.Qualified = false
-		result.Error = fmt.Sprintf("download returned %s", response.Status)
-		return
-	}
-	reader := io.LimitReader(response.Body, t.config.DownloadMaxBytes)
-	written, readErr := io.Copy(io.Discard, reader)
 	result.DownloadTime = t.now().Sub(started)
-	result.Downloaded = written
-	if written > 0 && result.DownloadTime > 0 {
-		result.Mbps = float64(written*8) / result.DownloadTime.Seconds() / 1_000_000
+	result.Downloaded = downloaded
+	if downloaded > 0 && result.DownloadTime > 0 {
+		result.Mbps = float64(downloaded*8) / result.DownloadTime.Seconds() / 1_000_000
 	}
-	if readErr != nil && !isExpectedDeadline(readErr) {
+	if downloaded == 0 {
 		result.Qualified = false
-		result.Error = "download: " + readErr.Error()
-		return
-	}
-	if written == 0 {
-		result.Qualified = false
-		result.Error = "download returned an empty body"
+		if result.Error == "" {
+			result.Error = "download returned an empty body"
+		}
 		return
 	}
 	result.DownloadVerified = true
+	result.Qualified = true
+}
+
+// isCloudflareDownloadEndpoint 判断是否可以安全地拆分官方测速端点请求。
+func isCloudflareDownloadEndpoint(target *url.URL) bool {
+	return target != nil && strings.EqualFold(target.Hostname(), "speed.cloudflare.com") && target.EscapedPath() == "/__down"
+}
+
+// cloudflareDownloadChunkURL 将单次官方测速请求限制在端点可接受的字节数内。
+func cloudflareDownloadChunkURL(target *url.URL, remaining int64) *url.URL {
+	chunk := min(cloudflareDownloadChunkBytes, remaining)
+	if requested, err := strconv.ParseInt(target.Query().Get("bytes"), 10, 64); err == nil && requested > 0 && requested < chunk {
+		chunk = requested
+	}
+	copyURL := *target
+	query := copyURL.Query()
+	query.Set("bytes", strconv.FormatInt(chunk, 10))
+	copyURL.RawQuery = query.Encode()
+	return &copyURL
 }
 
 func isExpectedDeadline(err error) bool {

@@ -385,7 +385,10 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 			report.domainMappings, report.DomainAllocations, allocationWarnings = r.allocateDomainMappings(ctx, rangeResult.Snapshot, report.Results, r.store.Snapshot(), failedDomainAddresses)
 			report.Warnings = append(report.Warnings, allocationWarnings...)
 			report.domainAllocationCompleted = true
-			if failure := manualDomainAllocationFailure(report); failure != "" && len(failedAddresses) > 0 {
+			if failure := manualDomainAllocationFailure(report); failure != "" {
+				if recordErr := r.persistDomainAllocationFailure(report); recordErr != nil {
+					return report, errors.Join(errors.New(failure), recordErr)
+				}
 				return report, errors.New(failure)
 			}
 			for domain, verificationFailure := range failedVerificationErrors {
@@ -709,7 +712,10 @@ retryRefresh:
 			r.logger.Warn("域名未分配优选 IP", "warning", warning)
 		}
 		report := RunReport{DomainAllocations: allocations, domainMappings: mappings, domainAllocationCompleted: true}
-		if failure := manualDomainAllocationFailure(report); failure != "" && len(failedAddresses) > 0 {
+		if failure := manualDomainAllocationFailure(report); failure != "" {
+			if recordErr := r.persistDomainAllocationFailure(report); recordErr != nil {
+				return errors.Join(errors.New(failure), recordErr)
+			}
 			return errors.New(failure)
 		}
 		for domain, verificationFailure := range failedVerificationErrors {
@@ -1572,6 +1578,15 @@ func (r *Runner) persistSuccessfulRun(report RunReport, before store.State, appl
 	return r.store.SaveRunDetail(report.ID, details, r.config.History.DetailRetention.Duration())
 }
 
+// persistDomainAllocationFailure 记录本次域名分配失败，但不触碰上一份已验证策略。
+func (r *Runner) persistDomainAllocationFailure(report RunReport) error {
+	now := r.now().UTC()
+	return r.store.Update(func(state *store.State) error {
+		recordDomainAllocationResults(state, report.DomainAllocations, false, now)
+		return nil
+	})
+}
+
 // recordDomainAllocationResults 将手动与自动域名的本次分配证据写入统一展示状态。
 func recordDomainAllocationResults(state *store.State, allocations []DomainAllocationResult, policyApplied bool, now time.Time) {
 	if state.DiscoveredDomains == nil {
@@ -1585,16 +1600,33 @@ func recordDomainAllocationResults(state *store.State, allocations []DomainAlloc
 			record.FirstSeenAt = now
 		}
 		record.LastSeenAt = now
-		record.CloudflareVerified = allocation.CloudflareVerified
-		record.PreflightVerified = allocation.PreflightVerified
-		record.Active = policyApplied && allocation.AssignedAddress != ""
+		previouslyActive := domainMappingPresent(state.Policy, allocation.Domain)
+		if policyApplied || !previouslyActive {
+			record.CloudflareVerified = allocation.CloudflareVerified
+			record.PreflightVerified = allocation.PreflightVerified
+		}
+		record.Active = (policyApplied && allocation.AssignedAddress != "") || (!policyApplied && previouslyActive)
 		record.LastResolvedAddresses = append([]string(nil), allocation.ResolvedAddresses...)
 		record.LastError = allocation.Error
-		if record.Active {
+		if record.Active && policyApplied {
 			record.LastError = ""
 		}
 		state.DiscoveredDomains[allocation.Domain] = record
 	}
+}
+
+// domainMappingPresent 判断上一份已验证策略是否仍包含指定域名映射。
+func domainMappingPresent(policy *store.PolicySnapshot, rawDomain string) bool {
+	if policy == nil {
+		return false
+	}
+	domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(rawDomain)), ".")
+	for _, mapping := range policy.DomainMappings {
+		if strings.TrimSuffix(strings.ToLower(strings.TrimSpace(mapping.Domain)), ".") == domain && len(mapping.Addresses) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // policySnapshot 将规范化策略和累计回滚收据转换为可持久化状态。

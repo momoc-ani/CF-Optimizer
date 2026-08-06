@@ -63,6 +63,19 @@ func (staticBenchmark) Run(_ context.Context, addresses []netip.Addr, progress f
 	return results, nil
 }
 
+type unqualifiedBenchmark struct{}
+
+func (unqualifiedBenchmark) Run(_ context.Context, addresses []netip.Addr, _ func(benchmark.Progress)) ([]benchmark.Result, error) {
+	results := make([]benchmark.Result, 0, len(addresses))
+	for _, address := range addresses {
+		results = append(results, benchmark.Result{
+			IP: address, Family: 4, Attempts: 2, Successes: 2, TCPQualified: true, TLSVerified: true,
+			Qualified: false, Error: "download returned 429 Too Many Requests",
+		})
+	}
+	return results, nil
+}
+
 type recordingPolicy struct {
 	capabilities   proxy.Capabilities
 	rejectedDomain string
@@ -74,6 +87,7 @@ type candidateRejectingPolicy struct {
 	recordingPolicy
 	rejectedAddress string
 	rejectAll       bool
+	rejectFirst     bool
 }
 
 type failingPolicy struct{}
@@ -210,6 +224,9 @@ func (p *recordingPolicy) Rollback(_ context.Context, applied proxy.ApplyResult)
 
 func (p *candidateRejectingPolicy) Apply(ctx context.Context, policy proxy.DirectPolicy) (proxy.ApplyResult, error) {
 	for _, mapping := range policy.DomainMappings {
+		if p.rejectFirst && p.rejectedAddress == "" && len(mapping.Addresses) > 0 {
+			p.rejectedAddress = mapping.Addresses[0]
+		}
 		if len(mapping.Addresses) > 0 && (p.rejectAll || mapping.Addresses[0] == p.rejectedAddress) {
 			return proxy.ApplyResult{}, fmt.Errorf("candidate verification failed: %w", &proxy.DomainVerificationError{
 				Domain: mapping.Domain, Address: mapping.Addresses[0], Kind: proxy.DomainVerificationCandidateUnreachable,
@@ -465,10 +482,10 @@ func TestRunPersistsManualDomainAllocationFailure(t *testing.T) {
 	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
 
 	report, err := runner.Run(context.Background(), RunOptions{ApplyPolicy: true}, nil)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), "physical DNS timeout") {
+		t.Fatalf("manual domain failure should stop policy application: %v", err)
 	}
-	if !report.PolicyApplied || len(report.DomainAllocations) != 1 || report.DomainAllocations[0].AssignedAddress != "" || !strings.Contains(report.DomainAllocations[0].Error, "physical DNS timeout") {
+	if report.PolicyApplied || len(policy.policies) != 0 || len(report.DomainAllocations) != 1 || report.DomainAllocations[0].AssignedAddress != "" || !strings.Contains(report.DomainAllocations[0].Error, "physical DNS timeout") {
 		t.Fatalf("manual domain failure was not exposed in run report: %#v", report)
 	}
 	record := stateStore.Snapshot().DiscoveredDomains["ani.momoc.top"]
@@ -480,10 +497,50 @@ func TestRunPersistsManualDomainAllocationFailure(t *testing.T) {
 	}
 }
 
+func TestRunKeepsPreviousPolicyWhenRankedPoolHasNoQualifiedAddress(t *testing.T) {
+	policy := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
+	runner, stateStore := newTestRunner(t, policy)
+	runner.benchmark = unqualifiedBenchmark{}
+	runner.config.Acceleration.Enabled = true
+	runner.config.Acceleration.ManualDomains = []string{"ani.momoc.top"}
+	runner.domainResolver = staticDomainResolver{addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	previousReceipts, err := json.Marshal(proxy.ApplyResult{Receipts: []proxy.Receipt{{ID: "previous", Adapter: "test", Changed: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousMapping := store.DomainMappingSnapshot{Domain: "ani.momoc.top", Addresses: []string{"1.1.1.3"}}
+	if err := stateStore.Update(func(state *store.State) error {
+		state.CurrentIPv4 = &store.Selection{IP: "1.1.1.3", Family: 4, Score: 98, PolicyVerified: true}
+		state.Policy = &store.PolicySnapshot{
+			IPv4CIDRs: []string{"1.1.1.3/32"}, DomainMappings: []store.DomainMappingSnapshot{previousMapping}, Receipts: previousReceipts,
+		}
+		state.DiscoveredDomains["ani.momoc.top"] = store.DomainDiscovery{
+			Domain: "ani.momoc.top", Source: "manual", CloudflareVerified: true, PreflightVerified: true, Active: true,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := runner.Run(context.Background(), RunOptions{ApplyPolicy: true}, nil)
+	if err == nil || !strings.Contains(err.Error(), "ranked address pool is exhausted") {
+		t.Fatalf("empty ranked pool should fail with explicit context: %v", err)
+	}
+	state := stateStore.Snapshot()
+	if report.PolicyApplied || len(policy.policies) != 0 || state.Policy == nil || !reflect.DeepEqual(state.Policy.DomainMappings, []store.DomainMappingSnapshot{previousMapping}) {
+		t.Fatalf("empty ranked pool replaced the previous policy: report=%#v policy=%#v applied=%#v", report, state.Policy, policy.policies)
+	}
+	record := state.DiscoveredDomains["ani.momoc.top"]
+	if !record.Active || !record.CloudflareVerified || !record.PreflightVerified || !strings.Contains(record.LastError, "ranked address pool is exhausted") {
+		t.Fatalf("failed refresh did not retain verified domain state: %#v", record)
+	}
+}
+
 func TestRunRetriesNextCandidateAfterApplicationVerificationFailure(t *testing.T) {
 	policy := &candidateRejectingPolicy{
 		recordingPolicy: recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}},
-		rejectedAddress: "1.1.1.1",
+		rejectFirst:     true,
 	}
 	runner, stateStore := newTestRunner(t, policy)
 	runner.config.Acceleration.Enabled = true
@@ -495,16 +552,17 @@ func TestRunRetriesNextCandidateAfterApplicationVerificationFailure(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !report.PolicyApplied || len(report.DomainAllocations) != 1 || report.DomainAllocations[0].AssignedAddress != "1.1.1.2" {
+	if !report.PolicyApplied || len(report.DomainAllocations) != 1 || report.DomainAllocations[0].AssignedAddress == "" || report.DomainAllocations[0].AssignedAddress == policy.rejectedAddress {
 		t.Fatalf("application failure did not advance to the next candidate: %#v", report.DomainAllocations)
 	}
+	assignedAddress := report.DomainAllocations[0].AssignedAddress
 	state := stateStore.Snapshot()
-	if state.Policy == nil || len(state.Policy.DomainMappings) != 1 || state.Policy.DomainMappings[0].Addresses[0] != "1.1.1.2" {
+	if state.Policy == nil || len(state.Policy.DomainMappings) != 1 || state.Policy.DomainMappings[0].Addresses[0] != assignedAddress {
 		t.Fatalf("successful fallback mapping was not persisted: %#v", state.Policy)
 	}
-	failedNode := state.Nodes["1.1.1.1"]
+	failedNode := state.Nodes[policy.rejectedAddress]
 	if failedNode.CooldownUntil.IsZero() || failedNode.FailureStreak < 1 {
-		t.Fatalf("failed candidate was not persisted in cooldown: %#v", failedNode)
+		t.Fatalf("failed candidate %s was not persisted in cooldown: %#v", policy.rejectedAddress, failedNode)
 	}
 }
 

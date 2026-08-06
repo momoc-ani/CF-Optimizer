@@ -219,7 +219,7 @@ func TestQuickStartManualDomainFailureIsPartial(t *testing.T) {
 	if runErr != nil {
 		t.Fatal(runErr)
 	}
-	if result.Status != "partial" || !result.Report.PolicyApplied || len(result.Report.DomainAllocations) != 1 || result.Report.DomainAllocations[0].AssignedAddress != "" || !strings.Contains(result.Error, "ani.momoc.top") {
+	if result.Status != "rolled_back" || result.Report.PolicyApplied || len(result.Report.DomainAllocations) != 1 || result.Report.DomainAllocations[0].AssignedAddress != "" || !strings.Contains(result.Error, "ani.momoc.top") {
 		t.Fatalf("manual domain failure was misreported: %#v", result)
 	}
 	domains := runtimeState.domainDiscoverySnapshot().Domains
