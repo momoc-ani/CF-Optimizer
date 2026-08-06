@@ -79,6 +79,8 @@ type DomainDiscovery struct {
 	LastSeenAt            time.Time `json:"last_seen_at"`
 	CloudflareVerified    bool      `json:"cloudflare_verified"`
 	PreflightVerified     bool      `json:"preflight_verified"`
+	DownloadVerified      bool      `json:"download_verified"`
+	DownloadMbps          float64   `json:"download_mbps,omitempty"`
 	Active                bool      `json:"active"`
 	LastResolvedAddresses []string  `json:"last_resolved_addresses,omitempty"`
 	LastError             string    `json:"last_error,omitempty"`

@@ -30,6 +30,8 @@ import (
 // ErrAlreadyRunning 表示已有测速任务持有进程内单任务锁。
 var ErrAlreadyRunning = errors.New("an optimization run is already active")
 
+const managedRouteMetric = 5
+
 // RangeSource 为运行器提供不可变网段快照，便于测试替换远程来源。
 type RangeSource interface {
 	Update(context.Context, bool) (ranges.UpdateResult, error)
@@ -66,6 +68,12 @@ type DomainResolver interface {
 	Resolve(context.Context, string) ([]netip.Addr, error)
 }
 
+// DomainDownloadTester 使用目标域名自己的资源复测精确候选地址的直连下载速度。
+type DomainDownloadTester interface {
+	DiscoverProbeURL(context.Context, string, string) (string, error)
+	Measure(context.Context, string, string, string) (acceleration.DownloadResult, error)
+}
+
 // Event 是后台任务发送给 IPC 和桌面界面的版本稳定进度载荷。
 type Event struct {
 	RunID     string              `json:"run_id"`
@@ -97,6 +105,8 @@ type DomainAllocationResult struct {
 	AssignedAddress    string   `json:"assigned_address,omitempty"`
 	CloudflareVerified bool     `json:"cloudflare_verified"`
 	PreflightVerified  bool     `json:"preflight_verified"`
+	DownloadVerified   bool     `json:"download_verified"`
+	DownloadMbps       float64  `json:"download_mbps,omitempty"`
 	Error              string   `json:"error,omitempty"`
 }
 
@@ -134,6 +144,7 @@ type Runner struct {
 	policy         PolicyApplier
 	domainVerifier DomainMappingVerifier
 	domainResolver DomainResolver
+	domainDownload DomainDownloadTester
 	logger         *slog.Logger
 	now            func() time.Time
 	runMutex       sync.Mutex
@@ -149,6 +160,11 @@ func (r *Runner) SetDomainMappingVerifier(verifier DomainMappingVerifier) {
 // SetDomainResolver 注入绕过代理 Fake-IP 的物理 DNS 解析器。
 func (r *Runner) SetDomainResolver(resolver DomainResolver) {
 	r.domainResolver = resolver
+}
+
+// SetDomainDownloadTester 注入绑定物理接口的手动域名下载复测器。
+func (r *Runner) SetDomainDownloadTester(tester DomainDownloadTester) {
+	r.domainDownload = tester
 }
 
 // NewRunner 创建依赖显式注入的优选运行器。
@@ -176,6 +192,7 @@ func (r *Runner) Reconfigure(
 	policy PolicyApplier,
 	domainResolver DomainResolver,
 	domainVerifier DomainMappingVerifier,
+	domainDownload DomainDownloadTester,
 	refreshPolicy bool,
 ) (bool, error) {
 	if rangeSource == nil || benchmarker == nil {
@@ -190,15 +207,15 @@ func (r *Runner) Reconfigure(
 	configurePolicyJournal(policy, r.store)
 	previousConfig, previousRanges, previousBenchmark := r.config, r.ranges, r.benchmark
 	previousRoutes, previousPath, previousPolicy := r.routes, r.physicalPath, r.policy
-	previousResolver, previousVerifier := r.domainResolver, r.domainVerifier
+	previousResolver, previousVerifier, previousDownload := r.domainResolver, r.domainVerifier, r.domainDownload
 	r.config, r.ranges, r.benchmark = cfg, rangeSource, benchmarker
 	r.routes, r.physicalPath, r.policy = routes, physicalPath, policy
-	r.domainResolver, r.domainVerifier = domainResolver, domainVerifier
+	r.domainResolver, r.domainVerifier, r.domainDownload = domainResolver, domainVerifier, domainDownload
 
 	rollback := func() {
 		r.config, r.ranges, r.benchmark = previousConfig, previousRanges, previousBenchmark
 		r.routes, r.physicalPath, r.policy = previousRoutes, previousPath, previousPolicy
-		r.domainResolver, r.domainVerifier = previousResolver, previousVerifier
+		r.domainResolver, r.domainVerifier, r.domainDownload = previousResolver, previousVerifier, previousDownload
 	}
 	if refreshPolicy && r.store.Snapshot().Policy != nil {
 		if r.policy == nil {
@@ -382,7 +399,10 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 	retryPolicy:
 		for {
 			var allocationWarnings []string
-			report.domainMappings, report.DomainAllocations, allocationWarnings = r.allocateDomainMappings(ctx, rangeResult.Snapshot, report.Results, r.store.Snapshot(), failedDomainAddresses)
+			report.domainMappings, report.DomainAllocations, allocationWarnings, err = r.allocateDomainMappings(ctx, rangeResult.Snapshot, report.Results, r.store.Snapshot(), failedDomainAddresses)
+			if err != nil {
+				return report, fmt.Errorf("allocate accelerated domains: %w", err)
+			}
 			report.Warnings = append(report.Warnings, allocationWarnings...)
 			report.domainAllocationCompleted = true
 			if failure := manualDomainAllocationFailure(report); failure != "" {
@@ -707,7 +727,10 @@ retryRefresh:
 			mutateState(&planned)
 		}
 		ranked := rankedHistoricalResults(planned, r.now())
-		mappings, allocations, allocationWarnings := r.allocateDomainMappings(ctx, rangeResult.Snapshot, ranked, planned, failedDomainAddresses)
+		mappings, allocations, allocationWarnings, allocationErr := r.allocateDomainMappings(ctx, rangeResult.Snapshot, ranked, planned, failedDomainAddresses)
+		if allocationErr != nil {
+			return fmt.Errorf("allocate accelerated domains during policy refresh: %w", allocationErr)
+		}
 		for _, warning := range allocationWarnings {
 			r.logger.Warn("域名未分配优选 IP", "warning", warning)
 		}
@@ -984,7 +1007,7 @@ func (r *Runner) applyTemporaryRoutes(ctx context.Context, snapshot ranges.Snaps
 		if gateway == "" {
 			continue
 		}
-		route := cfnetwork.RouteSpec{Prefix: prefix.String(), Gateway: gateway, Interface: r.physicalPath.Interface, InterfaceIndex: r.physicalPath.InterfaceIndex, Metric: 5}
+		route := cfnetwork.RouteSpec{Prefix: prefix.String(), Gateway: gateway, Interface: r.physicalPath.Interface, InterfaceIndex: r.physicalPath.InterfaceIndex, Metric: managedRouteMetric}
 		plan, err := r.routes.Plan(ctx, route, true)
 		if err != nil {
 			_ = r.rollbackRoutes(ctx, transactionIDs)
@@ -1195,10 +1218,10 @@ func (r *Runner) verifyCloudflareDomain(ctx context.Context, snapshot ranges.Sna
 	return addresses, nil
 }
 
-// allocateDomainMappings 先按手动配置顺序、再按自动发现顺序消费互不重复的兼容地址。
-func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Snapshot, results []benchmark.Result, state store.State, excludedAddresses ...map[string]map[string]struct{}) ([]proxy.DomainMapping, []DomainAllocationResult, []string) {
+// allocateDomainMappings 先为手动域名执行目标资源下载复测，再让自动发现域名消费剩余兼容地址。
+func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Snapshot, results []benchmark.Result, state store.State, excludedAddresses ...map[string]map[string]struct{}) ([]proxy.DomainMapping, []DomainAllocationResult, []string, error) {
 	if !r.config.Acceleration.Enabled {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	candidatesByDomain := make([]domainAllocationCandidate, 0, len(r.config.Acceleration.ManualDomains))
 	for _, domain := range r.config.AccelerationDomains() {
@@ -1210,15 +1233,15 @@ func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Sna
 		}
 	}
 	if len(candidatesByDomain) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	if r.policy == nil || !r.policy.Capabilities().DomainMappings {
 		allocations := failedDomainAllocations(candidatesByDomain, "domain mapping capability is unavailable")
-		return nil, allocations, domainAllocationWarnings(allocations)
+		return nil, allocations, domainAllocationWarnings(allocations), nil
 	}
 	if r.domainResolver == nil || r.domainVerifier == nil {
 		allocations := failedDomainAllocations(candidatesByDomain, "verification is unavailable")
-		return nil, allocations, domainAllocationWarnings(allocations)
+		return nil, allocations, domainAllocationWarnings(allocations), nil
 	}
 	ranked := append([]benchmark.Result(nil), results...)
 	sort.SliceStable(ranked, func(i, j int) bool { return ranked[i].Score > ranked[j].Score })
@@ -1244,6 +1267,12 @@ func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Sna
 	preflightRejectedCandidates := make(map[string]struct{})
 	for _, candidate := range candidatesByDomain {
 		allocation := DomainAllocationResult{Domain: candidate.domain, Source: candidate.source}
+		requiresDownload := candidate.source == "manual" && r.config.Acceleration.ManualDownloadTest
+		if requiresDownload && r.domainDownload == nil {
+			allocation.Error = "manual domain download verification is unavailable"
+			allocations = append(allocations, allocation)
+			continue
+		}
 		excludedForDomain := map[string]struct{}{}
 		if len(excludedAddresses) > 0 && excludedAddresses[0] != nil {
 			excludedForDomain = excludedAddresses[0][candidate.domain]
@@ -1260,6 +1289,7 @@ func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Sna
 		}
 		var lastError error
 		assigned := false
+		probeURL := ""
 		for _, candidateAddress := range candidates {
 			if _, alreadyAssigned := assignedCandidates[candidateAddress]; alreadyAssigned {
 				continue
@@ -1270,16 +1300,47 @@ func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Sna
 			if _, excluded := excludedForDomain[candidateAddress]; excluded {
 				continue
 			}
+			transactionID := ""
+			if requiresDownload {
+				transactionID, err = r.applyDomainProbeRoute(ctx, candidateAddress)
+				if err != nil {
+					return nil, nil, nil, fmt.Errorf("prepare direct download route for %s via %s: %w", candidate.domain, candidateAddress, err)
+				}
+			}
 			mapping := proxy.DomainMapping{Domain: candidate.domain, Addresses: []string{candidateAddress}}
-			if err := r.domainVerifier.VerifyPreflight(ctx, []proxy.DomainMapping{mapping}); err != nil {
-				lastError = err
-				preflightRejectedCandidates[candidateAddress] = struct{}{}
+			preflightErr := r.domainVerifier.VerifyPreflight(ctx, []proxy.DomainMapping{mapping})
+			if preflightErr == nil && requiresDownload {
+				if probeURL == "" {
+					probeURL, preflightErr = r.domainDownload.DiscoverProbeURL(ctx, candidate.domain, candidateAddress)
+				}
+				if preflightErr == nil {
+					var downloadResult acceleration.DownloadResult
+					downloadResult, preflightErr = r.domainDownload.Measure(ctx, candidate.domain, candidateAddress, probeURL)
+					if downloadResult.Mbps > allocation.DownloadMbps {
+						allocation.DownloadMbps = downloadResult.Mbps
+					}
+					if preflightErr == nil && downloadResult.Mbps < r.config.Acceleration.ManualDownloadMinMbps {
+						preflightErr = fmt.Errorf("direct download %.2f Mbps is below configured %.2f Mbps", downloadResult.Mbps, r.config.Acceleration.ManualDownloadMinMbps)
+					}
+				}
+			}
+			if transactionID != "" {
+				if rollbackErr := r.rollbackRoutes(ctx, []string{transactionID}); rollbackErr != nil {
+					return nil, nil, nil, fmt.Errorf("clean direct download route for %s via %s: %w", candidate.domain, candidateAddress, rollbackErr)
+				}
+			}
+			if preflightErr != nil {
+				lastError = preflightErr
+				if !requiresDownload {
+					preflightRejectedCandidates[candidateAddress] = struct{}{}
+				}
 				continue
 			}
 			mappings = append(mappings, mapping)
 			assignedCandidates[candidateAddress] = struct{}{}
 			allocation.AssignedAddress = mapping.Addresses[0]
 			allocation.PreflightVerified = true
+			allocation.DownloadVerified = requiresDownload
 			assigned = true
 			break
 		}
@@ -1294,7 +1355,46 @@ func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Sna
 		}
 		allocations = append(allocations, allocation)
 	}
-	return mappings, allocations, domainAllocationWarnings(allocations)
+	return mappings, allocations, domainAllocationWarnings(allocations), nil
+}
+
+// applyDomainProbeRoute 为单个手动域名候选建立可回滚的物理主机路由。
+func (r *Runner) applyDomainProbeRoute(ctx context.Context, rawAddress string) (string, error) {
+	if !r.config.Network.ManageRoutes {
+		return "", nil
+	}
+	if r.routes == nil {
+		return "", errors.New("route management is enabled but no route controller is configured")
+	}
+	address, err := netip.ParseAddr(rawAddress)
+	if err != nil {
+		return "", err
+	}
+	address = address.Unmap()
+	gateway := r.physicalPath.GatewayIPv6
+	if address.Is4() {
+		gateway = r.physicalPath.GatewayIPv4
+	}
+	if gateway == "" {
+		return "", fmt.Errorf("physical gateway is unavailable for %s", address)
+	}
+	bits := 128
+	if address.Is4() {
+		bits = 32
+	}
+	route := cfnetwork.RouteSpec{
+		Prefix: netip.PrefixFrom(address, bits).String(), Gateway: gateway,
+		Interface: r.physicalPath.Interface, InterfaceIndex: r.physicalPath.InterfaceIndex, Metric: managedRouteMetric,
+	}
+	plan, err := r.routes.Plan(ctx, route, true)
+	if err != nil {
+		return "", err
+	}
+	transaction, err := r.routes.Apply(ctx, plan)
+	if err != nil {
+		return "", err
+	}
+	return transaction.ID, nil
 }
 
 // failedDomainAllocations 为无法进入校验流程的域名生成逐项失败结果。
@@ -1528,7 +1628,7 @@ func (r *Runner) removeObsoletePolicyRoutes(ctx context.Context, previous *store
 			rollbackErr := r.rollbackRoutes(ctx, transactionIDs)
 			return nil, errors.Join(fmt.Errorf("remove route %s: physical gateway is unavailable", prefix), rollbackErr)
 		}
-		route := cfnetwork.RouteSpec{Prefix: prefix.String(), Gateway: gateway, Interface: r.physicalPath.Interface, InterfaceIndex: r.physicalPath.InterfaceIndex, Metric: 5}
+		route := cfnetwork.RouteSpec{Prefix: prefix.String(), Gateway: gateway, Interface: r.physicalPath.Interface, InterfaceIndex: r.physicalPath.InterfaceIndex, Metric: managedRouteMetric}
 		transaction, err := r.routes.Remove(ctx, route)
 		if err != nil {
 			rollbackErr := r.rollbackRoutes(ctx, transactionIDs)
@@ -1604,6 +1704,8 @@ func recordDomainAllocationResults(state *store.State, allocations []DomainAlloc
 		if policyApplied || !previouslyActive {
 			record.CloudflareVerified = allocation.CloudflareVerified
 			record.PreflightVerified = allocation.PreflightVerified
+			record.DownloadVerified = allocation.DownloadVerified
+			record.DownloadMbps = allocation.DownloadMbps
 		}
 		record.Active = (policyApplied && allocation.AssignedAddress != "") || (!policyApplied && previouslyActive)
 		record.LastResolvedAddresses = append([]string(nil), allocation.ResolvedAddresses...)

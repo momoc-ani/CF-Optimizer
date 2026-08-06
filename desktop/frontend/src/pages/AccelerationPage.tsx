@@ -1,4 +1,4 @@
-import { ActionIcon, Alert, Button, Group, Modal, SimpleGrid, Stack, Switch, Text, Textarea, TextInput, Tooltip } from '@mantine/core';
+import { ActionIcon, Alert, Button, Group, Modal, NumberInput, SimpleGrid, Stack, Switch, Text, Textarea, TextInput, Tooltip } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
@@ -23,6 +23,8 @@ const accelerationSettingsSchema = z.object({
   enabled: z.boolean(),
   manualDomains: z.string(),
   excludedDomains: z.string(),
+  manualDownloadTest: z.boolean(),
+  manualDownloadMinMbps: z.number().min(0.1, '最低速度必须大于 0 Mbps').max(100000, '最低速度不能超过 100000 Mbps'),
   autoDiscover: z.boolean(),
   autoApply: z.boolean(),
   discoveryInterval: z.string().regex(durationPattern, '请输入带单位的发现间隔，例如 15s'),
@@ -60,6 +62,8 @@ function accelerationFormFromConfig(config: AppConfig['acceleration']): Accelera
     enabled: config.enabled,
     manualDomains: joinConfigLines(config.manual_domains),
     excludedDomains: joinConfigLines(config.excluded_domains),
+    manualDownloadTest: config.manual_download_test,
+    manualDownloadMinMbps: config.manual_download_min_mbps,
     autoDiscover: config.auto_discover,
     autoApply: config.auto_apply,
     discoveryInterval: config.discovery_interval,
@@ -75,6 +79,8 @@ function mergeAccelerationConfig(config: AppConfig, form: AccelerationSettingsFo
       enabled: form.enabled,
       manual_domains: parseDomainLines(form.manualDomains),
       excluded_domains: parseDomainLines(form.excludedDomains),
+      manual_download_test: form.manualDownloadTest,
+      manual_download_min_mbps: form.manualDownloadMinMbps,
       auto_discover: form.autoDiscover,
       auto_apply: form.autoApply,
       discovery_interval: form.discoveryInterval,
@@ -97,6 +103,8 @@ export function AccelerationPage() {
       enabled: true,
       manualDomains: '',
       excludedDomains: '',
+      manualDownloadTest: true,
+      manualDownloadMinMbps: 20,
       autoDiscover: true,
       autoApply: true,
       discoveryInterval: '15s',
@@ -130,6 +138,7 @@ export function AccelerationPage() {
     { id: 'mapping', header: '优选 IP 分配', size: 220, accessorFn: (row) => row.accelerated_addresses?.join(', '), cell: ({ row }) => <Stack gap={2}>{(row.original.accelerated_addresses ?? []).map((address) => <Text key={address} ff="monospace" size="sm">{address}</Text>)}{!row.original.accelerated_addresses?.length && <Text c="dimmed" size="sm">待分配</Text>}</Stack> },
     { accessorKey: 'cloudflare_verified', header: 'Cloudflare', size: 118, cell: ({ getValue }) => <StatusBadge label={getValue<boolean>() ? '已确认' : '待确认'} tone={getValue<boolean>() ? 'verified' : 'neutral'} /> },
     { accessorKey: 'preflight_verified', header: 'SNI / Host', size: 115, cell: ({ getValue }) => <StatusBadge label={getValue<boolean>() ? '已验证' : '待验证'} tone={getValue<boolean>() ? 'verified' : 'neutral'} /> },
+    { accessorKey: 'download_mbps', header: '域名下载', size: 130, cell: ({ row }) => row.original.source === 'manual' && typeof row.original.download_mbps === 'number' ? <StatusBadge label={`${row.original.download_mbps.toFixed(2)} Mbps`} tone={row.original.download_verified ? 'verified' : 'warning'} /> : <Text c="dimmed" size="sm">—</Text> },
     { accessorKey: 'policyLabel', header: '直连策略', size: 180, cell: ({ row }) => <StatusBadge label={row.original.policyLabel} tone={row.original.active ? 'verified' : 'neutral'} /> },
     { accessorKey: 'isRouteVerified', header: '物理路由', size: 120, cell: ({ getValue }) => <StatusBadge label={getValue<boolean>() ? '已验证' : '待验证'} tone={getValue<boolean>() ? 'verified' : 'warning'} /> },
     { accessorKey: 'last_seen_at', header: '最近发现', size: 155, cell: ({ getValue }) => formatDate(String(getValue())) },
@@ -212,7 +221,7 @@ export function AccelerationPage() {
       </Modal>
 
       <Alert color={isAutomatic ? 'green' : 'yellow'} icon={isAutomatic ? <ShieldCheck size={18} /> : <ShieldAlert size={18} />} title={isAutomatic ? '自动加速已开启' : '自动加速未完全开启'}>
-        <Text size="sm">域名加速 {accelerationConfig?.enabled ? '开启' : '关闭'} · 自动发现 {accelerationConfig?.auto_discover ? '开启' : '关闭'} · 自动应用 {accelerationConfig?.auto_apply ? '开启' : '关闭'} · 周期 {accelerationConfig?.discovery_interval ?? '—'}</Text>
+        <Text size="sm">域名加速 {accelerationConfig?.enabled ? '开启' : '关闭'} · 手动域名下载复测 {accelerationConfig?.manual_download_test ? `开启（≥ ${accelerationConfig.manual_download_min_mbps} Mbps）` : '关闭'} · 自动发现 {accelerationConfig?.auto_discover ? '开启' : '关闭'} · 自动应用 {accelerationConfig?.auto_apply ? '开启' : '关闭'} · 周期 {accelerationConfig?.discovery_interval ?? '—'}</Text>
       </Alert>
 
       <form onSubmit={submitPolicy}>
@@ -226,6 +235,10 @@ export function AccelerationPage() {
               <Controller control={form.control} name="autoDiscover" render={({ field }) => <Switch label="自动发现 Cloudflare 域名" checked={field.value} onChange={field.onChange} />} />
               <Controller control={form.control} name="autoApply" render={({ field }) => <Switch color="orange" label="自动应用已验证域名" checked={field.value} onChange={field.onChange} />} />
               <Controller control={form.control} name="discoveryInterval" render={({ field }) => <TextInput {...field} label="发现间隔" error={errors.discoveryInterval?.message} />} />
+            </SimpleGrid>
+            <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
+              <Controller control={form.control} name="manualDownloadTest" render={({ field }) => <Switch label="手动域名直连下载复测" checked={field.value} onChange={field.onChange} />} />
+              <Controller control={form.control} name="manualDownloadMinMbps" render={({ field }) => <NumberInput label="直连下载最低速度" suffix=" Mbps" min={0.1} max={100000} decimalScale={2} value={field.value} onChange={field.onChange} error={errors.manualDownloadMinMbps?.message} disabled={!form.watch('manualDownloadTest')} />} />
             </SimpleGrid>
             <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
               <Controller control={form.control} name="manualDomains" render={({ field }) => <Textarea {...field} label="手动域名（越靠前优先级越高）" autosize minRows={3} ff="monospace" placeholder="每行一个精确域名" />} />
@@ -256,6 +269,7 @@ export function AccelerationPage() {
                 <Text c="dimmed">优选 IP</Text><Text ff="monospace">{selected.accelerated_addresses?.join(', ') || '—'}</Text>
                 <Text c="dimmed">TLS SNI</Text><Text ff="monospace">{selected.domain}</Text>
                 <Text c="dimmed">HTTP Host</Text><Text ff="monospace">{selected.domain}</Text>
+                <Text c="dimmed">域名下载复测</Text><Text>{typeof selected.download_mbps === 'number' ? `${selected.download_mbps.toFixed(2)} Mbps${selected.download_verified ? '（达标）' : '（未达标）'}` : selected.source === 'manual' ? '未复测' : '不适用'}</Text>
                 <Text c="dimmed">已验证策略</Text><Text>{selected.verified_adapters?.map((adapter) => adapterLabels[adapter] ?? adapter).join(', ') || '—'}</Text>
                 <Text c="dimmed">物理接口</Text><Text>{selected.verifiedRoute?.verification?.interface ?? '—'}</Text>
                 <Text c="dimmed">源地址</Text><Text ff="monospace">{selected.verifiedRoute?.verification?.source_address ?? '—'}</Text>

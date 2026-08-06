@@ -57,6 +57,7 @@ type Runtime struct {
 	ProxyCoordinator  *proxy.Coordinator
 	DomainResolver    *acceleration.PhysicalResolver
 	DomainVerifier    *acceleration.Verifier
+	DomainDownload    *acceleration.DownloadTester
 	Logger            *slog.Logger
 	configChanged     chan struct{}
 	// mihomoAutoDetected 标记当前运行时是否使用了自动探测到的 Mihomo 端点。
@@ -75,6 +76,7 @@ type RuntimeView struct {
 	ProxyCoordinator   *proxy.Coordinator
 	DomainResolver     *acceleration.PhysicalResolver
 	DomainVerifier     *acceleration.Verifier
+	DomainDownload     *acceleration.DownloadTester
 	MihomoAutoDetected bool
 }
 
@@ -87,6 +89,7 @@ type RuntimeSession struct {
 	ProxyCoordinator *proxy.Coordinator
 	DomainResolver   *acceleration.PhysicalResolver
 	DomainVerifier   *acceleration.Verifier
+	DomainDownload   *acceleration.DownloadTester
 }
 
 // Build 创建后台服务和直接 CLI 共用的运行时，不执行任何网络修改。
@@ -156,6 +159,11 @@ func Build(cfg config.Config, configPath string, logger *slog.Logger) (*Runtime,
 		return nil, err
 	}
 	runner.SetDomainMappingVerifier(domainVerifier)
+	domainDownload, err := newDomainDownloadTester(managedConfig, directDial)
+	if err != nil {
+		return nil, err
+	}
+	runner.SetDomainDownloadTester(domainDownload)
 	dnsServers, err := cfnetwork.DiscoverPhysicalDNSServers(context.Background(), physicalPath, cfg.Network.CommandTimeout.Duration())
 	if err != nil {
 		return nil, fmt.Errorf("discover physical DNS servers: %w", err)
@@ -169,9 +177,18 @@ func Build(cfg config.Config, configPath string, logger *slog.Logger) (*Runtime,
 		Config: runtimeConfig, ConfigPath: configPath, Store: stateStore, Ranges: rangeCatalog, Runner: runner,
 		Routes: routeController, RouteBackend: routeBackend, PhysicalPath: physicalPath,
 		DirectDial: directDial, ProxyCoordinator: proxyCoordinator, Logger: logger, mihomoAutoDetected: mihomoAutoDetected,
-		DomainResolver: domainResolver, DomainVerifier: domainVerifier,
+		DomainResolver: domainResolver, DomainVerifier: domainVerifier, DomainDownload: domainDownload,
 		configChanged: make(chan struct{}),
 	}, nil
+}
+
+// newDomainDownloadTester 使用全局下载窗口创建手动域名专用的 1 MiB 直连复测器。
+func newDomainDownloadTester(cfg config.Config, dial cfnetwork.DialContextFunc) (*acceleration.DownloadTester, error) {
+	return acceleration.NewDownloadTester(dial, acceleration.DownloadOptions{
+		DiscoveryTimeout: cfg.Benchmark.TLSTimeout.Duration(),
+		DownloadTimeout:  cfg.Benchmark.DownloadDuration.Duration(),
+		MaxBytes:         acceleration.DefaultDomainDownloadMaxBytes,
+	})
 }
 
 // View 返回同一时刻的运行配置与 Runner，避免持续维护切换期间出现数据竞争。
@@ -181,7 +198,7 @@ func (r *Runtime) View() RuntimeView {
 	return RuntimeView{
 		Config: r.Config, Ranges: r.Ranges, Runner: r.Runner, Routes: r.Routes, RouteBackend: r.RouteBackend,
 		PhysicalPath: r.PhysicalPath, DirectDial: r.DirectDial, ProxyCoordinator: r.ProxyCoordinator,
-		DomainResolver: r.DomainResolver, DomainVerifier: r.DomainVerifier, MihomoAutoDetected: r.mihomoAutoDetected,
+		DomainResolver: r.DomainResolver, DomainVerifier: r.DomainVerifier, DomainDownload: r.DomainDownload, MihomoAutoDetected: r.mihomoAutoDetected,
 	}
 }
 
@@ -273,9 +290,13 @@ func (r *Runtime) ReloadConfig(ctx context.Context, cfg config.Config, refreshPo
 	if err != nil {
 		return false, err
 	}
+	domainDownload, err := newDomainDownloadTester(managedConfig, directDial)
+	if err != nil {
+		return false, err
+	}
 	policyRefreshed, err := view.Runner.Reconfigure(
 		ctx, managedConfig, rangeCatalog, benchmarker, routeController, physicalPath,
-		proxyCoordinator, domainResolver, domainVerifier, refreshPolicy,
+		proxyCoordinator, domainResolver, domainVerifier, domainDownload, refreshPolicy,
 	)
 	if err != nil {
 		return false, err
@@ -290,6 +311,7 @@ func (r *Runtime) ReloadConfig(ctx context.Context, cfg config.Config, refreshPo
 	r.ProxyCoordinator = proxyCoordinator
 	r.DomainResolver = domainResolver
 	r.DomainVerifier = domainVerifier
+	r.DomainDownload = domainDownload
 	r.mihomoAutoDetected = mihomoAutoDetected
 	r.notifyConfigChangedLocked()
 	r.mutex.Unlock()
@@ -732,6 +754,11 @@ func (r *Runtime) BuildManagedSession(physicalPath cfnetwork.PhysicalPath, detec
 		return RuntimeSession{}, err
 	}
 	runner.SetDomainMappingVerifier(domainVerifier)
+	domainDownload, err := newDomainDownloadTester(managedConfig, directDial)
+	if err != nil {
+		return RuntimeSession{}, err
+	}
+	runner.SetDomainDownloadTester(domainDownload)
 	dnsServers, err := cfnetwork.DiscoverPhysicalDNSServers(context.Background(), physicalPath, managedConfig.Network.CommandTimeout.Duration())
 	if err != nil {
 		return RuntimeSession{}, fmt.Errorf("discover confirmed physical DNS servers: %w", err)
@@ -744,7 +771,7 @@ func (r *Runtime) BuildManagedSession(physicalPath cfnetwork.PhysicalPath, detec
 	return RuntimeSession{
 		Config: persistedConfig, Runner: runner, PhysicalPath: physicalPath,
 		DirectDial: directDial, ProxyCoordinator: proxyCoordinator,
-		DomainResolver: domainResolver, DomainVerifier: domainVerifier,
+		DomainResolver: domainResolver, DomainVerifier: domainVerifier, DomainDownload: domainDownload,
 	}, nil
 }
 
@@ -758,6 +785,7 @@ func (r *Runtime) ActivateSession(session RuntimeSession) {
 	r.ProxyCoordinator = session.ProxyCoordinator
 	r.DomainResolver = session.DomainResolver
 	r.DomainVerifier = session.DomainVerifier
+	r.DomainDownload = session.DomainDownload
 	r.notifyConfigChangedLocked()
 	r.mutex.Unlock()
 }

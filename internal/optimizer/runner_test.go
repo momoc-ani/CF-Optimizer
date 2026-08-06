@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cf-optimizer/cf-optimizer/internal/acceleration"
 	"github.com/cf-optimizer/cf-optimizer/internal/benchmark"
 	"github.com/cf-optimizer/cf-optimizer/internal/config"
 	cfnetwork "github.com/cf-optimizer/cf-optimizer/internal/network"
@@ -142,6 +143,24 @@ func (r staticDomainResolver) Resolve(context.Context, string) ([]netip.Addr, er
 
 type selectiveDomainVerifier struct {
 	rejected map[string]map[string]bool
+}
+
+type rankedDomainDownloadTester struct {
+	mbps      map[string]float64
+	calls     []string
+	onMeasure func(address string)
+}
+
+func (*rankedDomainDownloadTester) DiscoverProbeURL(context.Context, string, string) (string, error) {
+	return "https://manual.example/assets/probe.bin", nil
+}
+
+func (t *rankedDomainDownloadTester) Measure(_ context.Context, _, address, probeURL string) (acceleration.DownloadResult, error) {
+	t.calls = append(t.calls, address)
+	if t.onMeasure != nil {
+		t.onMeasure(address)
+	}
+	return acceleration.DownloadResult{ProbeURL: probeURL, Downloaded: 1 << 20, Duration: time.Second, Mbps: t.mbps[address]}, nil
 }
 
 func (v *selectiveDomainVerifier) VerifyPreflight(_ context.Context, mappings []proxy.DomainMapping) error {
@@ -390,7 +409,10 @@ func TestAllocateDomainMappingsUsesManualConfigurationAndRankingOrder(t *testing
 		{IP: netip.MustParseAddr("1.1.1.3"), Qualified: true, TLSVerified: true, Score: 97},
 	}
 
-	mappings, allocations, warnings := runner.allocateDomainMappings(context.Background(), snapshot, results, store.State{})
+	mappings, allocations, warnings, err := runner.allocateDomainMappings(context.Background(), snapshot, results, store.State{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(warnings) != 1 || len(mappings) != 2 || len(allocations) != 3 {
 		t.Fatalf("unexpected allocation result: mappings=%#v allocations=%#v warnings=%#v", mappings, allocations, warnings)
 	}
@@ -402,6 +424,76 @@ func TestAllocateDomainMappingsUsesManualConfigurationAndRankingOrder(t *testing
 	}
 	if allocations[0].AssignedAddress != "1.1.1.2" || !allocations[0].CloudflareVerified || !allocations[0].PreflightVerified || allocations[2].Error == "" {
 		t.Fatalf("structured domain allocation evidence is incomplete: %#v", allocations)
+	}
+}
+
+func TestAllocateDomainMappingsUsesFirstCandidateMeetingManualDownloadThreshold(t *testing.T) {
+	policyApplier := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
+	runner, _ := newTestRunner(t, policyApplier)
+	runner.config.Acceleration.ManualDomains = []string{"manual.example"}
+	runner.config.Acceleration.ManualDownloadTest = true
+	runner.config.Acceleration.ManualDownloadMinMbps = 20
+	runner.domainResolver = staticDomainResolver{addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	downloadTester := &rankedDomainDownloadTester{mbps: map[string]float64{"1.1.1.1": 12.5, "1.1.1.2": 24.75, "1.1.1.3": 80}}
+	runner.domainDownload = downloadTester
+	results := []benchmark.Result{
+		{IP: netip.MustParseAddr("1.1.1.1"), Qualified: true, Score: 99},
+		{IP: netip.MustParseAddr("1.1.1.2"), Qualified: true, Score: 98},
+		{IP: netip.MustParseAddr("1.1.1.3"), Qualified: true, Score: 97},
+	}
+
+	mappings, allocations, warnings, err := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, store.State{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(mappings) != 1 || mappings[0].Addresses[0] != "1.1.1.2" {
+		t.Fatalf("unexpected threshold allocation: mappings=%#v warnings=%#v", mappings, warnings)
+	}
+	if len(allocations) != 1 || !allocations[0].DownloadVerified || allocations[0].DownloadMbps != 24.75 {
+		t.Fatalf("download verification evidence is incomplete: %#v", allocations)
+	}
+	if !slices.Equal(downloadTester.calls, []string{"1.1.1.1", "1.1.1.2"}) {
+		t.Fatalf("candidate testing did not stop at the first passing address: %#v", downloadTester.calls)
+	}
+}
+
+func TestAllocateDomainMappingsAppliesTemporaryRouteDuringManualDownload(t *testing.T) {
+	policyApplier := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
+	runner, _ := newTestRunner(t, policyApplier)
+	runner.config.Acceleration.ManualDomains = []string{"manual.example"}
+	runner.config.Acceleration.ManualDownloadTest = true
+	runner.config.Acceleration.ManualDownloadMinMbps = 20
+	runner.config.Network.ManageRoutes = true
+	runner.physicalPath = cfnetwork.PhysicalPath{Interface: "eth0", InterfaceIndex: 2, GatewayIPv4: "192.0.2.1"}
+	backend := &delayedRouteBackend{routes: map[string]cfnetwork.RouteSpec{}}
+	controller, err := cfnetwork.NewRouteController(t.TempDir(), backend, true, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.routes = controller
+	runner.domainResolver = staticDomainResolver{addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	runner.domainDownload = &rankedDomainDownloadTester{
+		mbps: map[string]float64{"1.1.1.1": 25},
+		onMeasure: func(address string) {
+			route, exists := backend.routes[address+"/32"]
+			if !exists || route.Gateway != "192.0.2.1" || route.Interface != "eth0" || route.InterfaceIndex != 2 {
+				t.Fatalf("manual download did not use the expected temporary physical route: %#v", backend.routes)
+			}
+		},
+	}
+	results := []benchmark.Result{{IP: netip.MustParseAddr("1.1.1.1"), Qualified: true, Score: 99}}
+
+	mappings, allocations, warnings, err := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, store.State{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(mappings) != 1 || len(allocations) != 1 || !allocations[0].DownloadVerified {
+		t.Fatalf("unexpected routed download allocation: mappings=%#v allocations=%#v warnings=%#v", mappings, allocations, warnings)
+	}
+	if len(backend.routes) != 0 {
+		t.Fatalf("temporary manual download route was not rolled back: %#v", backend.routes)
 	}
 }
 
@@ -432,7 +524,10 @@ func TestAllocateDomainMappingsGivesRemainingPoolToAutomaticDomains(t *testing.T
 		{IP: netip.MustParseAddr("1.1.1.4"), Qualified: true, Score: 96},
 	}
 
-	mappings, _, warnings := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, stateStore.Snapshot())
+	mappings, _, warnings, err := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, stateStore.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(warnings) != 0 || len(mappings) != 4 {
 		t.Fatalf("unexpected combined allocation: mappings=%#v warnings=%#v", mappings, warnings)
 	}
@@ -467,7 +562,10 @@ func TestAllocateDomainMappingsIgnoresAutomaticDomainsWithoutAllSwitches(t *test
 		{IP: netip.MustParseAddr("1.1.1.2"), Qualified: true, Score: 98},
 	}
 
-	mappings, _, warnings := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, stateStore.Snapshot())
+	mappings, _, warnings, err := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, stateStore.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(warnings) != 0 || len(mappings) != 1 || mappings[0].Domain != "manual.example" || mappings[0].Addresses[0] != "1.1.1.1" {
 		t.Fatalf("automatic domain consumed the pool without all switches: mappings=%#v warnings=%#v", mappings, warnings)
 	}
@@ -534,6 +632,51 @@ func TestRunKeepsPreviousPolicyWhenRankedPoolHasNoQualifiedAddress(t *testing.T)
 	record := state.DiscoveredDomains["ani.momoc.top"]
 	if !record.Active || !record.CloudflareVerified || !record.PreflightVerified || !strings.Contains(record.LastError, "ranked address pool is exhausted") {
 		t.Fatalf("failed refresh did not retain verified domain state: %#v", record)
+	}
+}
+
+func TestRunKeepsPreviousPolicyWhenAllManualDownloadCandidatesAreBelowThreshold(t *testing.T) {
+	policy := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
+	runner, stateStore := newTestRunner(t, policy)
+	runner.config.Acceleration.Enabled = true
+	runner.config.Acceleration.ManualDomains = []string{"ani.momoc.top"}
+	runner.config.Acceleration.ManualDownloadTest = true
+	runner.config.Acceleration.ManualDownloadMinMbps = 20
+	runner.domainResolver = staticDomainResolver{addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	runner.domainDownload = &rankedDomainDownloadTester{mbps: map[string]float64{
+		"1.1.1.1": 8.5,
+		"1.1.1.2": 12.25,
+	}}
+	previousReceipts, err := json.Marshal(proxy.ApplyResult{Receipts: []proxy.Receipt{{ID: "previous", Adapter: "test", Changed: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousMapping := store.DomainMappingSnapshot{Domain: "ani.momoc.top", Addresses: []string{"1.1.1.3"}}
+	if err := stateStore.Update(func(state *store.State) error {
+		state.CurrentIPv4 = &store.Selection{IP: "1.1.1.3", Family: 4, Score: 98, PolicyVerified: true}
+		state.Policy = &store.PolicySnapshot{
+			IPv4CIDRs: []string{"1.1.1.3/32"}, DomainMappings: []store.DomainMappingSnapshot{previousMapping}, Receipts: previousReceipts,
+		}
+		state.DiscoveredDomains["ani.momoc.top"] = store.DomainDiscovery{
+			Domain: "ani.momoc.top", Source: "manual", CloudflareVerified: true, PreflightVerified: true, Active: true,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := runner.Run(context.Background(), RunOptions{ApplyPolicy: true}, nil)
+	if err == nil || !strings.Contains(err.Error(), "below configured 20.00 Mbps") {
+		t.Fatalf("download threshold exhaustion should fail with measured-speed context: %v", err)
+	}
+	state := stateStore.Snapshot()
+	if report.PolicyApplied || len(policy.policies) != 0 || state.Policy == nil || !reflect.DeepEqual(state.Policy.DomainMappings, []store.DomainMappingSnapshot{previousMapping}) {
+		t.Fatalf("download threshold exhaustion replaced the previous policy: report=%#v policy=%#v applied=%#v", report, state.Policy, policy.policies)
+	}
+	record := state.DiscoveredDomains["ani.momoc.top"]
+	if !record.Active || !record.CloudflareVerified || !record.PreflightVerified || !strings.Contains(record.LastError, "below configured 20.00 Mbps") {
+		t.Fatalf("failed download refresh did not retain verified domain state: %#v", record)
 	}
 }
 
@@ -1049,7 +1192,7 @@ func TestReconfigureUpdatesIdleRunnerAndRejectsBusyRunner(t *testing.T) {
 	snapshot := ranges.Snapshot{Version: 1, Source: "reload", Hash: "reload", IPv4: []string{"1.1.1.0/30"}}
 	refreshed, err := runner.Reconfigure(
 		context.Background(), next, staticRanges{snapshot: snapshot}, staticBenchmark{}, nil,
-		cfnetwork.PhysicalPath{}, nil, nil, nil, false,
+		cfnetwork.PhysicalPath{}, nil, nil, nil, nil, false,
 	)
 	if err != nil || refreshed || runner.config.Benchmark.Candidates != 3 {
 		t.Fatalf("idle Reconfigure() = refreshed %t, error %v, config %#v", refreshed, err, runner.config.Benchmark)
@@ -1059,7 +1202,7 @@ func TestReconfigureUpdatesIdleRunnerAndRejectsBusyRunner(t *testing.T) {
 	}
 	_, err = runner.Reconfigure(
 		context.Background(), next, staticRanges{snapshot: snapshot}, staticBenchmark{}, nil,
-		cfnetwork.PhysicalPath{}, nil, nil, nil, false,
+		cfnetwork.PhysicalPath{}, nil, nil, nil, nil, false,
 	)
 	runner.operationGate.release()
 	if !errors.Is(err, ErrAlreadyRunning) {
@@ -1084,7 +1227,7 @@ func TestReconfigureRestoresPreviousDependenciesWhenPolicyRefreshFails(t *testin
 	_, err := runner.Reconfigure(
 		context.Background(), next,
 		staticRanges{snapshot: ranges.Snapshot{Version: 1, Source: "reload", Hash: "reload", IPv4: []string{"1.1.1.0/24"}}},
-		staticBenchmark{}, nil, cfnetwork.PhysicalPath{}, failingPolicy{}, nil, nil, true,
+		staticBenchmark{}, nil, cfnetwork.PhysicalPath{}, failingPolicy{}, nil, nil, nil, true,
 	)
 	if err == nil {
 		t.Fatal("policy refresh failure was not returned")
@@ -1102,6 +1245,7 @@ func newTestRunner(t *testing.T, policy PolicyApplier) (*Runner, *store.Store) {
 	cfg.Benchmark.IPv6 = false
 	cfg.Benchmark.Candidates = 2
 	cfg.Benchmark.DownloadTop = 1
+	cfg.Acceleration.ManualDownloadTest = false
 	stateStore, err := store.Open(cfg.DataDir, 10)
 	if err != nil {
 		t.Fatal(err)

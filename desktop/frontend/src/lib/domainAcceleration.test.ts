@@ -27,6 +27,7 @@ const domain: DomainDiscovery = {
   last_seen_at: '2026-08-02T00:00:01Z',
   cloudflare_verified: true,
   preflight_verified: true,
+  download_verified: true,
   active: true,
   accelerated_addresses: ['104.21.94.176'],
   verified_adapters: ['generic-route', 'mihomo'],

@@ -51,7 +51,7 @@ Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix
 2. 打开 CF Optimizer，等待总览连接后台并自动完成只读物理出口预检。
 3. 点击“一键优选”，在一个确认框内核对接口、网关和影响范围，选择“仅本次应用”或“以后自动维护”，然后开始。
 
-完成第三步后无需额外操作：后台会把已验证的优选 IP 用于域名加速，默认不预置手动域名，并自动发现和应用通过验证的 Cloudflare 域名。独立“域名加速”页用于查看 TLS SNI、HTTP Host、代理 `DIRECT`、物理接口和网关等证据，也可在此维护手动域名、排除域名和自动策略，或清理自动发现记录及其已有加速而保留手动域名；“设置”页不再重复这些选项。
+完成第三步后无需额外操作：后台会把已验证的优选 IP 用于域名加速，默认不预置手动域名，也不主动发现访问过的 Cloudflare 域名。独立“域名加速”页用于查看 TLS SNI、HTTP Host、代理 `DIRECT`、物理接口和网关等证据，也可在此维护手动域名、排除域名和自动策略，或清理自动发现记录及其已有加速而保留手动域名；“设置”页不再重复这些选项。
 
 自动发现不等于无条件接管所有访问域名。只有通过 Cloudflare 身份、TLS/Host 预检、策略应用和物理出口验证的域名才会显示“已加速”；未通过的域名保留为待验证或失败状态。
 
@@ -64,8 +64,9 @@ Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix
 完整配置字段见 [config.example.yaml](config.example.yaml)。重要默认值如下：
 
 - `network.manage_routes: false`：默认不修改系统路由。
-- `benchmark.download_url: ""`：默认不产生下载测速流量。
-- `acceleration.manual_domains: []`：默认不预置手动加速域名；自动发现和自动应用默认开启，发现周期为 `15s`，但只有完整验证通过后才显示“已加速”。
+- `benchmark.download_url` 默认使用 Cloudflare 官方 `50 MiB` 测速地址，对 TCP 初筛后的前 `20` 个候选以 `5` 路并发执行受流量上限约束的下载测速。
+- `acceleration.manual_domains: []`：默认不预置手动加速域名，自动发现默认关闭。
+- `acceleration.manual_download_test: true`：手动域名默认按全局排名逐个复测同域资源，首个达到 `20 Mbps` 的候选才会应用；全部不达标时保留上一份成功映射。
 - 测速 Dialer 不读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `ALL_PROXY`。
 - `ranges.max_change_percent` 限制远程网段异常变化。
 - 代理密钥不会写入诊断导出；日志和导出还会再次脱敏。
@@ -173,7 +174,7 @@ Do not install the Linux service under WSL to manage Windows host networking. In
 2. Open CF Optimizer and wait for the Overview to connect to the service and finish its read-only physical-egress preflight.
 3. Select One-click Optimize, review the interface, gateway, and effects in one confirmation dialog, choose Apply once or Maintain automatically, and start.
 
-No additional step is required after step 3. The service uses the verified selected IP for domain acceleration, starts without a preconfigured manual hostname, and automatically discovers and applies verified Cloudflare hostnames. Use the dedicated Domain Acceleration view to inspect TLS SNI, HTTP Host, proxy `DIRECT`, physical interface, and gateway evidence, manage manual domains, exclusions, and automatic behavior, or clear discovered records and their acceleration while preserving manual domains. These controls are no longer duplicated in Settings.
+No additional step is required after step 3. The service uses the verified selected IP for domain acceleration, starts without a preconfigured manual hostname, and leaves traffic-based hostname discovery disabled by default. Use the dedicated Domain Acceleration view to inspect TLS SNI, HTTP Host, proxy `DIRECT`, physical interface, and gateway evidence, manage manual domains, exclusions, and automatic behavior, or clear discovered records and their acceleration while preserving manual domains. These controls are no longer duplicated in Settings.
 
 Automatic discovery does not unconditionally take over every visited hostname. A hostname is shown as Accelerated only after Cloudflare identity, TLS/Host preflight, policy application, and physical-egress verification succeed; other observations remain pending or failed.
 
@@ -186,8 +187,9 @@ When automatic preflight fails, Benchmark remains available. Only then is it nec
 See [config.example.yaml](config.example.yaml) for every field. Important defaults are:
 
 - `network.manage_routes: false`: the default configuration does not change system routes.
-- `benchmark.download_url: ""`: download benchmark traffic is disabled by default.
-- `acceleration.manual_domains: []`: no manual acceleration hostname is preconfigured. Discovery and automatic activation are enabled by default with a `15s` interval, but a hostname is shown as Accelerated only after complete verification.
+- `benchmark.download_url` uses Cloudflare's official `50 MiB` endpoint by default and benchmarks the top `20` TCP-qualified candidates with `5` concurrent downloads under the configured byte cap.
+- `acceleration.manual_domains: []`: no manual acceleration hostname is preconfigured, and automatic discovery is disabled by default.
+- `acceleration.manual_download_test: true`: manual hostnames retest same-origin resources in global rank order and apply the first candidate reaching `20 Mbps`; the last verified mapping is retained if every candidate falls short.
 - Benchmark dialers do not read `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY`.
 - `ranges.max_change_percent` limits abnormal remote range changes.
 - Proxy secrets are excluded from diagnostics, and exported logs are redacted again.

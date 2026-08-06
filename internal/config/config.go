@@ -80,6 +80,8 @@ type AccelerationConfig struct {
 	Enabled                  bool     `yaml:"enabled" json:"enabled"`
 	ManualDomains            []string `yaml:"manual_domains" json:"manual_domains"`
 	ExcludedDomains          []string `yaml:"excluded_domains" json:"excluded_domains"`
+	ManualDownloadTest       bool     `yaml:"manual_download_test" json:"manual_download_test"`
+	ManualDownloadMinMbps    float64  `yaml:"manual_download_min_mbps" json:"manual_download_min_mbps"`
 	AutoDiscover             bool     `yaml:"auto_discover" json:"auto_discover"`
 	AutoApply                bool     `yaml:"auto_apply" json:"auto_apply"`
 	DiscoveryInterval        Duration `yaml:"discovery_interval" json:"discovery_interval"`
@@ -235,7 +237,8 @@ func Default() Config {
 			External: ExternalProxyConfig{Timeout: Duration(15 * time.Second)},
 		},
 		Acceleration: AccelerationConfig{
-			Enabled: true, ManualDomains: []string{}, ExcludedDomains: []string{}, AutoDiscover: false, AutoApply: true,
+			Enabled: true, ManualDomains: []string{}, ExcludedDomains: []string{}, ManualDownloadTest: true, ManualDownloadMinMbps: 20,
+			AutoDiscover: false, AutoApply: true,
 			DiscoveryInterval: Duration(15 * time.Second), MaxDiscoveredDomains: 1000,
 			ApplyVerificationTimeout: Duration(20 * time.Second), ApplyAttemptTimeout: Duration(5 * time.Second),
 			ApplyRetryInterval: Duration(500 * time.Millisecond), ApplyMaxAttempts: 4,
@@ -377,6 +380,9 @@ func (c Config) Validate() error {
 	}
 	if c.Acceleration.ApplyMaxAttempts < 1 || c.Acceleration.ApplyMaxAttempts > 20 {
 		return errors.New("acceleration.apply_max_attempts must be between 1 and 20")
+	}
+	if c.Acceleration.ManualDownloadMinMbps <= 0 || c.Acceleration.ManualDownloadMinMbps > 100000 {
+		return errors.New("acceleration.manual_download_min_mbps must be greater than 0 and at most 100000")
 	}
 	if c.Acceleration.ApplyAttemptTimeout > c.Acceleration.ApplyVerificationTimeout {
 		return errors.New("acceleration.apply_attempt_timeout must not exceed apply_verification_timeout")

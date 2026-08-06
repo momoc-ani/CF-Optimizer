@@ -20,6 +20,9 @@ func TestDefaultBenchmarkAndDiscoverySettings(t *testing.T) {
 	if cfg.Acceleration.AutoDiscover {
 		t.Fatal("automatic domain discovery must be disabled by default")
 	}
+	if !cfg.Acceleration.ManualDownloadTest || cfg.Acceleration.ManualDownloadMinMbps != 20 {
+		t.Fatalf("unexpected manual domain download defaults: %#v", cfg.Acceleration)
+	}
 }
 
 func TestLoadMergesDefaults(t *testing.T) {
@@ -99,6 +102,16 @@ func TestValidateRejectsInvalidAccelerationVerificationWindow(t *testing.T) {
 				t.Fatal("Validate() error = nil, want invalid acceleration verification configuration")
 			}
 		})
+	}
+}
+
+func TestValidateRejectsInvalidManualDomainDownloadThreshold(t *testing.T) {
+	for _, value := range []float64{0, -1, 100001} {
+		cfg := Default()
+		cfg.Acceleration.ManualDownloadMinMbps = value
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("Validate() error = nil for manual domain download threshold %v", value)
+		}
 	}
 }
 

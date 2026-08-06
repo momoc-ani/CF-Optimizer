@@ -40,9 +40,9 @@ let latestBenchmark: LatestBenchmark = {
   results,
 };
 
-const manualDomain: DomainDiscovery = { domain: 'ani.momoc.top', source: 'manual', first_seen_at: iso(-60), last_seen_at: iso(0), cloudflare_verified: true, preflight_verified: true, active: true, last_resolved_addresses: ['104.21.92.119', '172.67.192.253'], accelerated_addresses: ['104.16.132.229'], verified_adapters: ['generic-route', 'mihomo', 'windows-hosts'], applied_at: iso(-3) };
+const manualDomain: DomainDiscovery = { domain: 'ani.momoc.top', source: 'manual', first_seen_at: iso(-60), last_seen_at: iso(0), cloudflare_verified: true, preflight_verified: true, download_verified: true, download_mbps: 86.4, active: true, last_resolved_addresses: ['104.21.92.119', '172.67.192.253'], accelerated_addresses: ['104.16.132.229'], verified_adapters: ['generic-route', 'mihomo', 'windows-hosts'], applied_at: iso(-3) };
 let discoveredDomains: DomainDiscovery[] = [
-  { domain: 'dash.cloudflare.com', source: 'mihomo', first_seen_at: iso(-45), last_seen_at: iso(-1), cloudflare_verified: true, preflight_verified: true, active: true, last_resolved_addresses: ['104.16.123.96'], accelerated_addresses: ['172.66.44.18'], verified_adapters: ['generic-route', 'mihomo', 'windows-hosts'], applied_at: iso(-3) },
+  { domain: 'dash.cloudflare.com', source: 'mihomo', first_seen_at: iso(-45), last_seen_at: iso(-1), cloudflare_verified: true, preflight_verified: true, download_verified: false, active: true, last_resolved_addresses: ['104.16.123.96'], accelerated_addresses: ['172.66.44.18'], verified_adapters: ['generic-route', 'mihomo', 'windows-hosts'], applied_at: iso(-3) },
 ];
 
 let cancelled = false;
@@ -99,7 +99,7 @@ export const mockConfig: AppConfig = {
   ranges: { source: 'cloudflare-api', api_url: 'https://api.cloudflare.com/client/v4/ips', ipv4_url: 'https://www.cloudflare.com/ips-v4', ipv6_url: 'https://www.cloudflare.com/ips-v6', refresh_interval: '24h0m0s', stale_after: '168h0m0s', max_change_percent: 30, request_timeout: '20s', include: [], exclude: ['104.16.10.0/24'] },
   benchmark: { ipv4: true, ipv6: true, candidates: 6000, connect_attempts: 4, concurrency: 200, connect_timeout: '1.5s', latency_limit: '300ms', loss_limit: 0.25, download_top: 20, download_concurrency: 5, download_url: 'https://speed.cloudflare.com/__down?bytes=52428800', tls_server_name: 'speed.cloudflare.com', tls_timeout: '5s', download_duration: '8s', download_max_bytes: 52428800, switch_improvement: 0.15, minimum_hold: '30m0s', failure_threshold: 3, failure_cooldown: '6h0m0s', daily_seed: '' },
   network: { interface: 'Ethernet 2', gateway_ipv4: '192.168.50.1', gateway_ipv6: 'fe80::1', manage_routes: true, command_timeout: '10s' },
-  acceleration: { enabled: true, manual_domains: ['ani.momoc.top'], excluded_domains: [], auto_discover: false, auto_apply: true, discovery_interval: '15s', max_discovered_domains: 1000, apply_verification_timeout: '20s', apply_attempt_timeout: '5s', apply_retry_interval: '500ms', apply_max_attempts: 4 },
+  acceleration: { enabled: true, manual_domains: ['ani.momoc.top'], excluded_domains: [], manual_download_test: true, manual_download_min_mbps: 20, auto_discover: false, auto_apply: true, discovery_interval: '15s', max_discovered_domains: 1000, apply_verification_timeout: '20s', apply_attempt_timeout: '5s', apply_retry_interval: '500ms', apply_max_attempts: 4 },
   proxy: { auto_detect: true, generic: { enabled: true }, mihomo: { enabled: true, controller: 'http://127.0.0.1:9090', provider_file: '/etc/mihomo/rules/cf-optimizer.yaml', reload_config: '', timeout: '5s' }, sing_box: { enabled: false }, xray: { enabled: false }, external: { enabled: false } },
   hosts: { enabled: false, path: 'C:\\Windows\\System32\\drivers\\etc\\hosts', domains: [] },
   ipc: { endpoint: '\\\\.\\pipe\\cf-optimizer-v1' },

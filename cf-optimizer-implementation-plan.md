@@ -367,14 +367,25 @@ ranges:
 benchmark:
   ipv4: true
   ipv6: true
-  candidates: 1000
+  candidates: 6000
   connect_attempts: 4
   concurrency: 200
   latency_limit: 300ms
   loss_limit: 0.25
   download_top: 20
+  download_concurrency: 5
+  download_url: https://speed.cloudflare.com/__down?bytes=52428800
   download_duration: 8s
+  download_max_bytes: 52428800
   switch_improvement: 0.15
+
+acceleration:
+  enabled: true
+  manual_domains: []
+  manual_download_test: true
+  manual_download_min_mbps: 20
+  auto_discover: false
+  auto_apply: true
 
 proxy:
   auto_detect: true
@@ -690,4 +701,4 @@ GitHub Release 面向用户只公开 Windows、Linux、macOS 与 amd64、arm64 �
 | 阶段7：发布与稳定性 | 已完成 | Windows Inno Setup/WebView2 与服务生命周期、Linux DEB/RPM、macOS PKG/DMG 及签名公证入口、六目标核心和原生桌面 CI、普通 CI 的 `installers` 安装包与 SHA-256 聚合产物、无特权 E2E、tag 发布与 SHA-256、系统托盘、累计策略收据安全卸载、中英双语 `README.md` 及 Windows/macOS/Linux 平台使用指南；托盘切换为 Wails 外部事件循环兼容的 `fyne.io/systray`，Linux 使用 D-Bus StatusNotifier 并移除 Ayatana 依赖；固定 Wails 2.10.2 要求的 `go-webview2 v1.0.19` 回调契约 | Go test/vet/race、前端 lint/typecheck/build、6 个 Vitest、三窗口 6 个 Playwright、六目标核心与 Windows 双架构桌面编译、Linux Wails 生产构建/隔离启动、DEB/RPM 实际生成及 actionlint 通过；本轮已确认 Linux bindings 在无显示服务环境完成生成，并静态确认 macOS 不再重复定义 `AppDelegate` 及 Windows WebView2 回调签名恢复兼容；普通 CI 安装包和汇总校验清单待六个平台 runner 复验；三平台真实安装、签名公证、托盘交互和真实路由仍需对应真机发布验收，见阶段7提交 |
 | 阶段8：三步使用体验 | 已完成（真机验收待发布） | `quickstart.plan/run` 短期确认计划、网络/配置/适配器一致性复核、共享单任务锁、验证后持续维护切换；总览一键确认、仅测速降级、高级接口/网关覆盖和四类结果；根 README 与三平台双语三步指南 | Go test/vet/race、9 个 Vitest、三窗口矩阵 12 个 Playwright 和 Vite 生产构建通过，`7d1014d`、`fc67e93`、`9a953c7`；未在 WSL 启动或构建桌面宿主，Windows/Linux/macOS 真机权限提示、真实路由/代理证据和安装后交互仍待发布验收 |
 | 阶段9：六目标发布资产 | 已完成（原生 runner 复验待发布） | Linux 每架构单一归档内含 DEB、RPM 与自动安装脚本；macOS PKG 仅封装在 DMG 内部；CI/Release 严格聚合六个安装包并生成分平台下载表；根 README、三平台双语指南与打包说明已同步 | Linux 双架构归档、六文件清单与下载链接测试、文档一致性检查及 actionlint 通过；Windows/Linux/macOS 六目标实际安装包和 Release 资产数量仍待推送后的原生 runner 验证，`95f2c84`、`7d43874`，见阶段9文档提交 |
-| 阶段10：已验证域名加速 | 已完成（Linux/macOS 真机待发布） | 单一测速排名池先按手动配置顺序独占分配兼容优选 IP；仅当域名加速、自动发现和自动应用三项同时开启时，自动域名才按稳定顺序继续消费剩余 IP；候选不兼容时继续下一个，池耗尽则不分配；Cloudflare 官方 CIDR 只用于归属验证；HTTPS 预检识别并拒绝 Cloudflare `Error 1034 Edge IP Restricted`，原始连接读写受配置超时约束；Mihomo 为所有已分配精确域名维护 `hosts` 与 `DOMAIN,DIRECT`，单域名失败会被隔离并重试其余策略；旧版共享映射通过无域名映射的安全策略前向迁移，后续候选验证失败时保持正常 DNS；地址重分配、订阅刷新、失败、清理和卸载均使用可回滚事务 | Windows 真机已确认旧共享映射迁移后 `dash.cloudflare.com` 恢复官方 DNS，HTTPS 不再返回 1034，且新域名验证失败不会恢复旧映射；仍需在网络条件允许时验证手动域名严格优先、自动域名只使用剩余地址及每个已分配域名的 HTTPS 远端地址等于其独占优选 IP；Linux/macOS 真实代理组合和系统域名映射仍待对应真机发布验收 |
+| 阶段10：已验证域名加速 | 已完成（Linux/macOS 真机待发布） | 单一测速排名池先按手动配置顺序独占分配兼容优选 IP；手动域名默认对同域资源执行最高 `1 MiB` 的物理直连下载复测，按排名选择首个达到可配置阈值（默认 `20 Mbps`）的候选，复测前建立并验证临时主机路由，结束后回滚；所有候选失败时保留上一份成功映射；仅当域名加速、自动发现和自动应用三项同时开启时，自动域名才按稳定顺序继续消费剩余 IP；Cloudflare 官方 CIDR 只用于归属验证；HTTPS 预检识别并拒绝 Cloudflare `Error 1034 Edge IP Restricted`；Mihomo 为所有已分配精确域名维护 `hosts` 与 `DOMAIN,DIRECT`；地址重分配、订阅刷新、失败、清理和卸载均使用可回滚事务 | Go 全量测试与 vet、前端 lint/typecheck/Vitest/build 已通过；自动测试确认同域 SNI/Host、Range 流量限制、候选阈值回退、临时物理路由回滚和失败时旧映射保留。仍需在 Windows 真机验证 `ani.momoc.top` 的资源发现、`20 Mbps` 阈值选择以及实际连接通过确认的物理接口和网关；Linux/macOS 真实代理组合和系统域名映射仍待对应真机发布验收 |

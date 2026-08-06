@@ -63,6 +63,8 @@ export interface DomainDiscovery {
   last_seen_at: string;
   cloudflare_verified: boolean;
   preflight_verified: boolean;
+  download_verified: boolean;
+  download_mbps?: number;
   active: boolean;
   last_resolved_addresses?: string[];
   accelerated_addresses?: string[];
@@ -164,6 +166,8 @@ export interface DomainAllocationResult {
   assigned_address?: string;
   cloudflare_verified: boolean;
   preflight_verified: boolean;
+  download_verified: boolean;
+  download_mbps?: number;
   error?: string;
 }
 
@@ -321,6 +325,8 @@ export interface AppConfig {
     enabled: boolean;
     manual_domains: string[] | null;
     excluded_domains: string[] | null;
+    manual_download_test: boolean;
+    manual_download_min_mbps: number;
     auto_discover: boolean;
     auto_apply: boolean;
     discovery_interval: string;

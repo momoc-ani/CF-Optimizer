@@ -86,6 +86,8 @@ acceleration:
   enabled: true
   manual_domains: []
   excluded_domains: []
+  manual_download_test: true
+  manual_download_min_mbps: 20
   auto_discover: false
   auto_apply: false
   discovery_interval: 15s
