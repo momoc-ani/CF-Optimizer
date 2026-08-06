@@ -53,7 +53,7 @@ type ScheduleStatus struct {
 	Trigger         string     `json:"trigger,omitempty"`
 }
 
-// LatestBenchmark 返回最近一次已持久化成功任务的完整候选结果。
+// LatestBenchmark 返回最近一次已持久化成功任务中供界面展示的前 N 个候选结果。
 type LatestBenchmark struct {
 	RunID      string             `json:"run_id"`
 	FinishedAt time.Time          `json:"finished_at"`
@@ -162,6 +162,7 @@ func (a *API) latestBenchmark(raw json.RawMessage) (LatestBenchmark, error) {
 		if results == nil {
 			results = []benchmark.Result{}
 		}
+		results = trimBenchmarkResults(results, benchmarkDisplayLimit(a.runtime.View().Config))
 		return LatestBenchmark{RunID: summary.ID, FinishedAt: summary.FinishedAt, SavedAt: detail.SavedAt, Results: results}, nil
 	}
 	return LatestBenchmark{Results: []benchmark.Result{}}, nil
@@ -262,7 +263,24 @@ func (a *API) runWithRunner(ctx context.Context, runner *optimizer.Runner, param
 	if errors.Is(err, context.Canceled) {
 		return report, &ipc.Error{Code: "cancelled", Message: "optimization was cancelled"}
 	}
+	report.Results = trimBenchmarkResults(report.Results, benchmarkDisplayLimit(a.runtime.View().Config))
 	return report, err
+}
+
+// benchmarkDisplayLimit 返回界面展示和 IPC 返回使用的前 N 名数量。
+func benchmarkDisplayLimit(cfg config.Config) int {
+	if cfg.Benchmark.DownloadTop > 0 {
+		return cfg.Benchmark.DownloadTop
+	}
+	return config.Default().Benchmark.DownloadTop
+}
+
+// trimBenchmarkResults 截取已按评分排序的测速结果，保留持久化明细不变。
+func trimBenchmarkResults(results []benchmark.Result, limit int) []benchmark.Result {
+	if len(results) <= limit {
+		return results
+	}
+	return slices.Clone(results[:limit])
 }
 
 func (a *API) cancelOptimizer() (map[string]bool, error) {

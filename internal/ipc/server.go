@@ -12,7 +12,16 @@ import (
 	"sync"
 )
 
-const maxMessageBytes = 1 << 20
+const (
+	// maxRequestBytes 限制单条 IPC 请求，避免客户端参数占用过多服务端内存。
+	maxRequestBytes = 1 << 20
+	// maxResponseFrameBytes 允许历史测速结果等单条响应携带有限的大 JSON 帧。
+	maxResponseFrameBytes = 16 << 20
+	// maxResponseStreamBytes 限制一次请求收到的事件和结果总量。
+	maxResponseStreamBytes = 64 << 20
+)
+
+var errResponseFrameTooLarge = errors.New("IPC response frame exceeds the maximum size")
 
 // Handler 处理已通过协议校验的业务请求，并可在返回前发送事件。
 type Handler interface {
@@ -75,8 +84,8 @@ func (s *Server) handleConnection(parent context.Context, connection net.Conn) {
 	defer connection.Close()
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
-	scanner := bufio.NewScanner(io.LimitReader(connection, maxMessageBytes+1))
-	scanner.Buffer(make([]byte, 4096), maxMessageBytes)
+	scanner := bufio.NewScanner(io.LimitReader(connection, maxRequestBytes+1))
+	scanner.Buffer(make([]byte, 4096), maxRequestBytes)
 	if !scanner.Scan() {
 		return
 	}
@@ -116,6 +125,9 @@ func (s *Server) handleConnection(parent context.Context, connection net.Conn) {
 		return
 	}
 	if err := writeFrame(connection, writerMutex, Frame{Version: ProtocolVersion, ID: request.ID, Type: "result", Result: rawResult}); err != nil {
+		if errors.Is(err, errResponseFrameTooLarge) {
+			_ = writeFrame(connection, writerMutex, Frame{Version: ProtocolVersion, ID: request.ID, Type: "error", Error: &Error{Code: "response_too_large", Message: "IPC response exceeds the maximum frame size"}})
+		}
 		s.logger.Debug("IPC 结果帧发送失败", "method", request.Method, "error", err)
 	}
 }
@@ -124,6 +136,9 @@ func writeFrame(writer io.Writer, mutex *sync.Mutex, frame Frame) error {
 	encoded, err := json.Marshal(frame)
 	if err != nil {
 		return err
+	}
+	if len(encoded)+1 > maxResponseFrameBytes {
+		return fmt.Errorf("%w: %d bytes", errResponseFrameTooLarge, len(encoded)+1)
 	}
 	encoded = append(encoded, '\n')
 	mutex.Lock()

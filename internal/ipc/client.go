@@ -50,8 +50,7 @@ func (c *Client) Call(ctx context.Context, method string, parameters any, onEven
 	if _, err := connection.Write(append(encoded, '\n')); err != nil {
 		return nil, fmt.Errorf("write IPC request: %w", err)
 	}
-	scanner := bufio.NewScanner(io.LimitReader(connection, maxMessageBytes*64))
-	scanner.Buffer(make([]byte, 4096), maxMessageBytes)
+	scanner := newResponseScanner(connection)
 	for scanner.Scan() {
 		var frame Frame
 		if err := json.Unmarshal(scanner.Bytes(), &frame); err != nil {
@@ -85,6 +84,13 @@ func (c *Client) Call(ctx context.Context, method string, parameters any, onEven
 		return nil, ctx.Err()
 	}
 	return nil, io.ErrUnexpectedEOF
+}
+
+// newResponseScanner 为 IPC 响应设置单帧和整条响应流的有限上限。
+func newResponseScanner(reader io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(io.LimitReader(reader, maxResponseStreamBytes))
+	scanner.Buffer(make([]byte, 4096), maxResponseFrameBytes)
+	return scanner
 }
 
 func newRequestID() string {

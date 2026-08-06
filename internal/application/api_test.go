@@ -90,7 +90,11 @@ func TestLatestBenchmarkReturnsNewestPersistedSuccessfulDetail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	results := []benchmark.Result{{IP: netip.MustParseAddr("104.25.250.104"), Family: 4, Qualified: true, Score: 93.31}}
+	results := []benchmark.Result{
+		{IP: netip.MustParseAddr("104.25.250.104"), Family: 4, Qualified: true, Score: 93.31},
+		{IP: netip.MustParseAddr("104.25.250.105"), Family: 4, Qualified: true, Score: 92.31},
+		{IP: netip.MustParseAddr("104.25.250.106"), Family: 4, Qualified: true, Score: 91.31},
+	}
 	payload, err := json.Marshal(results)
 	if err != nil {
 		t.Fatal(err)
@@ -108,7 +112,9 @@ func TestLatestBenchmarkReturnsNewestPersistedSuccessfulDetail(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	api, err := NewAPI(&Runtime{Store: stateStore})
+	runtimeState := &Runtime{Store: stateStore, Config: config.Default()}
+	runtimeState.Config.Benchmark.DownloadTop = 2
+	api, err := NewAPI(runtimeState)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,8 +124,19 @@ func TestLatestBenchmarkReturnsNewestPersistedSuccessfulDetail(t *testing.T) {
 		t.Fatal(err)
 	}
 	latest, ok := response.(LatestBenchmark)
-	if !ok || latest.RunID != "successful-run" || !latest.FinishedAt.Equal(finishedAt) || len(latest.Results) != 1 || latest.Results[0].IP.String() != "104.25.250.104" {
+	if !ok || latest.RunID != "successful-run" || !latest.FinishedAt.Equal(finishedAt) || len(latest.Results) != 2 || latest.Results[0].IP.String() != "104.25.250.104" || latest.Results[1].IP.String() != "104.25.250.105" {
 		t.Fatalf("unexpected latest benchmark: %#v", response)
+	}
+}
+
+func TestTrimBenchmarkResultsKeepsPersistedOrder(t *testing.T) {
+	results := []benchmark.Result{{Score: 3}, {Score: 2}, {Score: 1}}
+	trimmed := trimBenchmarkResults(results, 2)
+	if len(trimmed) != 2 || trimmed[0].Score != 3 || trimmed[1].Score != 2 {
+		t.Fatalf("unexpected trimmed results: %#v", trimmed)
+	}
+	if len(results) != 3 {
+		t.Fatal("trimming changed persisted result slice")
 	}
 }
 
