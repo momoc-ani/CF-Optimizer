@@ -2,7 +2,7 @@ import { ActionIcon, Group, Progress, Text, Tooltip } from '@mantine/core';
 import { Square } from 'lucide-react';
 import type { OptimizerEvent } from '../api/types';
 
-const labels: Record<string, string> = { ranges: '更新网段', benchmark: '测速', tcp: 'TCP 初筛', tls: 'TLS 复筛', download: '下载复筛', selection: '选择节点', policy: '应用并验证策略', complete: '完成' };
+const labels: Record<string, string> = { ranges: '更新网段', benchmark: '测速', tcp: 'TCP 初筛', tls: 'TLS 复筛', download: '下载复筛', selection: '选择节点', policy: '应用并验证策略', config: '更新配置并刷新策略', complete: '任务收尾' };
 
 export function TaskStrip({ event, cancelling, onCancel }: { event?: OptimizerEvent; cancelling: boolean; onCancel: () => void }) {
   if (!event) return null;

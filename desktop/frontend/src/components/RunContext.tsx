@@ -16,9 +16,9 @@ export function RunProvider({ children }: { children: ReactNode }) {
   const [runError, setRunError] = useState<Error>();
   useEffect(() => subscribeOptimizerEvents((next) => {
     if (next.type === 'run.finished') {
-      setEvent(undefined);
-      queryClient.setQueryData<SystemStatus>(queryKeys.status, (current) => current ? { ...current, active_event: undefined, state: { ...current.state, running: false } } : current);
-      void invalidateRunCompletionQueries(queryClient);
+      // 快速开始在测速完成后还要执行策略收尾和可选配置持久化；保留完成事件，直到 IPC 请求 settled。
+      setEvent(next);
+      queryClient.setQueryData<SystemStatus>(queryKeys.status, (current) => current ? { ...current, active_event: next } : current);
       return;
     }
     setEvent(next);

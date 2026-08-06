@@ -397,6 +397,53 @@ func TestConfigUpdateSavesDomainsWithoutAdapterWhenPolicySnapshotExists(t *testi
 	}
 }
 
+func TestConfigUpdatePublishesActiveEventAndSupportsCancellation(t *testing.T) {
+	api, runtimeState := newConfigUpdateTestAPI(t)
+	next := runtimeState.View().Config
+	next.Network.Interface = "Ethernet 3"
+	raw, err := json.Marshal(map[string]any{"config": next})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloadStarted := make(chan struct{})
+	api.reloadConfig = func(ctx context.Context, _ config.Config, _ bool) (bool, error) {
+		close(reloadStarted)
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
+	updateResult := make(chan error, 1)
+	go func() {
+		_, updateErr := api.updateConfig(context.Background(), raw)
+		updateResult <- updateErr
+	}()
+	select {
+	case <-reloadStarted:
+	case <-time.After(time.Second):
+		t.Fatal("configuration reload did not start")
+	}
+	status := api.systemStatus()
+	activeEvent, ok := status["active_event"].(*optimizer.Event)
+	if !ok || activeEvent == nil || activeEvent.Stage != "config" {
+		t.Fatalf("configuration reload active event is missing: %#v", status["active_event"])
+	}
+	cancelled, err := api.cancelOptimizer()
+	if err != nil || !cancelled["cancelled"] {
+		t.Fatalf("configuration reload cancellation failed: result=%#v error=%v", cancelled, err)
+	}
+	select {
+	case updateErr := <-updateResult:
+		if !errors.Is(updateErr, context.Canceled) {
+			t.Fatalf("configuration update error = %v, want context cancellation", updateErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled configuration update did not return")
+	}
+	activeEvent, _ = api.systemStatus()["active_event"].(*optimizer.Event)
+	if activeEvent != nil {
+		t.Fatalf("configuration reload active event was not cleared: %#v", activeEvent)
+	}
+}
+
 func newConfigUpdateTestAPI(t *testing.T) (*API, *Runtime) {
 	t.Helper()
 	dataDir := t.TempDir()

@@ -82,6 +82,29 @@ func TestVerifyAppliedRetriesUntilSystemMappingPropagates(t *testing.T) {
 	}
 }
 
+func TestVerifyPreflightRetriesTransientCandidateFailure(t *testing.T) {
+	verifier, err := NewVerifier(func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("unexpected raw dial")
+	}, time.Second)
+	if err != nil {
+		t.Fatalf("create verifier: %v", err)
+	}
+	requests := 0
+	verifier.requestConnection = func(context.Context, string, string) (string, error) {
+		requests++
+		if requests == 1 {
+			return "", context.DeadlineExceeded
+		}
+		return "104.16.244.3", nil
+	}
+	if err := verifier.VerifyPreflight(context.Background(), []proxy.DomainMapping{{Domain: "ani.momoc.top", Addresses: []string{"104.16.244.3"}}}); err != nil {
+		t.Fatalf("verify preflight after transient failure: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("preflight requests = %d, want 2", requests)
+	}
+}
+
 func TestVerifyAppliedRejectsStaleSystemMappingAfterRetryLimit(t *testing.T) {
 	verifier, err := NewVerifier(func(context.Context, string, string) (net.Conn, error) {
 		return nil, errors.New("unexpected raw dial")

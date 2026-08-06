@@ -19,6 +19,8 @@ import (
 
 const (
 	maximumPreflightBody             = 64 << 10
+	preflightMaxAttempts             = 2
+	preflightRetryInterval           = 200 * time.Millisecond
 	appliedVerificationMaxAttempts   = 4
 	appliedVerificationRetryInterval = 250 * time.Millisecond
 	appliedVerificationMaxBackoff    = 4 * time.Second
@@ -88,15 +90,40 @@ func (v *Verifier) VerifyPreflight(ctx context.Context, mappings []proxy.DomainM
 			if err != nil {
 				return &proxy.DomainVerificationError{Domain: mapping.Domain, Address: rawAddress, Kind: proxy.DomainVerificationCandidateUnreachable, Err: err}
 			}
-			requestContext, cancel := context.WithTimeout(ctx, v.timeout)
-			_, requestErr := v.requestConnection(requestContext, mapping.Domain, net.JoinHostPort(address.String(), "443"))
-			cancel()
+			var requestErr error
+			for attempt := 1; attempt <= preflightMaxAttempts; attempt++ {
+				requestContext, cancel := context.WithTimeout(ctx, v.timeout)
+				_, requestErr = v.requestConnection(requestContext, mapping.Domain, net.JoinHostPort(address.String(), "443"))
+				cancel()
+				if requestErr == nil {
+					break
+				}
+				if attempt == preflightMaxAttempts {
+					break
+				}
+				if err := waitForPreflightRetry(ctx); err != nil {
+					requestErr = errors.Join(requestErr, err)
+					break
+				}
+			}
 			if requestErr != nil {
 				return &proxy.DomainVerificationError{Domain: mapping.Domain, Address: address.String(), Kind: proxy.DomainVerificationCandidateUnreachable, Err: fmt.Errorf("preflight via %s: %w", address, requestErr)}
 			}
 		}
 	}
 	return nil
+}
+
+// waitForPreflightRetry 在候选预检失败后等待短暂退避，并及时响应任务取消。
+func waitForPreflightRetry(ctx context.Context) error {
+	timer := time.NewTimer(preflightRetryInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // VerifyApplied 使用系统解析重新连接，并要求远端地址属于已应用的优选地址。

@@ -34,24 +34,28 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	logger, closer, err := logging.New(cfg.DataDir, *logLevel, false)
-	if err != nil {
-		return err
-	}
-	defer closer.Close()
-	runtime, err := application.Build(cfg, *configPath, logger)
-	if err != nil {
-		return err
-	}
-	api, err := application.NewAPI(runtime)
-	if err != nil {
-		return err
-	}
-	backgroundService, err := daemon.New(runtime, api)
-	if err != nil {
-		return err
-	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	return servicehost.Run(ctx, backgroundService.Run)
+	// Windows Service 必须先完成 SCM 注册，再执行可能受网络状态影响的运行时初始化。
+	// 非 Windows 平台仍由 systemd/launchd 直接调用同一个初始化函数。
+	return servicehost.Run(ctx, func(serviceContext context.Context) error {
+		logger, closer, err := logging.New(cfg.DataDir, *logLevel, false)
+		if err != nil {
+			return err
+		}
+		defer closer.Close()
+		runtimeState, err := application.Build(cfg, *configPath, logger)
+		if err != nil {
+			return err
+		}
+		api, err := application.NewAPI(runtimeState)
+		if err != nil {
+			return err
+		}
+		backgroundService, err := daemon.New(runtimeState, api)
+		if err != nil {
+			return err
+		}
+		return backgroundService.Run(serviceContext)
+	})
 }

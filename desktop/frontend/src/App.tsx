@@ -8,6 +8,7 @@ import { TaskStrip } from './components/TaskStrip';
 import { LoadingState } from './components/Page';
 import { useUIStore } from './state/ui';
 import { useRun } from './hooks/useRun';
+import { selectActiveTaskEvent } from './lib/activeTask';
 
 const OverviewPage = lazy(() => import('./pages/OverviewPage').then((module) => ({ default: module.OverviewPage })));
 const BenchmarkPage = lazy(() => import('./pages/BenchmarkPage').then((module) => ({ default: module.BenchmarkPage })));
@@ -26,7 +27,7 @@ function Workspace() {
   const page = useUIStore((state) => state.page);
   const run = useRun();
   const CurrentPage = pages[page];
-  const activeEvent = run.running ? run.event : status.data?.state.running ? status.data.active_event : undefined;
+  const activeEvent = selectActiveTaskEvent(run.running, run.event, status.data);
   return (
     <Shell status={status.data} disconnected={status.isError} taskStrip={<TaskStrip event={activeEvent} cancelling={run.cancelling} onCancel={run.cancel} />}>
       {status.isError && (

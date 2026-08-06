@@ -351,7 +351,7 @@ func (a *API) updateConfig(ctx context.Context, raw json.RawMessage) (map[string
 		return nil, invalidParams(err)
 	}
 	if !a.configurationMutex.TryLock() {
-		return nil, &ipc.Error{Code: "conflict", Message: "configuration is locked by an active quick-start run"}
+		return nil, &ipc.Error{Code: "conflict", Message: "configuration update or quick-start run is already active"}
 	}
 	defer a.configurationMutex.Unlock()
 	view := a.runtime.View()
@@ -382,6 +382,13 @@ func (a *API) updateConfig(ctx context.Context, raw json.RawMessage) (map[string
 			cancel()
 			return nil, &ipc.Error{Code: "conflict", Message: optimizer.ErrAlreadyRunning.Error()}
 		}
+		a.setActiveEvent(optimizer.Event{
+			RunID:     fmt.Sprintf("config-update-%d", a.now().UTC().UnixNano()),
+			Type:      "stage.started",
+			Stage:     "config",
+			Message:   "updating configuration and refreshing verified policy",
+			Timestamp: a.now().UTC(),
+		})
 		defer func() {
 			cancel()
 			a.clearActiveCancel()

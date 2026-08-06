@@ -21,6 +21,7 @@ export function Shell({ status, disconnected, taskStrip, children }: { status?: 
   const page = useUIStore((state) => state.page);
   const setPage = useUIStore((state) => state.setPage);
   const { colorScheme, setColorScheme } = useMantineColorScheme();
+  const isBusy = Boolean(status?.state.running || status?.active_event);
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -35,7 +36,7 @@ export function Shell({ status, disconnected, taskStrip, children }: { status?: 
           })}
         </nav>
         <div className="sidebar-footer">
-          <StatusBadge label={disconnected ? '服务未连接' : status?.state.running ? '优选运行中' : '服务已连接'} tone={disconnected ? 'failed' : status?.state.running ? 'pending' : 'verified'} />
+          <StatusBadge label={disconnected ? '服务未连接' : isBusy ? '后台任务运行中' : '服务已连接'} tone={disconnected ? 'failed' : isBusy ? 'pending' : 'verified'} />
           <Text size="xs" c="dimmed" className="sidebar-version">v{status?.build.version ?? '—'}</Text>
         </div>
       </aside>
