@@ -53,11 +53,27 @@ func NewServer(endpoint string, handler Handler, logger *slog.Logger) (*Server, 
 
 // Serve 监听本地端点，直到上下文取消或监听器发生不可恢复错误。
 func (s *Server) Serve(ctx context.Context) error {
+	return s.serve(ctx, nil)
+}
+
+// ServeReady 监听本地端点，并在监听器创建成功或失败时通知调用方。
+func (s *Server) ServeReady(ctx context.Context, ready chan<- error) error {
+	return s.serve(ctx, ready)
+}
+
+// serve 创建本地监听器并处理请求；ready 用于把监听结果与后台恢复流程解耦。
+func (s *Server) serve(ctx context.Context, ready chan<- error) error {
 	listener, cleanup, err := listenLocal(s.endpoint)
 	if err != nil {
+		if ready != nil {
+			ready <- err
+		}
 		return err
 	}
 	defer cleanup()
+	if ready != nil {
+		ready <- nil
+	}
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()

@@ -131,8 +131,14 @@ func TestRecoverRemovesVerifiedTemporaryRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reopened.Recover(context.Background()); err != nil {
+	var progress [][2]int
+	if err := reopened.RecoverWithProgress(context.Background(), func(completed, total int) {
+		progress = append(progress, [2]int{completed, total})
+	}); err != nil {
 		t.Fatal(err)
+	}
+	if len(progress) != 2 || progress[0] != [2]int{0, 1} || progress[1] != [2]int{1, 1} {
+		t.Fatalf("unexpected recovery progress: %#v", progress)
 	}
 	if _, err := backend.Get(context.Background(), testRoute().Prefix); !errors.Is(err, ErrRouteNotFound) {
 		t.Fatalf("temporary route remains: %v", err)

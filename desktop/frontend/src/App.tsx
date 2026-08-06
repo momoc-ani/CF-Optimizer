@@ -29,6 +29,9 @@ function Workspace() {
   const run = useRun();
   const CurrentPage = pages[page];
   const activeEvent = selectActiveTaskEvent(run.running, run.event, status.data);
+  const startup = status.data?.startup;
+  const isRecovering = Boolean(startup && !startup.ready);
+  const recoveryProgress = startup?.progress && startup.progress.total > 0 ? ` (${startup.progress.completed}/${startup.progress.total})` : '';
   return (
     <Shell status={status.data} disconnected={status.isError} taskStrip={<TaskStrip event={activeEvent} cancelling={run.cancelling} onCancel={run.cancel} />}>
       <PolicyGuardNotifications guards={status.data?.policy_guards} />
@@ -36,6 +39,11 @@ function Workspace() {
         <Alert mb="md" color="red" icon={<PlugZap size={18} />} title="无法连接后台服务">
           <span>{status.error.message}</span>
           <Button ml="md" size="compact-xs" variant="light" color="red" onClick={() => status.refetch()}>重试</Button>
+        </Alert>
+      )}
+      {isRecovering && (
+        <Alert mb="md" color="yellow" icon={<PlugZap size={18} />} title="后台服务恢复中">
+          {startup?.message ?? '正在恢复中断的系统事务，请稍后重试业务操作。'}{recoveryProgress}
         </Alert>
       )}
       <Suspense fallback={<LoadingState rows={7} />}><CurrentPage /></Suspense>

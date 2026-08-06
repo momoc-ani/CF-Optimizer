@@ -47,14 +47,73 @@ func (s *Service) Run(ctx context.Context) error {
 	serviceContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s.logger.Info("后台服务启动", "platform", runtime.GOOS, "endpoint", s.runtime.View().Config.IPC.Endpoint)
-	if err := s.runtime.Routes.Recover(serviceContext); err != nil {
+	startedAt := time.Now().UTC()
+	s.api.SetStartupStatus(application.StartupStatus{Stage: "starting", Message: "后台服务正在初始化", StartedAt: startedAt})
+	serverErrors := make(chan error, 1)
+	serverReady := make(chan error, 1)
+	go func() { serverErrors <- s.server.ServeReady(serviceContext, serverReady) }()
+	checkServerStopped := func() error {
+		select {
+		case err := <-serverErrors:
+			if err == nil {
+				return errors.New("IPC server stopped unexpectedly")
+			}
+			return fmt.Errorf("IPC server stopped: %w", err)
+		default:
+			return nil
+		}
+	}
+	select {
+	case err := <-serverReady:
+		if err != nil {
+			s.api.SetStartupStatus(application.StartupStatus{Stage: "failed", Message: "后台 IPC 监听失败", StartedAt: startedAt})
+			return fmt.Errorf("IPC server stopped: %w", err)
+		}
+		s.logger.Info("后台 IPC 已监听", "result", "ready")
+	case <-ctx.Done():
+		<-serverErrors
+		return nil
+	}
+
+	s.api.SetStartupStatus(application.StartupStatus{Stage: "recovering_routes", Message: "正在恢复中断的路由事务", StartedAt: startedAt})
+	if err := s.runtime.Routes.RecoverWithProgress(serviceContext, func(completed, total int) {
+		s.api.SetStartupStatus(application.StartupStatus{
+			Stage: "recovering_routes", Message: "正在恢复中断的路由事务",
+			Progress: &application.StartupProgress{Completed: completed, Total: total}, StartedAt: startedAt,
+		})
+	}); err != nil {
+		if serviceContext.Err() != nil {
+			<-serverErrors
+			return nil
+		}
+		s.api.SetStartupStatus(application.StartupStatus{Stage: "failed", Message: "路由事务恢复失败", StartedAt: startedAt})
 		return fmt.Errorf("recover route transactions: %w", err)
 	}
+	if serviceContext.Err() != nil {
+		<-serverErrors
+		return nil
+	}
+	if err := checkServerStopped(); err != nil {
+		return err
+	}
+	s.api.SetStartupStatus(application.StartupStatus{Stage: "recovering_policy", Message: "正在恢复中断的代理策略事务", StartedAt: startedAt})
 	if err := s.runtime.RecoverPendingPolicy(serviceContext); err != nil {
+		if serviceContext.Err() != nil {
+			<-serverErrors
+			return nil
+		}
+		s.api.SetStartupStatus(application.StartupStatus{Stage: "failed", Message: "代理策略事务恢复失败", StartedAt: startedAt})
 		return fmt.Errorf("recover pending policy transaction: %w", err)
 	}
-	serverErrors := make(chan error, 1)
-	go func() { serverErrors <- s.server.Serve(serviceContext) }()
+	if serviceContext.Err() != nil {
+		<-serverErrors
+		return nil
+	}
+	if err := checkServerStopped(); err != nil {
+		return err
+	}
+	s.api.SetStartupStatus(application.StartupStatus{Ready: true, Stage: "ready", Message: "后台服务已就绪", StartedAt: startedAt})
+
 	schedulerErrors := make(chan error, 1)
 	go func() { schedulerErrors <- s.schedule(serviceContext) }()
 	discoveryErrors := make(chan error, 1)

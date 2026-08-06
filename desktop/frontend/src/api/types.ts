@@ -122,6 +122,15 @@ export interface ScheduleStatus {
   trigger?: 'startup' | 'interval' | 'network_change' | 'retry' | 'running' | 'disabled';
 }
 
+export interface StartupStatus {
+  ready: boolean;
+  stage?: 'starting' | 'recovering_routes' | 'recovering_policy' | 'ready' | 'failed';
+  message?: string;
+  progress?: { completed: number; total: number };
+  started_at?: string;
+  updated_at?: string;
+}
+
 export type PolicyGuardState = 'offline' | 'no_policy' | 'standby' | 'checking' | 'drifted' | 'restoring' | 'verified' | 'retry_wait' | 'failed';
 
 export interface PolicyGuardStatus {
@@ -152,6 +161,7 @@ export interface SystemStatus {
   active_event?: OptimizerEvent;
   schedule: ScheduleStatus;
   policy_guards: Record<string, PolicyGuardStatus>;
+  startup?: StartupStatus;
 }
 
 export interface BenchmarkResult {

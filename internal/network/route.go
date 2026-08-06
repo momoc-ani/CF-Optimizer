@@ -251,16 +251,30 @@ func (c *RouteController) Remove(ctx context.Context, route RouteSpec) (Transact
 
 // Recover 清理未完成和临时路由，并恢复修改前的精确路由。
 func (c *RouteController) Recover(ctx context.Context) error {
+	return c.RecoverWithProgress(ctx, nil)
+}
+
+// RecoverWithProgress 清理待恢复路由，并在每个事务处理后报告有界进度。
+func (c *RouteController) RecoverWithProgress(ctx context.Context, onProgress func(completed, total int)) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.enabled {
 		return nil
 	}
+	total := 0
+	for index := range c.journal.Transactions {
+		if transactionNeedsRecovery(c.journal.Transactions[index]) {
+			total++
+		}
+	}
+	completed := 0
+	if onProgress != nil {
+		onProgress(completed, total)
+	}
 	var recoveredErrors []error
 	for index := range c.journal.Transactions {
 		transaction := &c.journal.Transactions[index]
-		needsRecovery := transaction.State == "planned" || transaction.State == "applied" || transaction.State == "rollback_failed" || transaction.State == "recovery_failed" || (transaction.Temporary && transaction.State == "verified")
-		if !needsRecovery {
+		if !transactionNeedsRecovery(*transaction) {
 			continue
 		}
 		if err := c.rollback(ctx, transaction); err != nil {
@@ -274,11 +288,20 @@ func (c *RouteController) Recover(ctx context.Context) error {
 			c.logPhase(*transaction, "rollback", "completed", nil)
 		}
 		transaction.UpdatedAt = c.now().UTC()
+		completed++
+		if onProgress != nil {
+			onProgress(completed, total)
+		}
 	}
 	if err := c.persist(); err != nil {
 		recoveredErrors = append(recoveredErrors, err)
 	}
 	return errors.Join(recoveredErrors...)
+}
+
+// transactionNeedsRecovery 只选择可能遗留真实路由修改的未完成或临时已验证事务。
+func transactionNeedsRecovery(transaction Transaction) bool {
+	return transaction.State == "planned" || transaction.State == "applied" || transaction.State == "rollback_failed" || transaction.State == "recovery_failed" || (transaction.Temporary && transaction.State == "verified")
 }
 
 // Rollback 按事务 ID 恢复修改前路由，并记录验证后的回滚状态。

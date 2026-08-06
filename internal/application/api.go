@@ -32,6 +32,8 @@ type API struct {
 	activeMutex           sync.Mutex
 	activeCancel          context.CancelFunc
 	activeEvent           *optimizer.Event
+	startupMutex          sync.RWMutex
+	startupStatus         StartupStatus
 	scheduleMutex         sync.RWMutex
 	scheduleStatus        ScheduleStatus
 	policyGuardMutex      sync.RWMutex
@@ -54,6 +56,22 @@ type ScheduleStatus struct {
 	Interval        string     `json:"interval"`
 	NextScheduledAt *time.Time `json:"next_scheduled_at,omitempty"`
 	Trigger         string     `json:"trigger,omitempty"`
+}
+
+// StartupStatus 描述后台服务是否已完成启动时的路由和策略恢复。
+type StartupStatus struct {
+	Ready     bool             `json:"ready"`
+	Stage     string           `json:"stage,omitempty"`
+	Message   string           `json:"message,omitempty"`
+	Progress  *StartupProgress `json:"progress,omitempty"`
+	StartedAt time.Time        `json:"started_at,omitempty"`
+	UpdatedAt time.Time        `json:"updated_at,omitempty"`
+}
+
+// StartupProgress 描述当前恢复阶段已经处理和需要处理的事务数量。
+type StartupProgress struct {
+	Completed int `json:"completed"`
+	Total     int `json:"total"`
 }
 
 // LatestBenchmark 返回最近一次已持久化成功任务中供界面展示的前 N 个候选结果。
@@ -85,6 +103,7 @@ func NewAPI(runtime *Runtime) (*API, error) {
 	return &API{
 		runtime: runtime, discoverPhysicalPath: cfnetwork.DiscoverPhysicalPath,
 		scheduleStatus:        ScheduleStatus{Enabled: schedule.Enabled, Interval: schedule.Interval.String()},
+		startupStatus:         StartupStatus{Ready: true, Stage: "ready", StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()},
 		policyGuards:          map[string]guard.Status{},
 		networkFingerprint:    cfnetwork.NetworkFingerprint,
 		detectManagedAdapters: runtime.DetectManagedAdapters,
@@ -97,6 +116,9 @@ func NewAPI(runtime *Runtime) (*API, error) {
 
 // Handle 路由白名单方法，并在每个边界严格解码参数。
 func (a *API) Handle(ctx context.Context, request ipc.Request, emit func(any) error) (any, error) {
+	if err := a.rejectDuringStartup(request.Method); err != nil {
+		return nil, err
+	}
 	switch request.Method {
 	case "system.status":
 		return a.systemStatus(), nil
@@ -140,6 +162,63 @@ func (a *API) Handle(ctx context.Context, request ipc.Request, emit func(any) er
 		return a.tailLogs(request.Params)
 	default:
 		return nil, &ipc.Error{Code: "method_not_found", Message: "unknown method " + request.Method}
+	}
+}
+
+// SetStartupStatus 更新服务启动恢复阶段，状态轮询可在 IPC 监听后立即读取。
+func (a *API) SetStartupStatus(status StartupStatus) {
+	now := time.Now().UTC()
+	if status.StartedAt.IsZero() {
+		status.StartedAt = now
+	}
+	if status.UpdatedAt.IsZero() {
+		status.UpdatedAt = now
+	}
+	a.startupMutex.Lock()
+	a.startupStatus = cloneStartupStatus(status)
+	a.startupMutex.Unlock()
+}
+
+// startupSnapshot 返回启动状态副本，并兼容绕过 NewAPI 构造的单元测试。
+func (a *API) startupSnapshot() StartupStatus {
+	a.startupMutex.RLock()
+	status := cloneStartupStatus(a.startupStatus)
+	a.startupMutex.RUnlock()
+	if status.UpdatedAt.IsZero() {
+		status = StartupStatus{Ready: true, Stage: "ready"}
+	}
+	return status
+}
+
+func cloneStartupStatus(status StartupStatus) StartupStatus {
+	// Progress 指针单独复制，避免状态轮询拿到仍会被后台更新的内部对象。
+	if status.Progress != nil {
+		progress := *status.Progress
+		status.Progress = &progress
+	}
+	return status
+}
+
+// rejectDuringStartup 防止恢复事务未完成时执行新的路由、代理或配置修改。
+func (a *API) rejectDuringStartup(method string) error {
+	status := a.startupSnapshot()
+	if status.Ready || startupReadOnlyMethod(method) {
+		return nil
+	}
+	message := status.Message
+	if message == "" {
+		message = "后台服务正在恢复中，请稍后重试"
+	}
+	return &ipc.Error{Code: "service_initializing", Message: message}
+}
+
+// startupReadOnlyMethod 返回恢复期间仍可安全执行的只读 IPC 方法。
+func startupReadOnlyMethod(method string) bool {
+	switch method {
+	case "system.status", "logs.tail", "history.list", "history.latest", "routes.list", "config.get", "ranges.get", "proxy.detect", "acceleration.domains", "diagnostics.route":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -192,6 +271,7 @@ func (a *API) systemStatus() map[string]any {
 	a.policyGuardMutex.RUnlock()
 	view := a.runtime.View()
 	state := a.runtime.Store.Snapshot()
+	startupStatus := a.startupSnapshot()
 	return map[string]any{
 		"build": version.Metadata(), "protocol_version": ipc.ProtocolVersion,
 		"state": statusState{
@@ -205,6 +285,7 @@ func (a *API) systemStatus() map[string]any {
 		"active_event":     activeEvent,
 		"schedule":         scheduleStatus,
 		"policy_guards":    policyGuards,
+		"startup":          startupStatus,
 	}
 }
 

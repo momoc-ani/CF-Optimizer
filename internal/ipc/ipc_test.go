@@ -31,7 +31,11 @@ func TestServerStreamsEventAndResult(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	serverError := make(chan error, 1)
-	go func() { serverError <- server.Serve(ctx) }()
+	serverReady := make(chan error, 1)
+	go func() { serverError <- server.ServeReady(ctx, serverReady) }()
+	if err := <-serverReady; err != nil {
+		t.Fatalf("IPC server did not become ready: %v", err)
+	}
 	client, _ := NewClient(endpoint)
 	deadline := time.Now().Add(time.Second)
 	for {

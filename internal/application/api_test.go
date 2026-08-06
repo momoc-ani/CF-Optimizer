@@ -197,6 +197,44 @@ func TestSystemStatusExcludesLargeInternalState(t *testing.T) {
 	}
 }
 
+func TestStartupRecoveryStatusAllowsReadsAndRejectsMutations(t *testing.T) {
+	dataDir := t.TempDir()
+	stateStore, err := store.Open(dataDir, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.DataDir = dataDir
+	api, err := NewAPI(&Runtime{Config: cfg, Store: stateStore})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Date(2026, time.August, 7, 0, 0, 0, 0, time.UTC)
+	api.SetStartupStatus(StartupStatus{Stage: "recovering_routes", Message: "正在恢复中断的路由事务", StartedAt: startedAt})
+
+	response, err := api.Handle(context.Background(), ipc.Request{Method: "system.status"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startup, ok := response.(map[string]any)["startup"].(StartupStatus)
+	if !ok || startup.Ready || startup.Stage != "recovering_routes" || !startup.StartedAt.Equal(startedAt) {
+		t.Fatalf("unexpected startup status: %#v", response.(map[string]any)["startup"])
+	}
+	if _, err := api.Handle(context.Background(), ipc.Request{Method: "logs.tail", Params: json.RawMessage(`{"lines":10}`)}, nil); err != nil {
+		t.Fatalf("read-only logs request was blocked: %v", err)
+	}
+	_, err = api.Handle(context.Background(), ipc.Request{Method: "optimizer.run", Params: json.RawMessage(`{}`)}, nil)
+	var ipcErr *ipc.Error
+	if !errors.As(err, &ipcErr) || ipcErr.Code != "service_initializing" {
+		t.Fatalf("unexpected startup mutation error: %#v", err)
+	}
+
+	api.SetStartupStatus(StartupStatus{Ready: true, Stage: "ready", StartedAt: startedAt})
+	if _, err := api.Handle(context.Background(), ipc.Request{Method: "optimizer.cancel"}, nil); err != nil {
+		t.Fatalf("ready API still rejected mutation: %v", err)
+	}
+}
+
 func TestSystemStatusIncludesIsolatedSchedulePromise(t *testing.T) {
 	stateStore, err := store.Open(t.TempDir(), 10)
 	if err != nil {
