@@ -30,7 +30,10 @@ import (
 // ErrAlreadyRunning 表示已有测速任务持有进程内单任务锁。
 var ErrAlreadyRunning = errors.New("an optimization run is already active")
 
-const managedRouteMetric = 5
+const (
+	managedRouteMetric       = 5
+	routeCleanupTimeoutFloor = 30 * time.Second
+)
 
 // RangeSource 为运行器提供不可变网段快照，便于测试替换远程来源。
 type RangeSource interface {
@@ -1046,9 +1049,10 @@ func (r *Runner) rollbackRoutes(ctx context.Context, transactionIDs []string) er
 		return nil
 	}
 	cleanupContext := context.WithoutCancel(ctx)
+	cleanupTimeout := r.routeCleanupTimeout()
 	var rollbackErrors []error
 	for index := len(transactionIDs) - 1; index >= 0; index-- {
-		transactionContext, cancel := context.WithTimeout(cleanupContext, r.config.Network.CommandTimeout.Duration())
+		transactionContext, cancel := context.WithTimeout(cleanupContext, cleanupTimeout)
 		err := r.routes.Rollback(transactionContext, transactionIDs[index])
 		cancel()
 		if err != nil {
@@ -1056,6 +1060,15 @@ func (r *Runner) rollbackRoutes(ctx context.Context, transactionIDs []string) er
 		}
 	}
 	return errors.Join(rollbackErrors...)
+}
+
+// routeCleanupTimeout 为 Windows 路由回滚保留独立下限，避免 PowerShell 启动抖动中断清理。
+func (r *Runner) routeCleanupTimeout() time.Duration {
+	configured := r.config.Network.CommandTimeout.Duration()
+	if configured < routeCleanupTimeoutFloor {
+		return routeCleanupTimeoutFloor
+	}
+	return configured
 }
 
 // applySelectedPolicy 构造节点与域名联合策略，并在应用前后分别完成 SNI 和系统映射验证。

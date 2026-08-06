@@ -3,10 +3,28 @@
 package network
 
 import (
+	"context"
 	"errors"
 	"net"
 	"testing"
+	"time"
 )
+
+func TestPowerShellTimeoutUsesLongerCleanupDeadline(t *testing.T) {
+	deadline := time.Now().Add(30 * time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	configured := 10 * time.Second
+	if timeout := powerShellTimeout(ctx, configured); timeout < 29*time.Second {
+		t.Fatalf("powerShellTimeout() = %s, want a deadline near 30s", timeout)
+	}
+}
+
+func TestPowerShellTimeoutKeepsConfiguredLimitWithoutDeadline(t *testing.T) {
+	if timeout := powerShellTimeout(context.Background(), 10*time.Second); timeout != 10*time.Second {
+		t.Fatalf("powerShellTimeout() = %s, want 10s", timeout)
+	}
+}
 
 func TestResolveWindowsInterfaceIndexRefreshesStaleIndexByName(t *testing.T) {
 	byIndexCalled := false

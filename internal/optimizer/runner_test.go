@@ -1077,7 +1077,7 @@ func TestClearDiscoveredDomainsFailurePreservesRecordsAndStoredPolicy(t *testing
 }
 
 func TestRollbackRoutesUsesIndependentCleanupTimeouts(t *testing.T) {
-	backend := &delayedRouteBackend{routes: map[string]cfnetwork.RouteSpec{}, delay: 5 * time.Millisecond}
+	backend := &delayedRouteBackend{routes: map[string]cfnetwork.RouteSpec{}, delay: 30 * time.Millisecond}
 	controller, err := cfnetwork.NewRouteController(t.TempDir(), backend, true, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
@@ -1096,7 +1096,7 @@ func TestRollbackRoutesUsesIndependentCleanupTimeouts(t *testing.T) {
 		transactionIDs = append(transactionIDs, transaction.ID)
 	}
 	cfg := config.Default()
-	cfg.Network.CommandTimeout = config.Duration(20 * time.Millisecond)
+	cfg.Network.CommandTimeout = config.Duration(time.Millisecond)
 	runner := &Runner{config: cfg, routes: controller}
 	canceledContext, cancel := context.WithCancel(context.Background())
 	cancel()

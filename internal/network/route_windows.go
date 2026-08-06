@@ -92,7 +92,7 @@ func (b *windowsRouteBackend) Resolve(ctx context.Context, target netip.Addr) (R
 }
 
 func (b *windowsRouteBackend) runPowerShell(ctx context.Context, script string) ([]byte, error) {
-	commandContext, cancel := context.WithTimeout(ctx, b.timeout)
+	commandContext, cancel := context.WithTimeout(ctx, powerShellTimeout(ctx, b.timeout))
 	defer cancel()
 	encodingPrefix := "[Console]::OutputEncoding=[Text.UTF8Encoding]::new();"
 	output, err := exec.CommandContext(commandContext, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", encodingPrefix+script).CombinedOutput()
@@ -103,6 +103,17 @@ func (b *windowsRouteBackend) runPowerShell(ctx context.Context, script string) 
 		return nil, fmt.Errorf("PowerShell failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return output, nil
+}
+
+// powerShellTimeout 允许调用方为清理操作提供更长截止时间，同时保留普通命令的配置上限。
+func powerShellTimeout(ctx context.Context, configured time.Duration) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining > configured {
+			return remaining
+		}
+	}
+	return configured
 }
 
 func windowsInterfaceIndex(route RouteSpec) (int, error) {
