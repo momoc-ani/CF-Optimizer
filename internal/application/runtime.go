@@ -461,6 +461,225 @@ type DomainAccelerationStatus struct {
 	AppliedAt            time.Time `json:"applied_at,omitempty"`
 }
 
+// DomainTestResult 返回单个手动域名的直连下载复测证据。
+type DomainTestResult struct {
+	Domain           string    `json:"domain"`
+	Address          string    `json:"address"`
+	ProbeURL         string    `json:"probe_url,omitempty"`
+	Downloaded       int64     `json:"downloaded"`
+	Duration         string    `json:"duration"`
+	DownloadMbps     float64   `json:"download_mbps"`
+	DownloadVerified bool      `json:"download_verified"`
+	TestedAt         time.Time `json:"tested_at"`
+}
+
+// DomainApplyResult 返回手动域名映射经过策略验证后的应用结果。
+type DomainApplyResult struct {
+	Domain           string    `json:"domain"`
+	Address          string    `json:"address"`
+	DownloadMbps     float64   `json:"download_mbps"`
+	DownloadVerified bool      `json:"download_verified"`
+	PolicyRefreshed  bool      `json:"policy_refreshed"`
+	AppliedAt        time.Time `json:"applied_at"`
+}
+
+// validateManualDomainAddress 校验域名属于显式手动列表且地址属于当前 Cloudflare 快照。
+func (r *Runtime) validateManualDomainAddress(ctx context.Context, domain, rawAddress string) (RuntimeView, string, netip.Addr, ranges.Snapshot, error) {
+	view := r.View()
+	normalizedDomain := normalizeManualDomain(domain)
+	if normalizedDomain == "" {
+		return view, "", netip.Addr{}, ranges.Snapshot{}, errors.New("manual domain is required")
+	}
+	configured := false
+	for _, configuredDomain := range view.Config.Acceleration.ManualDomains {
+		if normalizeManualDomain(configuredDomain) == normalizedDomain {
+			configured = true
+			break
+		}
+	}
+	if !configured {
+		return view, "", netip.Addr{}, ranges.Snapshot{}, fmt.Errorf("domain %q is not configured in acceleration.manual_domains", normalizedDomain)
+	}
+	address, err := netip.ParseAddr(strings.TrimSpace(rawAddress))
+	if err != nil || !address.IsGlobalUnicast() || address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast() {
+		return view, "", netip.Addr{}, ranges.Snapshot{}, fmt.Errorf("manual domain address %q must be a public IP address", rawAddress)
+	}
+	if view.Ranges == nil {
+		return view, "", netip.Addr{}, ranges.Snapshot{}, errors.New("Cloudflare range catalog is unavailable")
+	}
+	snapshot, err := view.Ranges.Load()
+	if err != nil {
+		return view, "", netip.Addr{}, ranges.Snapshot{}, fmt.Errorf("load Cloudflare ranges: %w", err)
+	}
+	address = address.Unmap()
+	if !snapshot.Contains(address) {
+		return view, "", netip.Addr{}, ranges.Snapshot{}, fmt.Errorf("manual domain address %s is outside verified Cloudflare ranges", address)
+	}
+	if err := ctx.Err(); err != nil {
+		return view, "", netip.Addr{}, ranges.Snapshot{}, err
+	}
+	return view, normalizedDomain, address, snapshot, nil
+}
+
+func normalizeManualDomain(domain string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+}
+
+// TestManualDomain 通过受控物理路由复测手动域名，并持久化可供后续应用校验的证据。
+func (r *Runtime) TestManualDomain(ctx context.Context, domain, rawAddress string) (DomainTestResult, error) {
+	if !r.accelerationMutex.TryLock() {
+		return DomainTestResult{}, errors.New("domain test or policy application is already active")
+	}
+	defer r.accelerationMutex.Unlock()
+	view, normalizedDomain, address, _, err := r.validateManualDomainAddress(ctx, domain, rawAddress)
+	if err != nil {
+		return DomainTestResult{}, err
+	}
+	if view.Runner == nil {
+		return DomainTestResult{}, errors.New("optimizer runner is unavailable for manual domain test")
+	}
+	testedAt := time.Now().UTC()
+	result, err := view.Runner.TestManualDomain(ctx, normalizedDomain, address.String())
+	if err != nil {
+		persistErr := r.Store.Update(func(state *store.State) error {
+			record := state.DiscoveredDomains[normalizedDomain]
+			record.Domain = normalizedDomain
+			record.Source = "manual"
+			if record.FirstSeenAt.IsZero() {
+				record.FirstSeenAt = testedAt
+			}
+			record.LastSeenAt = testedAt
+			record.CloudflareVerified = true
+			record.PreflightVerified = false
+			record.DownloadVerified = false
+			record.DownloadMbps = 0
+			record.DownloadAddress = address.String()
+			record.DownloadProbeURL = ""
+			record.DownloadTestedAt = testedAt
+			record.LastError = err.Error()
+			state.DiscoveredDomains[normalizedDomain] = record
+			return nil
+		})
+		if persistErr != nil {
+			return DomainTestResult{}, fmt.Errorf("manual domain test failed: %w; persist result: %v", err, persistErr)
+		}
+		return DomainTestResult{}, err
+	}
+	verified := result.Mbps >= view.Config.Acceleration.ManualDownloadMinMbps
+	lastError := ""
+	if !verified {
+		lastError = fmt.Sprintf("direct download %.2f Mbps is below configured %.2f Mbps", result.Mbps, view.Config.Acceleration.ManualDownloadMinMbps)
+	}
+	if err := r.Store.Update(func(state *store.State) error {
+		record := state.DiscoveredDomains[normalizedDomain]
+		record.Domain = normalizedDomain
+		record.Source = "manual"
+		if record.FirstSeenAt.IsZero() {
+			record.FirstSeenAt = testedAt
+		}
+		record.LastSeenAt = testedAt
+		record.CloudflareVerified = true
+		record.PreflightVerified = true
+		record.DownloadVerified = verified
+		record.DownloadMbps = result.Mbps
+		record.DownloadAddress = address.String()
+		record.DownloadProbeURL = result.ProbeURL
+		record.DownloadTestedAt = testedAt
+		record.LastError = lastError
+		state.DiscoveredDomains[normalizedDomain] = record
+		return nil
+	}); err != nil {
+		return DomainTestResult{}, fmt.Errorf("persist manual domain test: %w", err)
+	}
+	return DomainTestResult{
+		Domain: normalizedDomain, Address: address.String(), ProbeURL: result.ProbeURL,
+		Downloaded: result.Downloaded, Duration: result.Duration.String(),
+		DownloadMbps: result.Mbps, DownloadVerified: verified, TestedAt: testedAt,
+	}, nil
+}
+
+// ApplyManualDomainMapping 只应用后台已保存且达标的最近一次手动测速映射。
+func (r *Runtime) ApplyManualDomainMapping(ctx context.Context, domain, rawAddress string) (DomainApplyResult, error) {
+	if !r.accelerationMutex.TryLock() {
+		return DomainApplyResult{}, errors.New("domain test or policy application is already active")
+	}
+	defer r.accelerationMutex.Unlock()
+	view, normalizedDomain, address, _, err := r.validateManualDomainAddress(ctx, domain, rawAddress)
+	if err != nil {
+		return DomainApplyResult{}, err
+	}
+	if view.Runner == nil {
+		return DomainApplyResult{}, errors.New("optimizer runner is unavailable for manual domain application")
+	}
+	stateBefore := r.Store.Snapshot()
+	record, exists := stateBefore.DiscoveredDomains[normalizedDomain]
+	if !exists || record.Source != "manual" || record.DownloadAddress != address.String() || !record.DownloadVerified || record.DownloadTestedAt.IsZero() {
+		return DomainApplyResult{}, errors.New("manual domain must pass a recent direct download test before application")
+	}
+	if stateBefore.Policy == nil {
+		return DomainApplyResult{}, errors.New("cannot apply manual domain mapping before a verified policy exists")
+	}
+	manualDomains := make(map[string]struct{}, len(view.Config.Acceleration.ManualDomains))
+	for _, configuredDomain := range view.Config.Acceleration.ManualDomains {
+		manualDomains[normalizeManualDomain(configuredDomain)] = struct{}{}
+	}
+	fullMappings := make(map[string]string, len(manualDomains))
+	for _, mapping := range stateBefore.Policy.DomainMappings {
+		mappingDomain := normalizeManualDomain(mapping.Domain)
+		if _, isManual := manualDomains[mappingDomain]; isManual && len(mapping.Addresses) == 1 {
+			fullMappings[mappingDomain] = mapping.Addresses[0]
+		}
+	}
+	for mappingDomain, mappingAddress := range view.Config.Acceleration.ManualMappings {
+		if _, isManual := manualDomains[normalizeManualDomain(mappingDomain)]; isManual {
+			fullMappings[normalizeManualDomain(mappingDomain)] = strings.TrimSpace(mappingAddress)
+		}
+	}
+	fullMappings[normalizedDomain] = address.String()
+	previousConfig := view.Config
+	nextConfig := previousConfig
+	nextConfig.Acceleration.ManualMappings = cloneManualMappingConfig(fullMappings)
+	nextConfig.ApplyDefaults()
+	if err := nextConfig.Validate(); err != nil {
+		return DomainApplyResult{}, fmt.Errorf("validate manual domain mapping configuration: %w", err)
+	}
+	if strings.TrimSpace(r.ConfigPath) == "" {
+		return DomainApplyResult{}, errors.New("configuration path is unavailable for manual domain application")
+	}
+	if err := config.Save(r.ConfigPath, nextConfig); err != nil {
+		return DomainApplyResult{}, fmt.Errorf("persist manual domain mapping configuration: %w", err)
+	}
+	policyRefreshed, applyErr := view.Runner.ApplyManualDomainMapping(ctx, normalizedDomain, address.String(), fullMappings)
+	if applyErr != nil {
+		if restoreErr := config.Save(r.ConfigPath, previousConfig); restoreErr != nil && r.Logger != nil {
+			r.Logger.Error("手动域名策略应用失败且配置恢复失败", "domain", normalizedDomain, "error", restoreErr)
+		}
+		return DomainApplyResult{}, applyErr
+	}
+	r.mutex.Lock()
+	r.Config = nextConfig
+	r.notifyConfigChangedLocked()
+	r.mutex.Unlock()
+	stateAfter := r.Store.Snapshot()
+	appliedAt := time.Now().UTC()
+	if stateAfter.Policy != nil && !stateAfter.Policy.AppliedAt.IsZero() {
+		appliedAt = stateAfter.Policy.AppliedAt
+	}
+	updatedRecord := stateAfter.DiscoveredDomains[normalizedDomain]
+	return DomainApplyResult{
+		Domain: normalizedDomain, Address: address.String(), DownloadMbps: updatedRecord.DownloadMbps,
+		DownloadVerified: updatedRecord.DownloadVerified, PolicyRefreshed: policyRefreshed, AppliedAt: appliedAt,
+	}, nil
+}
+
+func cloneManualMappingConfig(mappings map[string]string) map[string]string {
+	clone := make(map[string]string, len(mappings))
+	for domain, address := range mappings {
+		clone[normalizeManualDomain(domain)] = strings.TrimSpace(address)
+	}
+	return clone
+}
+
 // DiscoverAccelerationDomains 从 Mihomo 活动连接发现精确域名，并用物理 DNS 与 HTTPS 预检确认。
 func (r *Runtime) DiscoverAccelerationDomains(ctx context.Context) (DomainDiscoveryResult, error) {
 	if !r.accelerationMutex.TryLock() {

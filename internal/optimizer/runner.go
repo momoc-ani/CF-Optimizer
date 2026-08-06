@@ -106,6 +106,8 @@ type DomainAllocationResult struct {
 	Source             string   `json:"source"`
 	ResolvedAddresses  []string `json:"resolved_addresses,omitempty"`
 	AssignedAddress    string   `json:"assigned_address,omitempty"`
+	DownloadAddress    string   `json:"download_address,omitempty"`
+	DownloadProbeURL   string   `json:"download_probe_url,omitempty"`
 	CloudflareVerified bool     `json:"cloudflare_verified"`
 	PreflightVerified  bool     `json:"preflight_verified"`
 	DownloadVerified   bool     `json:"download_verified"`
@@ -168,6 +170,83 @@ func (r *Runner) SetDomainResolver(resolver DomainResolver) {
 // SetDomainDownloadTester 注入绑定物理接口的手动域名下载复测器。
 func (r *Runner) SetDomainDownloadTester(tester DomainDownloadTester) {
 	r.domainDownload = tester
+}
+
+// TestManualDomain 使用临时物理路由完成单个手动域名的 SNI、Host 和同域下载复测。
+func (r *Runner) TestManualDomain(ctx context.Context, domain, rawAddress string) (acceleration.DownloadResult, error) {
+	if r.domainVerifier == nil || r.domainDownload == nil {
+		return acceleration.DownloadResult{}, errors.New("manual domain verification is unavailable")
+	}
+	var result acceleration.DownloadResult
+	err := r.TryPolicyMaintenance(ctx, func(ctx context.Context) error {
+		transactionID, err := r.applyDomainProbeRoute(ctx, rawAddress)
+		if err != nil {
+			return fmt.Errorf("prepare direct download route for %s via %s: %w", domain, rawAddress, err)
+		}
+		if transactionID != "" {
+			defer func() {
+				if rollbackErr := r.rollbackRoutes(ctx, []string{transactionID}); rollbackErr != nil {
+					r.logger.Error("单域名复测临时路由清理失败", "domain", domain, "target_ip", rawAddress, "error", rollbackErr)
+				}
+			}()
+		}
+		mapping := proxy.DomainMapping{Domain: domain, Addresses: []string{rawAddress}}
+		if err := r.domainVerifier.VerifyPreflight(ctx, []proxy.DomainMapping{mapping}); err != nil {
+			return fmt.Errorf("verify manual domain %s via %s: %w", domain, rawAddress, err)
+		}
+		probeURL, err := r.domainDownload.DiscoverProbeURL(ctx, domain, rawAddress)
+		if err != nil {
+			return fmt.Errorf("discover manual domain download resource %s via %s: %w", domain, rawAddress, err)
+		}
+		result, err = r.domainDownload.Measure(ctx, domain, rawAddress, probeURL)
+		if err != nil {
+			return fmt.Errorf("measure manual domain download %s via %s: %w", domain, rawAddress, err)
+		}
+		return nil
+	})
+	return result, err
+}
+
+// ApplyManualDomainMapping 保存指定映射并刷新整份策略，保留其它手动域名的当前映射。
+func (r *Runner) ApplyManualDomainMapping(ctx context.Context, domain, rawAddress string, mappings map[string]string) (bool, error) {
+	if r.policy == nil {
+		return false, errors.New("policy application requested but no adapter is configured")
+	}
+	if !r.tryAcquireMaintenance() {
+		return false, ErrAlreadyRunning
+	}
+	defer r.operationGate.release()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	previousMappings := cloneManualMappings(r.config.Acceleration.ManualMappings)
+	nextMappings := cloneManualMappings(mappings)
+	nextMappings[normalizeDomainForMapping(domain)] = strings.TrimSpace(rawAddress)
+	if reflect.DeepEqual(previousMappings, nextMappings) && r.store.Snapshot().Policy != nil {
+		return false, nil
+	}
+	r.config.Acceleration.ManualMappings = nextMappings
+	if r.store.Snapshot().Policy == nil {
+		return false, errors.New("cannot apply manual domain mapping before a verified policy exists")
+	}
+	if err := r.refreshPolicyLocked(ctx); err != nil {
+		r.config.Acceleration.ManualMappings = previousMappings
+		return false, fmt.Errorf("refresh policy after manual domain mapping: %w", err)
+	}
+	r.logger.Info("手动域名映射已应用并验证", "domain", normalizeDomainForMapping(domain), "target_ip", strings.TrimSpace(rawAddress), "policy_refreshed", true, "result", "completed")
+	return true, nil
+}
+
+func cloneManualMappings(mappings map[string]string) map[string]string {
+	clone := make(map[string]string, len(mappings))
+	for domain, address := range mappings {
+		clone[normalizeDomainForMapping(domain)] = strings.TrimSpace(address)
+	}
+	return clone
+}
+
+func normalizeDomainForMapping(domain string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
 }
 
 // NewRunner 创建依赖显式注入的优选运行器。
@@ -1317,10 +1396,32 @@ func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Sna
 		for _, address := range resolvedAddresses {
 			allocation.ResolvedAddresses = append(allocation.ResolvedAddresses, address.Unmap().String())
 		}
+		candidatePool := candidates
+		explicitAddress, hasExplicitAddress := "", false
+		if candidate.source == "manual" {
+			explicitAddress, hasExplicitAddress = r.config.Acceleration.ManualMappings[normalizeDomainForMapping(candidate.domain)]
+			if hasExplicitAddress {
+				explicitAddress = strings.TrimSpace(explicitAddress)
+				parsedAddress, parseErr := netip.ParseAddr(explicitAddress)
+				if parseErr != nil || !parsedAddress.IsGlobalUnicast() || parsedAddress.IsPrivate() || parsedAddress.IsLoopback() || parsedAddress.IsLinkLocalUnicast() || !snapshot.Contains(parsedAddress.Unmap()) {
+					allocation.Error = fmt.Sprintf("configured manual mapping %s is not a current public Cloudflare address", explicitAddress)
+					allocations = append(allocations, allocation)
+					continue
+				}
+				parsedAddress = parsedAddress.Unmap()
+				if r.config.Network.ManageRoutes && ((parsedAddress.Is4() && r.physicalPath.GatewayIPv4 == "") || (parsedAddress.Is6() && r.physicalPath.GatewayIPv6 == "")) {
+					allocation.Error = fmt.Sprintf("configured manual mapping %s has no physical gateway", explicitAddress)
+					allocations = append(allocations, allocation)
+					continue
+				}
+				explicitAddress = parsedAddress.String()
+				candidatePool = []string{explicitAddress}
+			}
+		}
 		var lastError error
 		assigned := false
 		probeURL := ""
-		for _, candidateAddress := range candidates {
+		for _, candidateAddress := range candidatePool {
 			if _, alreadyAssigned := assignedCandidates[candidateAddress]; alreadyAssigned {
 				continue
 			}
@@ -1349,6 +1450,8 @@ func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Sna
 					if downloadResult.Mbps > allocation.DownloadMbps {
 						allocation.DownloadMbps = downloadResult.Mbps
 					}
+					allocation.DownloadAddress = candidateAddress
+					allocation.DownloadProbeURL = probeURL
 					if preflightErr == nil && downloadResult.Mbps < r.config.Acceleration.ManualDownloadMinMbps {
 						preflightErr = fmt.Errorf("direct download %.2f Mbps is below configured %.2f Mbps", downloadResult.Mbps, r.config.Acceleration.ManualDownloadMinMbps)
 					}
@@ -1380,6 +1483,8 @@ func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Sna
 		}
 		if lastError != nil {
 			allocation.Error = lastError.Error()
+		} else if hasExplicitAddress {
+			allocation.Error = fmt.Sprintf("configured manual mapping %s did not pass verification", explicitAddress)
 		} else {
 			allocation.Error = "ranked address pool is exhausted"
 		}
@@ -1734,8 +1839,13 @@ func recordDomainAllocationResults(state *store.State, allocations []DomainAlloc
 		if policyApplied || !previouslyActive {
 			record.CloudflareVerified = allocation.CloudflareVerified
 			record.PreflightVerified = allocation.PreflightVerified
-			record.DownloadVerified = allocation.DownloadVerified
-			record.DownloadMbps = allocation.DownloadMbps
+			if allocation.DownloadAddress != "" || !previouslyActive {
+				record.DownloadVerified = allocation.DownloadVerified
+				record.DownloadMbps = allocation.DownloadMbps
+				record.DownloadAddress = allocation.DownloadAddress
+				record.DownloadProbeURL = allocation.DownloadProbeURL
+				record.DownloadTestedAt = now
+			}
 		}
 		record.Active = (policyApplied && allocation.AssignedAddress != "") || (!policyApplied && previouslyActive)
 		record.LastResolvedAddresses = append([]string(nil), allocation.ResolvedAddresses...)

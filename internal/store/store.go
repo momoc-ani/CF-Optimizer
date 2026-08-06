@@ -81,6 +81,9 @@ type DomainDiscovery struct {
 	PreflightVerified     bool      `json:"preflight_verified"`
 	DownloadVerified      bool      `json:"download_verified"`
 	DownloadMbps          float64   `json:"download_mbps,omitempty"`
+	DownloadAddress       string    `json:"download_address,omitempty"`
+	DownloadProbeURL      string    `json:"download_probe_url,omitempty"`
+	DownloadTestedAt      time.Time `json:"download_tested_at,omitempty"`
 	Active                bool      `json:"active"`
 	LastResolvedAddresses []string  `json:"last_resolved_addresses,omitempty"`
 	LastError             string    `json:"last_error,omitempty"`

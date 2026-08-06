@@ -57,6 +57,26 @@ func TestClearDiscoveredDomainsRejectsUnknownParameters(t *testing.T) {
 	}
 }
 
+func TestManualDomainMethodsRejectUnknownAndMissingParameters(t *testing.T) {
+	api := &API{runtime: &Runtime{}}
+	for _, method := range []string{"acceleration.domain_test", "acceleration.domain_apply"} {
+		t.Run(method+" unknown", func(t *testing.T) {
+			_, err := api.Handle(context.Background(), ipc.Request{Method: method, Params: json.RawMessage(`{"domain":"ani.momoc.top","address":"104.16.132.229","unexpected":true}`)}, nil)
+			var ipcErr *ipc.Error
+			if !errors.As(err, &ipcErr) || ipcErr.Code != "invalid_params" {
+				t.Fatalf("unexpected IPC error: %#v", err)
+			}
+		})
+		t.Run(method+" missing", func(t *testing.T) {
+			_, err := api.Handle(context.Background(), ipc.Request{Method: method, Params: json.RawMessage(`{"domain":"ani.momoc.top"}`)}, nil)
+			var ipcErr *ipc.Error
+			if !errors.As(err, &ipcErr) || ipcErr.Code != "invalid_params" {
+				t.Fatalf("unexpected IPC error: %#v", err)
+			}
+		})
+	}
+}
+
 func TestActiveEventIsClonedAndClearedWithRun(t *testing.T) {
 	api := &API{}
 	progress := benchmark.Progress{Completed: 4, Total: 12}

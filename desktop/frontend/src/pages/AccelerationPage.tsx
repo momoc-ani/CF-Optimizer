@@ -1,15 +1,15 @@
-import { ActionIcon, Alert, Button, Group, Modal, NumberInput, SimpleGrid, Stack, Switch, Text, Textarea, TextInput, Tooltip } from '@mantine/core';
+import { ActionIcon, Alert, Button, Drawer, Group, Modal, NumberInput, SimpleGrid, Stack, Switch, Text, Textarea, TextInput, Tooltip } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ColumnDef } from '@tanstack/react-table';
-import { RefreshCw, Save, ScanSearch, ShieldAlert, ShieldCheck, Trash2 } from 'lucide-react';
+import { CheckCircle2, CircleAlert, Gauge, RefreshCw, Save, ScanSearch, ShieldAlert, ShieldCheck, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { request } from '../api/client';
 import { queryKeys, useAccelerationDomains, useConfig, useRoutes, useStatus } from '../api/hooks';
-import type { AppConfig, DiscoveredDomainCleanupResult, DomainDiscovery, DomainDiscoveryResult, RouteTransaction } from '../api/types';
+import type { AppConfig, DiscoveredDomainCleanupResult, DomainApplyResult, DomainDiscovery, DomainDiscoveryResult, DomainTestResult, RouteTransaction } from '../api/types';
 import { DataTable } from '../components/DataTable';
 import { ErrorState, LoadingState, Metric, PageHeader, Section } from '../components/Page';
 import { StatusBadge } from '../components/StatusBadge';
@@ -96,6 +96,9 @@ export function AccelerationPage() {
   const config = useConfig();
   const queryClient = useQueryClient();
   const [selectedDomain, setSelectedDomain] = useState<string>();
+  const [isDetailOpen, setIsDetailOpen] = useState(false);
+  const [mappingDraft, setMappingDraft] = useState('');
+  const [domainTestResult, setDomainTestResult] = useState<DomainTestResult>();
   const [isCleanupOpen, setIsCleanupOpen] = useState(false);
   const form = useForm<AccelerationSettingsForm>({
     resolver: zodResolver(accelerationSettingsSchema),
@@ -125,7 +128,7 @@ export function AccelerationPage() {
       verifiedRoute: verifiedRoutes.find(Boolean),
     };
   }), [domains.data?.domains, routes.data, status.data?.physical_path]);
-  const selected = rows.find((row) => row.domain === selectedDomain) ?? rows[0];
+  const selected = rows.find((row) => row.domain === selectedDomain);
   const acceleratedCount = rows.filter((row) => row.isAccelerated).length;
   const pendingCount = rows.length - acceleratedCount;
   const accelerationConfig = config.data?.acceleration;
@@ -184,6 +187,37 @@ export function AccelerationPage() {
     },
     onError: (error: Error) => notifications.show({ color: 'red', title: '清理失败', message: error.message }),
   });
+
+  const testDomain = useMutation({
+    mutationFn: ({ domain, address }: { domain: string; address: string }) => request<DomainTestResult>('acceleration.domain_test', { domain, address }),
+    onSuccess: async (result) => {
+      setDomainTestResult(result);
+      notifications.show({ color: result.download_verified ? 'green' : 'yellow', title: '域名测速完成', message: `${result.download_mbps.toFixed(2)} Mbps${result.download_verified ? '，达到应用阈值' : '，未达到应用阈值'}` });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.accelerationDomains });
+    },
+    onError: (error: Error) => notifications.show({ color: 'red', title: '域名测速失败', message: error.message }),
+  });
+
+  const applyDomain = useMutation({
+    mutationFn: ({ domain, address }: { domain: string; address: string }) => request<DomainApplyResult>('acceleration.domain_apply', { domain, address }),
+    onSuccess: async (result) => {
+      notifications.show({ color: 'green', title: '域名加速已应用', message: `${result.domain} → ${result.address}` });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.config }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.accelerationDomains }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.routes }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.status }),
+      ]);
+    },
+    onError: (error: Error) => notifications.show({ color: 'red', title: '应用失败', message: error.message }),
+  });
+
+  const openDomainDetails = (row: DomainRow) => {
+    setSelectedDomain(row.domain);
+    setMappingDraft(config.data?.acceleration.manual_mappings?.[row.domain] ?? row.accelerated_addresses?.[0] ?? '');
+    setDomainTestResult(undefined);
+    setIsDetailOpen(true);
+  };
 
   const refreshAll = () => void Promise.all([domains.refetch(), routes.refetch(), status.refetch(), config.refetch()]);
   const isLoading = domains.isLoading || routes.isLoading || status.isLoading || config.isLoading;
@@ -255,37 +289,66 @@ export function AccelerationPage() {
         <Metric label="物理出口" value={physicalPath?.interface ?? '未发现'} detail={physicalPath?.gateway_ipv4 ?? physicalPath?.gateway_ipv6 ?? '缺少网关证据'} accent="#c47a12" />
       </SimpleGrid>
 
-      <div className="split-layout acceleration-layout">
-        <Section title="域名与验证状态" aside={<Text size="xs" c="dimmed">共 {rows.length} 个域名</Text>}>
-          <DataTable columns={columns} data={rows} minWidth={1350} rowKey={(row) => row.domain} onRowClick={(row) => setSelectedDomain(row.domain)} emptyTitle="尚无加速域名" emptyDetail="后台尚未返回手动域名或已验证的自动发现记录。" />
-        </Section>
-        <Section title="验证证据" className="inspector-section">
-          {selected ? (
-            <Stack gap="md">
-              <Group justify="space-between" wrap="nowrap"><Text ff="monospace" fw={650}>{selected.domain}</Text><StatusBadge label={selected.isAccelerated ? '已加速' : selected.last_error ? '验证失败' : '待验证'} tone={selected.isAccelerated ? 'verified' : selected.last_error ? 'failed' : 'pending'} /></Group>
-              <div className="property-grid">
-                <Text c="dimmed">来源</Text><Text>{selected.source === 'manual' ? '手动域名' : 'Mihomo 自动发现'}</Text>
-                <Text c="dimmed">物理 DNS</Text><Text ff="monospace">{selected.last_resolved_addresses?.join(', ') || '—'}</Text>
-                <Text c="dimmed">优选 IP</Text><Text ff="monospace">{selected.accelerated_addresses?.join(', ') || '—'}</Text>
-                <Text c="dimmed">TLS SNI</Text><Text ff="monospace">{selected.domain}</Text>
-                <Text c="dimmed">HTTP Host</Text><Text ff="monospace">{selected.domain}</Text>
-                <Text c="dimmed">域名下载复测</Text><Text>{typeof selected.download_mbps === 'number' ? `${selected.download_mbps.toFixed(2)} Mbps${selected.download_verified ? '（达标）' : '（未达标）'}` : selected.source === 'manual' ? '未复测' : '不适用'}</Text>
-                <Text c="dimmed">已验证策略</Text><Text>{selected.verified_adapters?.map((adapter) => adapterLabels[adapter] ?? adapter).join(', ') || '—'}</Text>
-                <Text c="dimmed">物理接口</Text><Text>{selected.verifiedRoute?.verification?.interface ?? '—'}</Text>
-                <Text c="dimmed">源地址</Text><Text ff="monospace">{selected.verifiedRoute?.verification?.source_address ?? '—'}</Text>
-                <Text c="dimmed">网关</Text><Text ff="monospace">{selected.verifiedRoute?.verification?.gateway ?? '—'}</Text>
-                <Text c="dimmed">路由事务</Text><Text ff="monospace">{selected.verifiedRoute?.id ?? '—'}</Text>
-                <Text c="dimmed">策略应用</Text><Text>{formatDate(selected.applied_at)}</Text>
-                <Text c="dimmed">最近发现</Text><Text>{formatDate(selected.last_seen_at)}</Text>
-                <Text c="dimmed">错误</Text><Text c={selected.last_error ? 'red' : undefined}>{selected.last_error ?? '无'}</Text>
-              </div>
-              <Alert color={selected.isAccelerated ? 'green' : 'yellow'} icon={selected.isAccelerated ? <ShieldCheck size={17} /> : <ShieldAlert size={17} />} title={selected.isAccelerated ? 'HTTPS 与物理直连证据完整' : '尚不能确认域名已加速'}>
-                {selected.isAccelerated ? '系统映射连接的远端地址属于优选 IP，直连策略、物理接口、源地址和网关均已验证。' : '缺失的验证项会保留为待验证或失败，不会显示已加速。'}
+      <Section title="域名与验证状态" aside={<Text size="xs" c="dimmed">点击行打开详情 · 共 {rows.length} 个域名</Text>}>
+        <DataTable columns={columns} data={rows} minWidth={1350} rowKey={(row) => row.domain} onRowClick={openDomainDetails} emptyTitle="尚无加速域名" emptyDetail="后台尚未返回手动域名或已验证的自动发现记录。" />
+      </Section>
+
+      <Drawer opened={isDetailOpen} onClose={() => setIsDetailOpen(false)} position="right" size={520} title="域名加速详情">
+        {selected ? (
+          <Stack gap="lg">
+            <Group justify="space-between" wrap="nowrap">
+              <Stack gap={2}>
+                <Text ff="monospace" fw={700}>{selected.domain}</Text>
+                <Text size="sm" c="dimmed">{selected.source === 'manual' ? '手动域名' : 'Mihomo 自动发现'}</Text>
+              </Stack>
+              <StatusBadge label={selected.isAccelerated ? '已加速' : selected.last_error ? '验证失败' : '待验证'} tone={selected.isAccelerated ? 'verified' : selected.last_error ? 'failed' : 'pending'} />
+            </Group>
+
+            {selected.source === 'manual' ? (
+              <Stack gap="sm">
+                <TextInput label="映射 IP" value={mappingDraft} onChange={(event) => setMappingDraft(event.currentTarget.value)} placeholder="例如 104.16.132.229" ff="monospace" />
+                <Button leftSection={<Gauge size={16} />} loading={testDomain.isPending} disabled={!mappingDraft.trim()} onClick={() => testDomain.mutate({ domain: selected.domain, address: mappingDraft.trim() })}>手动测速</Button>
+                {domainTestResult ? (
+                  <Alert color={domainTestResult.download_verified ? 'green' : 'yellow'} icon={domainTestResult.download_verified ? <CheckCircle2 size={17} /> : <CircleAlert size={17} />} title={`${domainTestResult.download_mbps.toFixed(2)} Mbps`}>
+                    <Stack gap={3}>
+                      <Text size="sm">下载 {domainTestResult.downloaded.toLocaleString()} bytes · 耗时 {domainTestResult.duration}</Text>
+                      <Text size="xs" c="dimmed" ff="monospace">{domainTestResult.address}</Text>
+                      {domainTestResult.probe_url && <Text size="xs" c="dimmed" style={{ wordBreak: 'break-all' }}>{domainTestResult.probe_url}</Text>}
+                      <Text size="sm">{domainTestResult.download_verified ? `达到 ${accelerationConfig?.manual_download_min_mbps ?? 0} Mbps 应用阈值，可应用映射。` : `低于 ${accelerationConfig?.manual_download_min_mbps ?? 0} Mbps 应用阈值。`}</Text>
+                    </Stack>
+                  </Alert>
+                ) : selected.download_tested_at ? (
+                  <Text size="sm" c="dimmed">上次测速：{selected.download_mbps?.toFixed(2) ?? '—'} Mbps · {formatDate(selected.download_tested_at)}</Text>
+                ) : <Text size="sm" c="dimmed">测速完成后才可选择应用此映射。</Text>}
+                <Button color="green" leftSection={<ShieldCheck size={16} />} loading={applyDomain.isPending} disabled={!domainTestResult || domainTestResult.address !== mappingDraft.trim() || !domainTestResult.download_verified} onClick={() => applyDomain.mutate({ domain: selected.domain, address: mappingDraft.trim() })}>应用此映射</Button>
+              </Stack>
+            ) : (
+              <Alert color="blue" title="自动发现域名只读">
+                自动发现域名由后台按连接观察和策略设置管理，不能在此编辑映射或手动应用。
               </Alert>
-            </Stack>
-          ) : <Text c="dimmed">选择一个域名查看验证证据。</Text>}
-        </Section>
-      </div>
+            )}
+
+            <div className="property-grid">
+              <Text c="dimmed">物理 DNS</Text><Text ff="monospace">{selected.last_resolved_addresses?.join(', ') || '—'}</Text>
+              <Text c="dimmed">优选 IP</Text><Text ff="monospace">{selected.accelerated_addresses?.join(', ') || '—'}</Text>
+              <Text c="dimmed">TLS SNI</Text><Text ff="monospace">{selected.domain}</Text>
+              <Text c="dimmed">HTTP Host</Text><Text ff="monospace">{selected.domain}</Text>
+              <Text c="dimmed">域名下载复测</Text><Text>{typeof selected.download_mbps === 'number' ? `${selected.download_mbps.toFixed(2)} Mbps${selected.download_verified ? '（达标）' : '（未达标）'}` : selected.source === 'manual' ? '未复测' : '不适用'}</Text>
+              <Text c="dimmed">已验证策略</Text><Text>{selected.verified_adapters?.map((adapter) => adapterLabels[adapter] ?? adapter).join(', ') || '—'}</Text>
+              <Text c="dimmed">物理接口</Text><Text>{selected.verifiedRoute?.verification?.interface ?? '—'}</Text>
+              <Text c="dimmed">源地址</Text><Text ff="monospace">{selected.verifiedRoute?.verification?.source_address ?? '—'}</Text>
+              <Text c="dimmed">网关</Text><Text ff="monospace">{selected.verifiedRoute?.verification?.gateway ?? '—'}</Text>
+              <Text c="dimmed">路由事务</Text><Text ff="monospace">{selected.verifiedRoute?.id ?? '—'}</Text>
+              <Text c="dimmed">策略应用</Text><Text>{formatDate(selected.applied_at)}</Text>
+              <Text c="dimmed">最近发现</Text><Text>{formatDate(selected.last_seen_at)}</Text>
+              <Text c="dimmed">错误</Text><Text c={selected.last_error ? 'red' : undefined}>{selected.last_error ?? '无'}</Text>
+            </div>
+            <Alert color={selected.isAccelerated ? 'green' : 'yellow'} icon={selected.isAccelerated ? <ShieldCheck size={17} /> : <ShieldAlert size={17} />} title={selected.isAccelerated ? 'HTTPS 与物理直连证据完整' : '尚不能确认域名已加速'}>
+              {selected.isAccelerated ? '系统映射连接的远端地址属于优选 IP，直连策略、物理接口、源地址和网关均已验证。' : '缺失的验证项会保留为待验证或失败，不会显示已加速。'}
+            </Alert>
+          </Stack>
+        ) : <Text c="dimmed">选择一个域名查看详情。</Text>}
+      </Drawer>
     </Stack>
   );
 }

@@ -152,6 +152,30 @@ func (a *API) Handle(ctx context.Context, request ipc.Request, emit func(any) er
 			return nil, invalidParams(err)
 		}
 		return a.runtime.ClearDiscoveredAccelerationDomains(ctx)
+	case "acceleration.domain_test":
+		var parameters struct {
+			Domain  string `json:"domain"`
+			Address string `json:"address"`
+		}
+		if err := decodeStrict(request.Params, &parameters); err != nil {
+			return nil, invalidParams(err)
+		}
+		if strings.TrimSpace(parameters.Domain) == "" || strings.TrimSpace(parameters.Address) == "" {
+			return nil, invalidParams(errors.New("domain and address are required"))
+		}
+		return a.runtime.TestManualDomain(ctx, parameters.Domain, parameters.Address)
+	case "acceleration.domain_apply":
+		var parameters struct {
+			Domain  string `json:"domain"`
+			Address string `json:"address"`
+		}
+		if err := decodeStrict(request.Params, &parameters); err != nil {
+			return nil, invalidParams(err)
+		}
+		if strings.TrimSpace(parameters.Domain) == "" || strings.TrimSpace(parameters.Address) == "" {
+			return nil, invalidParams(errors.New("domain and address are required"))
+		}
+		return a.runtime.ApplyManualDomainMapping(ctx, parameters.Domain, parameters.Address)
 	case "diagnostics.route":
 		return a.routeDiagnostics(ctx, request.Params)
 	case "config.get":

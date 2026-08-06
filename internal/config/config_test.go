@@ -23,6 +23,9 @@ func TestDefaultBenchmarkAndDiscoverySettings(t *testing.T) {
 	if !cfg.Acceleration.ManualDownloadTest || cfg.Acceleration.ManualDownloadMinMbps != 20 {
 		t.Fatalf("unexpected manual domain download defaults: %#v", cfg.Acceleration)
 	}
+	if cfg.Acceleration.ManualMappings == nil || len(cfg.Acceleration.ManualMappings) != 0 {
+		t.Fatalf("manual domain mappings should default to an empty map: %#v", cfg.Acceleration.ManualMappings)
+	}
 }
 
 func TestLoadMergesDefaults(t *testing.T) {
@@ -115,6 +118,33 @@ func TestValidateRejectsInvalidManualDomainDownloadThreshold(t *testing.T) {
 	}
 }
 
+func TestValidateManualDomainMappings(t *testing.T) {
+	valid := Default()
+	valid.Acceleration.ManualDomains = []string{"ANI.MOMOC.TOP"}
+	valid.Acceleration.ManualMappings = map[string]string{"ani.momoc.top": "104.16.132.229"}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid manual mapping rejected: %v", err)
+	}
+	cases := []struct {
+		name    string
+		mapping map[string]string
+	}{
+		{name: "domain not configured", mapping: map[string]string{"other.example": "104.16.132.229"}},
+		{name: "private address", mapping: map[string]string{"ani.momoc.top": "192.168.1.1"}},
+		{name: "invalid address", mapping: map[string]string{"ani.momoc.top": "not-an-ip"}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Acceleration.ManualDomains = []string{"ani.momoc.top"}
+			cfg.Acceleration.ManualMappings = test.mapping
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("invalid manual mapping was accepted")
+			}
+		})
+	}
+}
+
 func TestAccelerationDomainsMergesLegacyAndHonorsExclusions(t *testing.T) {
 	cfg := Default()
 	cfg.Acceleration.ManualDomains = []string{"ANI.MOMOC.TOP", "manual.example"}
@@ -155,7 +185,7 @@ func TestLoadNormalizesCollectionsForJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{`"include":[]`, `"exclude":[]`, `"manual_domains":[]`, `"excluded_domains":[]`, `"domains":[]`} {
+	for _, field := range []string{`"include":[]`, `"exclude":[]`, `"manual_domains":[]`, `"manual_mappings":{}`, `"excluded_domains":[]`, `"domains":[]`} {
 		if !strings.Contains(string(encoded), field) {
 			t.Fatalf("normalized config JSON does not contain %s: %s", field, encoded)
 		}

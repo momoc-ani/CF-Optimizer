@@ -453,6 +453,71 @@ func TestAllocateDomainMappingsUsesManualConfigurationAndRankingOrder(t *testing
 	}
 }
 
+func TestAllocateDomainMappingsUsesExplicitManualMappingWithoutRankedFallback(t *testing.T) {
+	policyApplier := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
+	runner, _ := newTestRunner(t, policyApplier)
+	runner.config.Acceleration.ManualDomains = []string{"manual.example"}
+	runner.config.Acceleration.ManualMappings = map[string]string{"manual.example": "1.1.1.3"}
+	runner.domainResolver = staticDomainResolver{addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	results := []benchmark.Result{{IP: netip.MustParseAddr("1.1.1.1"), Qualified: true, Score: 99}}
+
+	mappings, allocations, warnings, err := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/30"}}, results, store.State{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(mappings) != 1 || len(allocations) != 1 || allocations[0].AssignedAddress != "1.1.1.3" {
+		t.Fatalf("explicit mapping did not bypass ranked pool: mappings=%#v allocations=%#v warnings=%#v", mappings, allocations, warnings)
+	}
+}
+
+func TestTestManualDomainRollsBackTemporaryRoute(t *testing.T) {
+	policyApplier := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
+	runner, _ := newTestRunner(t, policyApplier)
+	runner.config.Network.ManageRoutes = true
+	runner.physicalPath = cfnetwork.PhysicalPath{Interface: "eth0", InterfaceIndex: 2, GatewayIPv4: "192.0.2.1"}
+	backend := &delayedRouteBackend{routes: map[string]cfnetwork.RouteSpec{}}
+	controller, err := cfnetwork.NewRouteController(t.TempDir(), backend, true, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.routes = controller
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	runner.domainDownload = &rankedDomainDownloadTester{mbps: map[string]float64{"1.1.1.2": 35}}
+	result, err := runner.TestManualDomain(context.Background(), "manual.example", "1.1.1.2")
+	if err != nil || result.Mbps != 35 {
+		t.Fatalf("manual domain test failed: result=%#v err=%v", result, err)
+	}
+	if len(policyApplier.policies) != 0 {
+		t.Fatalf("manual domain test must not apply the final policy: %#v", policyApplier.policies)
+	}
+	if len(backend.routes) != 0 {
+		t.Fatalf("manual domain test left a temporary route: %#v", backend.routes)
+	}
+}
+
+func TestApplyManualDomainMappingRefreshesVerifiedPolicy(t *testing.T) {
+	policyApplier := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
+	runner, stateStore := newTestRunner(t, policyApplier)
+	runner.config.Acceleration.ManualDomains = []string{"manual.example"}
+	runner.config.Acceleration.ManualMappings = map[string]string{}
+	runner.domainResolver = staticDomainResolver{addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	if err := stateStore.Update(func(state *store.State) error {
+		state.Policy = &store.PolicySnapshot{Receipts: json.RawMessage(`{"receipts":[]}`)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	refreshed, err := runner.ApplyManualDomainMapping(context.Background(), "manual.example", "1.1.1.2", map[string]string{"manual.example": "1.1.1.2"})
+	if err != nil || !refreshed {
+		t.Fatalf("manual mapping policy refresh failed: refreshed=%v err=%v", refreshed, err)
+	}
+	if len(policyApplier.policies) != 1 || len(policyApplier.policies[0].DomainMappings) != 1 || policyApplier.policies[0].DomainMappings[0].Addresses[0] != "1.1.1.2" {
+		t.Fatalf("manual mapping was not applied as an explicit policy mapping: %#v", policyApplier.policies)
+	}
+}
+
 func TestAllocateDomainMappingsUsesFirstCandidateMeetingManualDownloadThreshold(t *testing.T) {
 	policyApplier := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
 	runner, _ := newTestRunner(t, policyApplier)

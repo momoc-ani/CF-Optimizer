@@ -77,19 +77,20 @@ type Config struct {
 
 // AccelerationConfig 定义精确域名加速、自动发现和自动应用边界。
 type AccelerationConfig struct {
-	Enabled                  bool     `yaml:"enabled" json:"enabled"`
-	ManualDomains            []string `yaml:"manual_domains" json:"manual_domains"`
-	ExcludedDomains          []string `yaml:"excluded_domains" json:"excluded_domains"`
-	ManualDownloadTest       bool     `yaml:"manual_download_test" json:"manual_download_test"`
-	ManualDownloadMinMbps    float64  `yaml:"manual_download_min_mbps" json:"manual_download_min_mbps"`
-	AutoDiscover             bool     `yaml:"auto_discover" json:"auto_discover"`
-	AutoApply                bool     `yaml:"auto_apply" json:"auto_apply"`
-	DiscoveryInterval        Duration `yaml:"discovery_interval" json:"discovery_interval"`
-	MaxDiscoveredDomains     int      `yaml:"max_discovered_domains" json:"max_discovered_domains"`
-	ApplyVerificationTimeout Duration `yaml:"apply_verification_timeout" json:"apply_verification_timeout"`
-	ApplyAttemptTimeout      Duration `yaml:"apply_attempt_timeout" json:"apply_attempt_timeout"`
-	ApplyRetryInterval       Duration `yaml:"apply_retry_interval" json:"apply_retry_interval"`
-	ApplyMaxAttempts         int      `yaml:"apply_max_attempts" json:"apply_max_attempts"`
+	Enabled                  bool              `yaml:"enabled" json:"enabled"`
+	ManualDomains            []string          `yaml:"manual_domains" json:"manual_domains"`
+	ManualMappings           map[string]string `yaml:"manual_mappings" json:"manual_mappings"`
+	ExcludedDomains          []string          `yaml:"excluded_domains" json:"excluded_domains"`
+	ManualDownloadTest       bool              `yaml:"manual_download_test" json:"manual_download_test"`
+	ManualDownloadMinMbps    float64           `yaml:"manual_download_min_mbps" json:"manual_download_min_mbps"`
+	AutoDiscover             bool              `yaml:"auto_discover" json:"auto_discover"`
+	AutoApply                bool              `yaml:"auto_apply" json:"auto_apply"`
+	DiscoveryInterval        Duration          `yaml:"discovery_interval" json:"discovery_interval"`
+	MaxDiscoveredDomains     int               `yaml:"max_discovered_domains" json:"max_discovered_domains"`
+	ApplyVerificationTimeout Duration          `yaml:"apply_verification_timeout" json:"apply_verification_timeout"`
+	ApplyAttemptTimeout      Duration          `yaml:"apply_attempt_timeout" json:"apply_attempt_timeout"`
+	ApplyRetryInterval       Duration          `yaml:"apply_retry_interval" json:"apply_retry_interval"`
+	ApplyMaxAttempts         int               `yaml:"apply_max_attempts" json:"apply_max_attempts"`
 }
 
 // ScheduleConfig 定义周期任务与网络变化检测行为。
@@ -237,7 +238,7 @@ func Default() Config {
 			External: ExternalProxyConfig{Timeout: Duration(15 * time.Second)},
 		},
 		Acceleration: AccelerationConfig{
-			Enabled: true, ManualDomains: []string{}, ExcludedDomains: []string{}, ManualDownloadTest: true, ManualDownloadMinMbps: 20,
+			Enabled: true, ManualDomains: []string{}, ManualMappings: map[string]string{}, ExcludedDomains: []string{}, ManualDownloadTest: true, ManualDownloadMinMbps: 20,
 			AutoDiscover: false, AutoApply: true,
 			DiscoveryInterval: Duration(15 * time.Second), MaxDiscoveredDomains: 1000,
 			ApplyVerificationTimeout: Duration(20 * time.Second), ApplyAttemptTimeout: Duration(5 * time.Second),
@@ -312,6 +313,16 @@ func (c *Config) normalizeCollections() {
 	}
 	if c.Acceleration.ManualDomains == nil {
 		c.Acceleration.ManualDomains = []string{}
+	}
+	if c.Acceleration.ManualMappings == nil {
+		c.Acceleration.ManualMappings = map[string]string{}
+	} else {
+		normalizedMappings := make(map[string]string, len(c.Acceleration.ManualMappings))
+		for rawDomain, rawAddress := range c.Acceleration.ManualMappings {
+			domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(rawDomain)), ".")
+			normalizedMappings[domain] = strings.TrimSpace(rawAddress)
+		}
+		c.Acceleration.ManualMappings = normalizedMappings
 	}
 	if c.Acceleration.ExcludedDomains == nil {
 		c.Acceleration.ExcludedDomains = []string{}
@@ -414,6 +425,20 @@ func (c Config) Validate() error {
 	for _, domain := range append(append([]string{}, c.Acceleration.ManualDomains...), c.Acceleration.ExcludedDomains...) {
 		if err := validateConfigDomain(domain); err != nil {
 			return fmt.Errorf("invalid acceleration domain %q: %w", domain, err)
+		}
+	}
+	manualDomains := make(map[string]struct{}, len(c.Acceleration.ManualDomains))
+	for _, rawDomain := range c.Acceleration.ManualDomains {
+		manualDomains[strings.TrimSuffix(strings.ToLower(strings.TrimSpace(rawDomain)), ".")] = struct{}{}
+	}
+	for rawDomain, rawAddress := range c.Acceleration.ManualMappings {
+		domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(rawDomain)), ".")
+		if _, configured := manualDomains[domain]; !configured {
+			return fmt.Errorf("acceleration.manual_mappings domain %q is not configured in manual_domains", rawDomain)
+		}
+		address, err := netip.ParseAddr(strings.TrimSpace(rawAddress))
+		if err != nil || !address.IsGlobalUnicast() || address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast() {
+			return fmt.Errorf("acceleration.manual_mappings[%q] must be a public IP address", rawDomain)
 		}
 	}
 	if c.Hosts.Enabled {

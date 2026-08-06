@@ -65,6 +65,9 @@ export interface DomainDiscovery {
   preflight_verified: boolean;
   download_verified: boolean;
   download_mbps?: number;
+  download_address?: string;
+  download_probe_url?: string;
+  download_tested_at?: string;
   active: boolean;
   last_resolved_addresses?: string[];
   accelerated_addresses?: string[];
@@ -86,6 +89,26 @@ export interface DiscoveredDomainCleanupResult {
   cleared: number;
   accelerations_removed: number;
   policy_refreshed: boolean;
+}
+
+export interface DomainTestResult {
+  domain: string;
+  address: string;
+  probe_url?: string;
+  downloaded: number;
+  duration: string;
+  download_mbps: number;
+  download_verified: boolean;
+  tested_at: string;
+}
+
+export interface DomainApplyResult {
+  domain: string;
+  address: string;
+  download_mbps: number;
+  download_verified: boolean;
+  policy_refreshed: boolean;
+  applied_at: string;
 }
 
 export interface Progress {
@@ -356,6 +379,7 @@ export interface AppConfig {
   acceleration: {
     enabled: boolean;
     manual_domains: string[] | null;
+    manual_mappings: Record<string, string>;
     excluded_domains: string[] | null;
     manual_download_test: boolean;
     manual_download_min_mbps: number;
