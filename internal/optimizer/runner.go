@@ -285,7 +285,9 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 			runErr = errors.Join(runErr, finalizeErr)
 		}
 		result := "completed"
-		if runErr != nil {
+		if errors.Is(runErr, context.Canceled) {
+			result = "cancelled"
+		} else if runErr != nil {
 			result = "failed"
 		} else if manualDomainAllocationFailure(report) != "" {
 			result = "partial"
@@ -700,6 +702,21 @@ func (r *Runner) tryAcquireMaintenance() bool {
 		return false
 	}
 	return true
+}
+
+// TryPolicyMaintenance 在不排队抢占完整优选的前提下执行一次窄策略维护操作。
+func (r *Runner) TryPolicyMaintenance(ctx context.Context, maintain func(context.Context) error) error {
+	if maintain == nil {
+		return errors.New("policy maintenance callback is required")
+	}
+	if !r.tryAcquireMaintenance() {
+		return ErrAlreadyRunning
+	}
+	defer r.operationGate.release()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return maintain(ctx)
 }
 
 // refreshPolicyLocked 使用已持有的单任务锁刷新策略，避免配置切换期间并行运行测速。
@@ -1766,7 +1783,10 @@ func (r *Runner) finalize(report RunReport, runErr error) error {
 	return r.store.Update(func(state *store.State) error {
 		state.Running = false
 		state.LastEndedAt = report.FinishedAt
-		if runErr != nil {
+		cancelled := errors.Is(runErr, context.Canceled)
+		if cancelled {
+			state.LastError = ""
+		} else if runErr != nil {
 			state.LastError = runErr.Error()
 		}
 		summary := store.RunSummary{
@@ -1790,7 +1810,9 @@ func (r *Runner) finalize(report RunReport, runErr error) error {
 		if report.IPv6Decision.HasSelection {
 			summary.SelectedIPv6 = report.IPv6Decision.Selected.IP.String()
 		}
-		if runErr != nil {
+		if cancelled {
+			summary.Error = "optimization was cancelled"
+		} else if runErr != nil {
 			summary.Error = runErr.Error()
 		}
 		state.History = append(state.History, summary)

@@ -57,6 +57,12 @@ Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix
 
 确认前不会修改路由、Hosts、代理策略或持续维护配置。后台负责网段更新、测速、策略应用、实际选路验证和失败回滚；界面只显示“已验证”“仅测速完成”“部分完成”或“已回滚”，不会把配置写入描述为直连成功。
 
+### 规则守护
+
+规则守护按代理内核采用策略实现。当前首个策略是 Mihomo，Clash Verge、FLClash 等客户端只负责提供控制端、活动配置和系统代理状态探测，不复制一套规则逻辑。Mihomo 离线或系统代理/TUN 未启用时，守护只读观察，不写配置、不重载、不测速；代理重新启用、订阅重载或活动规则漂移时，才按最后一份已验证策略执行 `Plan -> Apply -> Verify`，并通过维护锁与优选任务串行。守护不会触发网段更新、候选生成、TCP/TLS/下载测速、重新选点或域名重新分配。
+
+恢复验证包含活动规则顺序、Mihomo 内部域名映射、`dns.use-hosts`、实际连接命中的 `DIRECT`、目标优选 IP 以及物理接口/网关。临时网络超时只进入退避重试，不把规则写入成功直接显示为直连成功。
+
 自动预检失败时仍可选择“仅测速”。只有此时才需要进入高级设置手工填写物理接口/网关，或使用网络路由页和 CLI 收集更多诊断证据。
 
 ### 安全默认值
@@ -70,6 +76,12 @@ Windows 使用带 ACL 的 Named Pipe，Linux/macOS 使用受权限保护的 Unix
 - 测速 Dialer 不读取 `HTTP_PROXY`、`HTTPS_PROXY` 或 `ALL_PROXY`。
 - `ranges.max_change_percent` 限制远程网段异常变化。
 - 代理密钥不会写入诊断导出；日志和导出还会再次脱敏。
+
+### 手动域名复测失败
+
+手动域名复测会使用候选 IP 建立临时物理主机路由，同时保留目标域名的 TLS SNI 和 HTTP Host。首页或同域资源返回 `502 Bad Gateway` 等 HTTP `5xx`、TLS 超时、资源不可下载或速度低于阈值时，当前候选不会应用，程序会继续尝试下一名候选。候选池全部失败时，任务报告“手动域名未全部生效”，但上一份已验证映射和策略保持不变。
+
+计划任务失败后会按指数退避自动重试。短暂 `502` 通常表示目标站点或 Cloudflare 边缘在复测瞬间不可用；应以随后使用相同 SNI/Host 的直连结果判断是否恢复，不能把单次规则写入或普通 DNS 解析视为加速已生效。
 
 一键优选会先自动发现物理接口和网关，并在确认框中显示影响范围；自动发现失败时才需要手工覆盖。不要尝试绕过 VPN Kill Switch；无法验证物理出口时应保持路由管理关闭。
 
@@ -139,6 +151,7 @@ The project does not treat a successful configuration write as proof that traffi
 - Plan, apply, verify, audit, and roll back temporary range routes and final `/32` or `/128` host routes when route management is enabled.
 - Integrate with Generic Route, Mihomo, sing-box, Xray, versioned External JSON-RPC, and optional Windows Hosts adapters.
 - Map manually configured or verified auto-discovered Cloudflare hostnames to the selected IP while preserving TLS SNI and HTTP Host. Mihomo can discover its active controller and configuration; other cores consume the same domain policy through managed fragments.
+- Guard proxy-core rules through a shared strategy lifecycle. Mihomo is the first guarded core; clients such as Clash Verge and FLClash provide discovery evidence and reuse the Mihomo strategy instead of duplicating rule semantics. The guard only restores the last verified policy and never starts a benchmark or node reselection.
 - Run under Windows Service, systemd, or LaunchDaemon. Closing the desktop window hides it to the system tray; quitting the UI does not stop the service or an active task.
 - Provide nine operational views: overview, benchmark, domain acceleration, proxy adapters, routes, ranges, history, logs/diagnostics, and settings.
 
@@ -193,6 +206,12 @@ See [config.example.yaml](config.example.yaml) for every field. Important defaul
 - Benchmark dialers do not read `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY`.
 - `ranges.max_change_percent` limits abnormal remote range changes.
 - Proxy secrets are excluded from diagnostics, and exported logs are redacted again.
+
+### Manual hostname retest failures
+
+Manual hostname retests create a temporary physical host route for each candidate IP while preserving the hostname's TLS SNI and HTTP Host. A candidate is rejected and the next ranked address is tried when the page or same-origin resource returns an HTTP `5xx` such as `502 Bad Gateway`, times out during TLS, cannot provide a downloadable resource, or falls below the configured speed threshold. If the pool is exhausted, the run reports that not every manual hostname became effective while retaining the last verified mapping and policy.
+
+Scheduled maintenance retries failures with exponential backoff. A transient `502` usually means the target site or Cloudflare edge was unavailable at the instant of the retest. Recovery must be confirmed by a later direct request using the same SNI and Host; writing a rule or observing ordinary DNS resolution is not proof that acceleration is effective.
 
 One-click Optimize discovers the physical interface and gateway first and shows the effects for confirmation. Manual overrides are needed only when automatic discovery fails. Do not try to bypass a VPN Kill Switch; keep route management disabled when physical egress cannot be verified.
 

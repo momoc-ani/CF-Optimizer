@@ -21,6 +21,7 @@ import (
 	"github.com/cf-optimizer/cf-optimizer/internal/ipc"
 	cfnetwork "github.com/cf-optimizer/cf-optimizer/internal/network"
 	"github.com/cf-optimizer/cf-optimizer/internal/optimizer"
+	"github.com/cf-optimizer/cf-optimizer/internal/proxy/guard"
 	"github.com/cf-optimizer/cf-optimizer/internal/store"
 	"github.com/cf-optimizer/cf-optimizer/internal/version"
 )
@@ -33,6 +34,8 @@ type API struct {
 	activeEvent           *optimizer.Event
 	scheduleMutex         sync.RWMutex
 	scheduleStatus        ScheduleStatus
+	policyGuardMutex      sync.RWMutex
+	policyGuards          map[string]guard.Status
 	configurationMutex    sync.Mutex
 	quickStartMutex       sync.Mutex
 	quickStartPlan        *quickStartPlanRecord
@@ -82,6 +85,7 @@ func NewAPI(runtime *Runtime) (*API, error) {
 	return &API{
 		runtime: runtime, discoverPhysicalPath: cfnetwork.DiscoverPhysicalPath,
 		scheduleStatus:        ScheduleStatus{Enabled: schedule.Enabled, Interval: schedule.Interval.String()},
+		policyGuards:          map[string]guard.Status{},
 		networkFingerprint:    cfnetwork.NetworkFingerprint,
 		detectManagedAdapters: runtime.DetectManagedAdapters,
 		buildManagedSession:   runtime.BuildManagedSession,
@@ -183,6 +187,9 @@ func (a *API) systemStatus() map[string]any {
 	a.scheduleMutex.RLock()
 	scheduleStatus := cloneScheduleStatus(a.scheduleStatus)
 	a.scheduleMutex.RUnlock()
+	a.policyGuardMutex.RLock()
+	policyGuards := clonePolicyGuardStatuses(a.policyGuards)
+	a.policyGuardMutex.RUnlock()
 	view := a.runtime.View()
 	state := a.runtime.Store.Snapshot()
 	return map[string]any{
@@ -197,7 +204,48 @@ func (a *API) systemStatus() map[string]any {
 		"policy_available": view.ProxyCoordinator != nil,
 		"active_event":     activeEvent,
 		"schedule":         scheduleStatus,
+		"policy_guards":    policyGuards,
 	}
+}
+
+// SetPolicyGuardStatus 更新一个内核策略的去敏守护状态。
+func (a *API) SetPolicyGuardStatus(status guard.Status) {
+	a.policyGuardMutex.Lock()
+	if a.policyGuards == nil {
+		a.policyGuards = map[string]guard.Status{}
+	}
+	a.policyGuards[status.ID] = clonePolicyGuardStatus(status)
+	a.policyGuardMutex.Unlock()
+}
+
+// ResetPolicyGuardStatuses 清除配置切换前的旧策略实例状态。
+func (a *API) ResetPolicyGuardStatuses() {
+	a.policyGuardMutex.Lock()
+	a.policyGuards = map[string]guard.Status{}
+	a.policyGuardMutex.Unlock()
+}
+
+func clonePolicyGuardStatuses(statuses map[string]guard.Status) map[string]guard.Status {
+	result := make(map[string]guard.Status, len(statuses))
+	for id, status := range statuses {
+		result[id] = clonePolicyGuardStatus(status)
+	}
+	return result
+}
+
+func clonePolicyGuardStatus(status guard.Status) guard.Status {
+	status.DriftReasons = append([]string(nil), status.DriftReasons...)
+	cloneTime := func(value *time.Time) *time.Time {
+		if value == nil {
+			return nil
+		}
+		copy := *value
+		return &copy
+	}
+	status.LastCheckedAt = cloneTime(status.LastCheckedAt)
+	status.LastVerifiedAt = cloneTime(status.LastVerifiedAt)
+	status.RetryAt = cloneTime(status.RetryAt)
+	return status
 }
 
 // SetScheduleStatus 原子更新供 system.status 读取的调度承诺。

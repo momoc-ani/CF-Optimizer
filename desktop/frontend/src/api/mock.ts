@@ -63,6 +63,9 @@ const baseStatus = (): SystemStatus => ({
     running,
   },
   schedule: { enabled: true, interval: '6h0m0s', next_scheduled_at: iso(354), trigger: 'interval' },
+  policy_guards: {
+    mihomo: { id: 'mihomo', state: 'verified', online: true, activity: 'active', system_proxy_active: true, tun_active: false, manageable: true, endpoint: 'http://127.0.0.1:9097', config_path: 'C:\\Users\\demo\\AppData\\Roaming\\Clash Verge\\clash-verge.yaml', last_checked_at: iso(-1), last_verified_at: iso(-2), transition: 3, message: 'Mihomo DIRECT、目标地址和物理出口已验证' },
+  },
   physical_path: { interface: 'Ethernet 2', interface_index: 12, source_ipv4: ['192.168.50.24'], source_ipv6: ['2408:8214:1320::24'], gateway_ipv4: '192.168.50.1', gateway_ipv6: 'fe80::1' },
   policy_available: true,
   active_event: activeEvent,

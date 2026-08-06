@@ -169,6 +169,8 @@ https://www.cloudflare.com/ips-v6
 适配目标按代理内核划分，而不是按客户端品牌划分：
 
 - Mihomo/Clash。
+
+规则守护同样按代理内核采用策略接口。客户端品牌只提供控制端、活动配置和系统代理状态探测；例如 FLClash 若继续使用 Mihomo 内核，应复用 Mihomo 规则策略，而不是复制新的规则应用器。守护恢复上一份已验证策略，不启动网段更新、候选生成或测速任务。
 - sing-box。
 - Xray/V2Ray。
 - Surge。

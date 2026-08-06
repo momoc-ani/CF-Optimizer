@@ -12,6 +12,7 @@ import (
 	"github.com/cf-optimizer/cf-optimizer/internal/ipc"
 	cfnetwork "github.com/cf-optimizer/cf-optimizer/internal/network"
 	"github.com/cf-optimizer/cf-optimizer/internal/optimizer"
+	"github.com/cf-optimizer/cf-optimizer/internal/proxy/guard"
 )
 
 const (
@@ -58,11 +59,14 @@ func (s *Service) Run(ctx context.Context) error {
 	go func() { schedulerErrors <- s.schedule(serviceContext) }()
 	discoveryErrors := make(chan error, 1)
 	go func() { discoveryErrors <- s.observeDomains(serviceContext) }()
+	guardErrors := make(chan error, 1)
+	go func() { guardErrors <- s.guardPolicies(serviceContext) }()
 	select {
 	case <-ctx.Done():
 		<-serverErrors
 		<-schedulerErrors
 		<-discoveryErrors
+		<-guardErrors
 		s.logger.Info("后台服务停止", "result", "context_cancelled")
 		return nil
 	case err := <-serverErrors:
@@ -71,6 +75,43 @@ func (s *Service) Run(ctx context.Context) error {
 		return fmt.Errorf("scheduler stopped: %w", err)
 	case err := <-discoveryErrors:
 		return fmt.Errorf("domain discovery stopped: %w", err)
+	case err := <-guardErrors:
+		return fmt.Errorf("policy guard stopped: %w", err)
+	}
+}
+
+// guardPolicies 在运行配置切换时重建内核策略实例，不让旧端点继续写入。
+func (s *Service) guardPolicies(ctx context.Context) error {
+	for {
+		strategies, err := s.runtime.RuleGuardStrategies()
+		if err != nil {
+			return fmt.Errorf("build policy guard strategies: %w", err)
+		}
+		s.api.ResetPolicyGuardStatuses()
+		supervisor, err := guard.NewSupervisor(strategies, s.runtime, s.runtime, s.api, s.logger, guard.DefaultOptions())
+		if err != nil {
+			return err
+		}
+		guardContext, cancel := context.WithCancel(ctx)
+		done := make(chan error, 1)
+		go func() { done <- supervisor.Run(guardContext) }()
+		configChanges := s.runtime.ConfigChanges()
+		select {
+		case <-ctx.Done():
+			cancel()
+			<-done
+			return nil
+		case <-configChanges:
+			cancel()
+			<-done
+			continue
+		case err := <-done:
+			cancel()
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
 	}
 }
 
@@ -167,7 +208,10 @@ func (s *Service) schedule(ctx context.Context) error {
 			currentConfig := s.runtime.View().Config
 			delay := currentConfig.Schedule.Interval.Duration()
 			trigger := "interval"
-			if errors.Is(err, optimizer.ErrAlreadyRunning) {
+			errorCode := scheduledRunErrorCode(err)
+			if errorCode == "cancelled" {
+				failureCount = 0
+			} else if errorCode == "conflict" {
 				delay = minimumRetryDelay
 				trigger = "retry"
 			} else if err != nil {
@@ -237,6 +281,24 @@ func (s *Service) runScheduled(ctx context.Context) error {
 	applyPolicy := s.runtime.View().ProxyCoordinator != nil
 	_, err := s.api.RunOptimization(ctx, optimizer.RunOptions{ApplyPolicy: applyPolicy}, nil)
 	return err
+}
+
+// scheduledRunErrorCode 统一识别内部错误和 IPC 分类错误，避免取消任务被当作失败重试。
+func scheduledRunErrorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	var protocolError *ipc.Error
+	if errors.As(err, &protocolError) {
+		return protocolError.Code
+	}
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	if errors.Is(err, optimizer.ErrAlreadyRunning) {
+		return "conflict"
+	}
+	return ""
 }
 
 func exponentialDelay(failures int, maximum time.Duration) time.Duration {

@@ -43,6 +43,29 @@ app_info_plist="$root_dir/Applications/CF Optimizer.app/Contents/Info.plist"
 /usr/bin/plutil -replace CFBundleVersion -string "$version" "$app_info_plist"
 /usr/bin/plutil -lint "$app_info_plist" >/dev/null
 
+# 禁止 Installer 按 bundle identifier 把桌面应用重定位到历史路径或临时目录。
+component_plist="$work_dir/components.plist"
+cat > "$component_plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+  <dict>
+    <key>BundleHasStrictIdentifier</key>
+    <true/>
+    <key>BundleIsRelocatable</key>
+    <false/>
+    <key>BundleIsVersionChecked</key>
+    <true/>
+    <key>BundleOverwriteAction</key>
+    <string>upgrade</string>
+    <key>RootRelativeBundlePath</key>
+    <string>Applications/CF Optimizer.app</string>
+  </dict>
+</array>
+</plist>
+EOF
+
 if [[ -n "${MACOS_APP_SIGN_IDENTITY:-}" ]]; then
   codesign --force --options runtime --timestamp --sign "$MACOS_APP_SIGN_IDENTITY" \
     "$root_dir/usr/local/bin/cf-optimizer" "$root_dir/usr/local/bin/cf-optimizerd"
@@ -52,11 +75,25 @@ if [[ -n "${MACOS_APP_SIGN_IDENTITY:-}" ]]; then
 fi
 
 package_path="$work_dir/cf-optimizer-${version}-darwin-${arch}.pkg"
-pkgbuild_args=(--root "$root_dir" --scripts "$scripts_dir" --identifier com.cfoptimizer.package --version "$version")
+pkgbuild_args=(
+  --root "$root_dir"
+  --scripts "$scripts_dir"
+  --component-plist "$component_plist"
+  --identifier com.cfoptimizer.package
+  --version "$version"
+)
 if [[ -n "${MACOS_INSTALLER_SIGN_IDENTITY:-}" ]]; then
   pkgbuild_args+=(--sign "$MACOS_INSTALLER_SIGN_IDENTITY")
 fi
 pkgbuild "${pkgbuild_args[@]}" "$package_path"
+
+# 让打包阶段直接拦截会被 macOS Installer 重定位的错误元数据。
+package_verify_dir="$work_dir/pkg-verify"
+pkgutil --expand-full "$package_path" "$package_verify_dir"
+if grep -Fq '<relocate>' "$package_verify_dir/PackageInfo"; then
+  echo "macOS package unexpectedly contains relocatable application metadata" >&2
+  exit 1
+fi
 
 if [[ -n "${MACOS_NOTARY_KEY:-}" && -n "${MACOS_NOTARY_KEY_ID:-}" && -n "${MACOS_NOTARY_ISSUER:-}" ]]; then
   xcrun notarytool submit "$package_path" --wait \

@@ -122,6 +122,27 @@ export interface ScheduleStatus {
   trigger?: 'startup' | 'interval' | 'network_change' | 'retry' | 'running' | 'disabled';
 }
 
+export type PolicyGuardState = 'offline' | 'no_policy' | 'standby' | 'checking' | 'drifted' | 'restoring' | 'verified' | 'retry_wait' | 'failed';
+
+export interface PolicyGuardStatus {
+  id: string;
+  state: PolicyGuardState;
+  online: boolean;
+  activity: 'offline' | 'inactive' | 'active' | 'unknown';
+  system_proxy_active: boolean;
+  tun_active: boolean;
+  manageable: boolean;
+  endpoint?: string;
+  config_path?: string;
+  policy_revision?: string;
+  drift_reasons?: string[];
+  last_checked_at?: string;
+  last_verified_at?: string;
+  retry_at?: string;
+  transition: number;
+  message?: string;
+}
+
 export interface SystemStatus {
   build: BuildMetadata;
   protocol_version: number;
@@ -130,6 +151,7 @@ export interface SystemStatus {
   policy_available: boolean;
   active_event?: OptimizerEvent;
   schedule: ScheduleStatus;
+  policy_guards: Record<string, PolicyGuardStatus>;
 }
 
 export interface BenchmarkResult {
