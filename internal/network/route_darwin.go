@@ -20,7 +20,9 @@ func newPlatformRouteBackend(commandTimeout time.Duration) RouteBackend {
 }
 
 func (b *darwinRouteBackend) Replace(ctx context.Context, route RouteSpec) error {
-	_ = b.Delete(ctx, route)
+	if err := b.Delete(ctx, route); err != nil && !errors.Is(err, ErrRouteNotFound) {
+		return fmt.Errorf("delete existing scoped route: %w", err)
+	}
 	prefix := netip.MustParsePrefix(route.Prefix)
 	family := "-inet6"
 	if prefix.Addr().Is4() {
@@ -35,16 +37,25 @@ func (b *darwinRouteBackend) Replace(ctx context.Context, route RouteSpec) error
 }
 
 func (b *darwinRouteBackend) Delete(ctx context.Context, route RouteSpec) error {
+	_, err := b.run(ctx, "route", darwinRouteDeleteArguments(route)...)
+	if err != nil && (strings.Contains(err.Error(), "not in table") || strings.Contains(err.Error(), "No such process")) {
+		return ErrRouteNotFound
+	}
+	return err
+}
+
+// darwinRouteDeleteArguments 为删除 scoped 路由构造保持接口范围的 route 参数。
+func darwinRouteDeleteArguments(route RouteSpec) []string {
 	prefix := netip.MustParsePrefix(route.Prefix)
 	family := "-inet6"
 	if prefix.Addr().Is4() {
 		family = "-inet"
 	}
-	_, err := b.run(ctx, "route", "-n", "delete", family, "-net", route.Prefix)
-	if err != nil && (strings.Contains(err.Error(), "not in table") || strings.Contains(err.Error(), "No such process")) {
-		return ErrRouteNotFound
+	arguments := []string{"-n", "delete", family, "-net", route.Prefix}
+	if strings.TrimSpace(route.Interface) != "" {
+		arguments = append(arguments, "-ifscope", route.Interface)
 	}
-	return err
+	return arguments
 }
 
 func (b *darwinRouteBackend) Get(ctx context.Context, prefix string) (RouteSpec, error) {
