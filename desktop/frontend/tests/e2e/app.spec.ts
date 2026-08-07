@@ -29,8 +29,8 @@ test('九个核心页面可导航且保持在工作区内', async ({ page }, tes
 
 test('总览展示后台调度时间和真实运行摘要', async ({ page }, testInfo) => {
   await page.goto('/');
-  await expect(page.getByText('下次周期', { exact: true })).toBeVisible();
-  await expect(page.getByText('周期 6h0m0s · 周期执行', { exact: true })).toBeVisible();
+  await expect(page.getByText('下次节点池刷新', { exact: true })).toBeVisible();
+  await expect(page.getByText('节点池刷新周期 6h0m0s · 周期执行', { exact: true })).toBeVisible();
   await expect(page.getByText('约 5 小时 54 分', { exact: true })).toHaveCount(0);
   await expect(page.getByText('已完成 · 27/1000 合格', { exact: true })).toBeVisible();
   await expect(page.getByText('当前生效节点', { exact: true })).toBeVisible();
