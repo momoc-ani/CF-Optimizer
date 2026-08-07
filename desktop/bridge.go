@@ -27,6 +27,8 @@ var allowedMethods = map[string]struct{}{
 	"routes.list":                   {},
 	"proxy.detect":                  {},
 	"acceleration.domains":          {},
+	"acceleration.domain_test":      {},
+	"acceleration.domain_apply":     {},
 	"acceleration.discover":         {},
 	"acceleration.clear_discovered": {},
 	"diagnostics.route":             {},

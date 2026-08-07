@@ -24,6 +24,17 @@ func TestNewBridgeRequiresEndpoint(t *testing.T) {
 	}
 }
 
+func TestBridgeAllowsAccelerationDomainMethods(t *testing.T) {
+	for _, method := range []string{
+		"acceleration.domain_test",
+		"acceleration.domain_apply",
+	} {
+		if _, allowed := allowedMethods[method]; !allowed {
+			t.Errorf("%s should be available to the desktop UI", method)
+		}
+	}
+}
+
 func TestBridgeAllowsLatestBenchmarkRead(t *testing.T) {
 	if _, allowed := allowedMethods["history.latest"]; !allowed {
 		t.Fatal("history.latest should be available to the desktop UI")
