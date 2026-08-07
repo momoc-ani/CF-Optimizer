@@ -17,6 +17,7 @@ import { joinConfigLines, parseDomainLines } from '../lib/configCollections';
 import { describeConfigUpdateResult, type ConfigUpdateResult } from '../lib/configUpdate';
 import { findVerifiedDomainRoute, isDomainAccelerated } from '../lib/domainAcceleration';
 import { formatDate } from '../lib/format';
+import { canApplyManualDomain } from '../lib/policyAvailability';
 
 const durationPattern = /^\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h)$/;
 const accelerationSettingsSchema = z.object({
@@ -134,6 +135,9 @@ export function AccelerationPage() {
   const accelerationConfig = config.data?.acceleration;
   const isAutomatic = Boolean(accelerationConfig?.enabled && accelerationConfig.auto_discover && accelerationConfig.auto_apply);
   const discoveredCount = domains.data?.discovered ?? 0;
+  const policyAvailable = Boolean(status.data?.policy_available);
+  const policyVerified = Boolean(status.data?.state.current_ipv4?.policy_verified || status.data?.state.current_ipv6?.policy_verified);
+  const manualDomainApplyReady = canApplyManualDomain(policyAvailable, policyVerified);
 
   const columns = useMemo<ColumnDef<DomainRow>[]>(() => [
     { accessorKey: 'domain', header: '域名', size: 220, cell: ({ getValue }) => <Text ff="monospace" size="sm" fw={650}>{String(getValue())}</Text> },
@@ -320,7 +324,9 @@ export function AccelerationPage() {
                 ) : selected.download_tested_at ? (
                   <Text size="sm" c="dimmed">上次测速：{selected.download_mbps?.toFixed(2) ?? '—'} Mbps · {formatDate(selected.download_tested_at)}</Text>
                 ) : <Text size="sm" c="dimmed">测速完成后才可选择应用此映射。</Text>}
-                <Button color="green" leftSection={<ShieldCheck size={16} />} loading={applyDomain.isPending} disabled={!domainTestResult || domainTestResult.address !== mappingDraft.trim() || !domainTestResult.download_verified} onClick={() => applyDomain.mutate({ domain: selected.domain, address: mappingDraft.trim() })}>应用此映射</Button>
+                {!policyAvailable && <Alert color="yellow" icon={<ShieldAlert size={17} />} title="当前没有活动策略适配器">请先在“测速优选”中完成一次确认并应用策略，再应用手动域名映射。</Alert>}
+                {policyAvailable && !policyVerified && <Alert color="yellow" icon={<ShieldAlert size={17} />} title="当前没有已验证策略">手动域名映射只能追加到已有的已验证策略，请先完成一次“应用并验证策略”的优选。</Alert>}
+                <Button color="green" leftSection={<ShieldCheck size={16} />} loading={applyDomain.isPending} disabled={!manualDomainApplyReady || !domainTestResult || domainTestResult.address !== mappingDraft.trim() || !domainTestResult.download_verified} onClick={() => applyDomain.mutate({ domain: selected.domain, address: mappingDraft.trim() })}>应用此映射</Button>
               </Stack>
             ) : (
               <Alert color="blue" title="自动发现域名只读">

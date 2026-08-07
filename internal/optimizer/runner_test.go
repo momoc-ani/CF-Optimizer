@@ -521,6 +521,21 @@ func TestTestManualDomainRollsBackTemporaryRoute(t *testing.T) {
 	}
 }
 
+func TestApplyManualDomainMappingRejectsMissingAdapter(t *testing.T) {
+	runner, stateStore := newTestRunner(t, nil)
+	if err := stateStore.Update(func(state *store.State) error {
+		state.Policy = &store.PolicySnapshot{Receipts: json.RawMessage(`{"receipts":[]}`)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	refreshed, err := runner.ApplyManualDomainMapping(context.Background(), "manual.example", "1.1.1.2", map[string]string{"manual.example": "1.1.1.2"})
+	if err == nil || !strings.Contains(err.Error(), "no adapter is configured") {
+		t.Fatalf("missing adapter was not rejected: refreshed=%v err=%v", refreshed, err)
+	}
+}
+
 func TestApplyManualDomainMappingRefreshesVerifiedPolicy(t *testing.T) {
 	policyApplier := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
 	runner, stateStore := newTestRunner(t, policyApplier)
