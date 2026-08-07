@@ -626,6 +626,24 @@ func TestRunReusesFreshNodePoolWithoutRepeatingBenchmark(t *testing.T) {
 	}
 }
 
+func TestRunForceRangeRefreshRebuildsFreshNodePool(t *testing.T) {
+	runner, _ := newTestRunner(t, nil)
+	benchmarkCounter := &countingBenchmark{}
+	runner.benchmark = benchmarkCounter
+
+	first, err := runner.Run(context.Background(), RunOptions{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := runner.Run(context.Background(), RunOptions{ForceRangeRefresh: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.NodePoolState != "refreshed" || second.NodePoolID == first.NodePoolID || benchmarkCounter.calls != 2 {
+		t.Fatalf("forced refresh reused the fresh node pool: first=%#v second=%#v calls=%d", first, second, benchmarkCounter.calls)
+	}
+}
+
 func TestRunUsesStaleNodePoolWhenRefreshFails(t *testing.T) {
 	runner, stateStore := newTestRunner(t, nil)
 	benchmarkCounter := &countingBenchmark{}

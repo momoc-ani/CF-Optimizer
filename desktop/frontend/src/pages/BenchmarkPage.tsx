@@ -2,7 +2,7 @@ import { ActionIcon, Alert, Button, Checkbox, Group, SegmentedControl, SimpleGri
 import { useMemo, useState } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
 import ReactECharts from 'echarts-for-react';
-import { Filter, Play, RotateCcw, Square } from 'lucide-react';
+import { Filter, Play, RefreshCw, RotateCcw, Square } from 'lucide-react';
 import type { BenchmarkResult } from '../api/types';
 import { useConfig, useLatestBenchmark, useStatus } from '../api/hooks';
 import { selectBenchmarkSnapshot, selectTopBenchmarkResults } from '../lib/benchmarkSnapshot';
@@ -22,7 +22,6 @@ export function BenchmarkPage() {
   const filter = useUIStore((state) => state.benchmarkFilter);
   const setFilter = useUIStore((state) => state.setBenchmarkFilter);
   const [family, setFamily] = useState('all');
-  const [forceRefresh, setForceRefresh] = useState(false);
   const [policyRequested, setPolicyRequested] = useState(true);
   const policyAvailable = Boolean(status.data?.policy_available);
   const applyPolicy = shouldApplyPolicy(policyAvailable, policyRequested);
@@ -57,14 +56,14 @@ export function BenchmarkPage() {
   const verifiedPolicy = Boolean((reportMatchesSnapshot && run.report?.policy_applied) || currentPolicyVerified);
   return (
     <Stack gap="lg">
-      <PageHeader title="测速优选" description="两阶段候选测速、稳定选择与策略应用" actions={<Group gap="xs"><Button leftSection={<Play size={16} />} disabled={run.running} onClick={() => run.run({ force_range_refresh: forceRefresh, apply_policy: applyPolicy })}>开始优选</Button><Tooltip label="取消当前任务"><ActionIcon color="red" aria-label="取消当前任务" disabled={!run.running} loading={run.cancelling} onClick={run.cancel}><Square size={15} fill="currentColor" /></ActionIcon></Tooltip></Group>} />
+      <PageHeader title="测速优选" description="两阶段候选测速、稳定选择与策略应用" actions={<Group gap="xs"><Button leftSection={<Play size={16} />} disabled={run.running} onClick={() => run.run({ force_range_refresh: false, apply_policy: applyPolicy })}>开始优选</Button><Button variant="light" leftSection={<RefreshCw size={16} />} disabled={run.running} onClick={() => run.run({ force_range_refresh: true, apply_policy: applyPolicy })}>强制刷新节点池</Button><Tooltip label="取消当前任务"><ActionIcon color="red" aria-label="取消当前任务" disabled={!run.running} loading={run.cancelling} onClick={run.cancel}><Square size={15} fill="currentColor" /></ActionIcon></Tooltip></Group>} />
       <Section className="toolbar-section">
         <Group justify="space-between" align="flex-end">
           <Group align="flex-end">
             <TextInput label="筛选候选" leftSection={<Filter size={15} />} placeholder="IP 地址" value={filter} onChange={(event) => setFilter(event.currentTarget.value)} />
             <div><Text size="xs" fw={500} mb={5}>显示协议</Text><SegmentedControl value={family} onChange={setFamily} data={[{ label: '双栈', value: 'all' }, { label: 'IPv4', value: '4' }, { label: 'IPv6', value: '6' }]} /></div>
           </Group>
-          <Group><Checkbox label="强制刷新网段" checked={forceRefresh} onChange={(event) => setForceRefresh(event.currentTarget.checked)} /><Checkbox label="应用并验证策略" checked={applyPolicy} disabled={!policyAvailable} onChange={(event) => setPolicyRequested(event.currentTarget.checked)} /></Group>
+          <Checkbox label="应用并验证策略" checked={applyPolicy} disabled={!policyAvailable} onChange={(event) => setPolicyRequested(event.currentTarget.checked)} />
         </Group>
       </Section>
       {run.error && <Alert color={run.error.message.includes('cancelled') ? 'gray' : 'red'} title={run.error.message.includes('cancelled') ? '任务已取消' : '任务失败'}>{run.error.message}</Alert>}
