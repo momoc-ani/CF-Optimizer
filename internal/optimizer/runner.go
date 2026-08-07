@@ -120,6 +120,12 @@ type domainAllocationCandidate struct {
 	source string
 }
 
+// domainAllocationOptions 区分完整优选的排名池与维护流程必须保留的显式映射。
+type domainAllocationOptions struct {
+	manualMappingOverrides map[string]string
+	excludedAddresses      map[string]map[string]struct{}
+}
+
 // RunReport 汇总候选结果、地址族决策、策略状态和可恢复警告。
 type RunReport struct {
 	ID                        string                        `json:"id"`
@@ -229,7 +235,7 @@ func (r *Runner) ApplyManualDomainMapping(ctx context.Context, domain, rawAddres
 	if r.store.Snapshot().Policy == nil {
 		return false, errors.New("cannot apply manual domain mapping before a verified policy exists")
 	}
-	if err := r.refreshPolicyLocked(ctx); err != nil {
+	if err := r.refreshPolicyWithManualMappingsLocked(ctx, nextMappings, nil); err != nil {
 		r.config.Acceleration.ManualMappings = previousMappings
 		return false, fmt.Errorf("refresh policy after manual domain mapping: %w", err)
 	}
@@ -483,7 +489,9 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 	retryPolicy:
 		for {
 			var allocationWarnings []string
-			report.domainMappings, report.DomainAllocations, allocationWarnings, err = r.allocateDomainMappings(ctx, rangeResult.Snapshot, report.Results, r.store.Snapshot(), failedDomainAddresses)
+			report.domainMappings, report.DomainAllocations, allocationWarnings, err = r.allocateDomainMappings(ctx, rangeResult.Snapshot, report.Results, r.store.Snapshot(), domainAllocationOptions{
+				excludedAddresses: failedDomainAddresses,
+			})
 			if err != nil {
 				return report, fmt.Errorf("allocate accelerated domains: %w", err)
 			}
@@ -808,6 +816,11 @@ func (r *Runner) refreshPolicyLocked(ctx context.Context) error {
 
 // refreshPolicyWithStateMutationLocked 先用变更后的状态验证策略，再把策略和状态变更原子提交。
 func (r *Runner) refreshPolicyWithStateMutationLocked(ctx context.Context, mutateState func(*store.State)) error {
+	return r.refreshPolicyWithManualMappingsLocked(ctx, nil, mutateState)
+}
+
+// refreshPolicyWithManualMappingsLocked 在维护流程中保留当前已应用映射，或使用调用方确认的显式映射。
+func (r *Runner) refreshPolicyWithManualMappingsLocked(ctx context.Context, manualMappingOverrides map[string]string, mutateState func(*store.State)) error {
 	if r.policy == nil {
 		return errors.New("policy refresh requested but no adapter is configured")
 	}
@@ -826,7 +839,14 @@ retryRefresh:
 			mutateState(&planned)
 		}
 		ranked := rankedHistoricalResults(planned, r.now())
-		mappings, allocations, allocationWarnings, allocationErr := r.allocateDomainMappings(ctx, rangeResult.Snapshot, ranked, planned, failedDomainAddresses)
+		allocationOverrides := manualMappingOverrides
+		if allocationOverrides == nil {
+			allocationOverrides = currentManualMappingOverrides(r.config, planned.Policy)
+		}
+		mappings, allocations, allocationWarnings, allocationErr := r.allocateDomainMappings(ctx, rangeResult.Snapshot, ranked, planned, domainAllocationOptions{
+			manualMappingOverrides: allocationOverrides,
+			excludedAddresses:      failedDomainAddresses,
+		})
 		if allocationErr != nil {
 			return fmt.Errorf("allocate accelerated domains during policy refresh: %w", allocationErr)
 		}
@@ -1328,7 +1348,7 @@ func (r *Runner) verifyCloudflareDomain(ctx context.Context, snapshot ranges.Sna
 }
 
 // allocateDomainMappings 先为手动域名执行目标资源下载复测，再让自动发现域名消费剩余兼容地址。
-func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Snapshot, results []benchmark.Result, state store.State, excludedAddresses ...map[string]map[string]struct{}) ([]proxy.DomainMapping, []DomainAllocationResult, []string, error) {
+func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Snapshot, results []benchmark.Result, state store.State, options domainAllocationOptions) ([]proxy.DomainMapping, []DomainAllocationResult, []string, error) {
 	if !r.config.Acceleration.Enabled {
 		return nil, nil, nil, nil
 	}
@@ -1383,8 +1403,8 @@ func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Sna
 			continue
 		}
 		excludedForDomain := map[string]struct{}{}
-		if len(excludedAddresses) > 0 && excludedAddresses[0] != nil {
-			excludedForDomain = excludedAddresses[0][candidate.domain]
+		if options.excludedAddresses != nil {
+			excludedForDomain = options.excludedAddresses[candidate.domain]
 		}
 		resolvedAddresses, err := r.verifyCloudflareDomain(ctx, snapshot, candidate.domain)
 		if err != nil {
@@ -1399,7 +1419,7 @@ func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Sna
 		candidatePool := candidates
 		explicitAddress, hasExplicitAddress := "", false
 		if candidate.source == "manual" {
-			explicitAddress, hasExplicitAddress = r.config.Acceleration.ManualMappings[normalizeDomainForMapping(candidate.domain)]
+			explicitAddress, hasExplicitAddress = options.manualMappingOverrides[normalizeDomainForMapping(candidate.domain)]
 			if hasExplicitAddress {
 				explicitAddress = strings.TrimSpace(explicitAddress)
 				parsedAddress, parseErr := netip.ParseAddr(explicitAddress)
@@ -1491,6 +1511,26 @@ func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Sna
 		allocations = append(allocations, allocation)
 	}
 	return mappings, allocations, domainAllocationWarnings(allocations), nil
+}
+
+// currentManualMappingOverrides 从最后一份已验证策略提取手动域名映射，供后台维护原样复用。
+func currentManualMappingOverrides(cfg config.Config, policy *store.PolicySnapshot) map[string]string {
+	if policy == nil {
+		return map[string]string{}
+	}
+	manualDomains := make(map[string]struct{}, len(cfg.AccelerationDomains()))
+	for _, domain := range cfg.AccelerationDomains() {
+		manualDomains[normalizeDomainForMapping(domain)] = struct{}{}
+	}
+	overrides := make(map[string]string, len(manualDomains))
+	for _, mapping := range policy.DomainMappings {
+		domain := normalizeDomainForMapping(mapping.Domain)
+		if _, manual := manualDomains[domain]; !manual || len(mapping.Addresses) != 1 {
+			continue
+		}
+		overrides[domain] = strings.TrimSpace(mapping.Addresses[0])
+	}
+	return overrides
 }
 
 // applyDomainProbeRoute 为单个手动域名候选建立可回滚的物理主机路由。

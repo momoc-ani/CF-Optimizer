@@ -379,7 +379,91 @@ func (a *API) runOptimizer(ctx context.Context, raw json.RawMessage, emit func(a
 
 // RunOptimization 统一管理 IPC 与调度器发起任务的取消句柄。
 func (a *API) RunOptimization(ctx context.Context, parameters optimizer.RunOptions, emit func(optimizer.Event) error) (optimizer.RunReport, error) {
-	return a.runWithRunner(ctx, a.runtime.View().Runner, parameters, emit)
+	if parameters.ApplyPolicy {
+		if !a.configurationMutex.TryLock() {
+			return optimizer.RunReport{}, &ipc.Error{Code: "conflict", Message: "configuration update or policy application is already active"}
+		}
+		defer a.configurationMutex.Unlock()
+	}
+	report, err := a.runWithRunner(ctx, a.runtime.View().Runner, parameters, emit)
+	if err != nil || !parameters.ApplyPolicy || !report.PolicyApplied {
+		return report, err
+	}
+	if _, persistErr := a.persistVerifiedManualMappings(report); persistErr != nil {
+		warning := "策略已验证，但手动域名映射配置未更新：" + persistErr.Error()
+		report.Warnings = append(report.Warnings, warning)
+		if a.runtime.Logger != nil {
+			a.runtime.Logger.Warn("优选后的手动域名映射配置保存失败", "component", "config", "run_id", report.ID, "result", "partial", "error", persistErr)
+		}
+	}
+	return report, nil
+}
+
+// persistVerifiedManualMappings 只在完整策略和域名证据均已验证后原子保存新映射。
+func (a *API) persistVerifiedManualMappings(report optimizer.RunReport) (bool, error) {
+	view := a.runtime.View()
+	mappings, ready := verifiedManualMappings(view.Config, report)
+	if !ready || manualMappingsEqual(view.Config.Acceleration.ManualMappings, mappings) {
+		return false, nil
+	}
+	if strings.TrimSpace(a.runtime.ConfigPath) == "" {
+		return false, errors.New("configuration path is unavailable")
+	}
+	nextConfig := view.Config
+	nextConfig.Acceleration.ManualMappings = cloneManualMappingConfig(mappings)
+	nextConfig.ApplyDefaults()
+	if err := nextConfig.Validate(); err != nil {
+		return false, fmt.Errorf("validate verified manual mappings: %w", err)
+	}
+	if err := a.saveConfig(a.runtime.ConfigPath, nextConfig); err != nil {
+		return false, fmt.Errorf("persist verified manual mappings: %w", err)
+	}
+	a.runtime.setVerifiedManualMappings(mappings)
+	return true, nil
+}
+
+// verifiedManualMappings 从成功报告提取通过当前配置全部校验条件的手动映射。
+func verifiedManualMappings(cfg config.Config, report optimizer.RunReport) (map[string]string, bool) {
+	if !cfg.Acceleration.Enabled || !report.PolicyApplied {
+		return nil, false
+	}
+	expected := make(map[string]struct{}, len(cfg.Acceleration.ManualDomains))
+	for _, rawDomain := range cfg.Acceleration.ManualDomains {
+		expected[normalizeManualDomain(rawDomain)] = struct{}{}
+	}
+	mappings := make(map[string]string, len(expected))
+	for _, allocation := range report.DomainAllocations {
+		domain := normalizeManualDomain(allocation.Domain)
+		if allocation.Source != "manual" {
+			continue
+		}
+		if _, configured := expected[domain]; !configured {
+			continue
+		}
+		if allocation.AssignedAddress == "" || !allocation.CloudflareVerified || !allocation.PreflightVerified {
+			return nil, false
+		}
+		if cfg.Acceleration.ManualDownloadTest && (!allocation.DownloadVerified || allocation.DownloadMbps < cfg.Acceleration.ManualDownloadMinMbps) {
+			return nil, false
+		}
+		mappings[domain] = strings.TrimSpace(allocation.AssignedAddress)
+	}
+	if len(mappings) != len(expected) {
+		return nil, false
+	}
+	return mappings, true
+}
+
+func manualMappingsEqual(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for domain, address := range left {
+		if strings.TrimSpace(right[normalizeManualDomain(domain)]) != strings.TrimSpace(address) {
+			return false
+		}
+	}
+	return true
 }
 
 // runWithRunner 让普通任务和快速流程共享同一个可取消单任务边界。

@@ -291,6 +291,64 @@ func TestQuickStartPersistenceActivatesManagedSession(t *testing.T) {
 	}
 }
 
+func TestQuickStartPersistsVerifiedManualMappingForBothApplyModes(t *testing.T) {
+	for _, mode := range []string{quickStartApplyOnce, quickStartApplyAndRemember} {
+		t.Run(mode, func(t *testing.T) {
+			api, runtimeState, _ := newQuickStartTestAPI(t, false)
+			runtimeState.mutex.Lock()
+			runtimeState.Config.Acceleration.ManualDomains = []string{"manual.example"}
+			runtimeState.Config.Acceleration.ManualMappings = map[string]string{"manual.example": "1.1.1.3"}
+			runtimeState.Config.IPC.Endpoint = config.DefaultEndpoint(runtimeState.Config.DataDir)
+			initialConfig := runtimeState.Config
+			runtimeState.mutex.Unlock()
+			runtimeState.ConfigPath = filepath.Join(t.TempDir(), "config.yaml")
+			if err := config.Save(runtimeState.ConfigPath, initialConfig); err != nil {
+				t.Fatal(err)
+			}
+			buildSession := api.buildManagedSession
+			api.buildManagedSession = func(path cfnetwork.PhysicalPath, detections map[string]proxy.Detection) (RuntimeSession, error) {
+				session, err := buildSession(path, detections)
+				if err != nil {
+					return RuntimeSession{}, err
+				}
+				session.Runner.SetDomainResolver(manualMappingResolver{})
+				session.Runner.SetDomainMappingVerifier(manualMappingVerifier{})
+				session.Runner.SetDomainDownloadTester(manualMappingDownloadTester{})
+				return session, nil
+			}
+
+			plan, err := api.planQuickStart(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, runErr := runQuickStartRequest(t, api, plan.PlanID, mode)
+			if runErr != nil {
+				t.Fatal(runErr)
+			}
+			if result.Status != "verified" || len(result.Report.DomainAllocations) != 1 {
+				t.Fatalf("quick-start did not verify the manual mapping: %#v", result)
+			}
+			assigned := result.Report.DomainAllocations[0].AssignedAddress
+			if assigned == "" || assigned == "1.1.1.3" {
+				t.Fatalf("quick-start retained the saved mapping instead of using the ranked pool: %#v", result.Report.DomainAllocations)
+			}
+			persisted, loadErr := config.Load(runtimeState.ConfigPath, "")
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if persisted.Acceleration.ManualMappings["manual.example"] != assigned || runtimeState.View().Config.Acceleration.ManualMappings["manual.example"] != assigned {
+				t.Fatalf("quick-start mapping was not synchronized: assigned=%q persisted=%#v runtime=%#v", assigned, persisted.Acceleration.ManualMappings, runtimeState.View().Config.Acceleration.ManualMappings)
+			}
+			if mode == quickStartApplyOnce && (result.AutoMaintenanceEnabled || runtimeState.View().Config.Network.ManageRoutes) {
+				t.Fatalf("apply_once unexpectedly enabled automatic maintenance: %#v", result)
+			}
+			if mode == quickStartApplyAndRemember && (!result.AutoMaintenanceEnabled || !runtimeState.View().Config.Network.ManageRoutes) {
+				t.Fatalf("apply_and_remember did not enable automatic maintenance: %#v", result)
+			}
+		})
+	}
+}
+
 func newQuickStartTestAPI(t *testing.T, resolveFail bool) (*API, *Runtime, *quickStartRouteBackend) {
 	t.Helper()
 	dataDir := t.TempDir()

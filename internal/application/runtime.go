@@ -204,6 +204,14 @@ func (r *Runtime) View() RuntimeView {
 	}
 }
 
+// setVerifiedManualMappings 发布优选后已持久化的手动映射，不切换其它运行依赖。
+func (r *Runtime) setVerifiedManualMappings(mappings map[string]string) {
+	r.mutex.Lock()
+	r.Config.Acceleration.ManualMappings = cloneManualMappingConfig(mappings)
+	r.notifyConfigChangedLocked()
+	r.mutex.Unlock()
+}
+
 // CurrentDesiredPolicy 返回规则守护可原样恢复的最后一份已验证策略。
 func (r *Runtime) CurrentDesiredPolicy(ctx context.Context) (guard.DesiredPolicy, bool, error) {
 	if err := ctx.Err(); err != nil {

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cf-optimizer/cf-optimizer/internal/acceleration"
 	"github.com/cf-optimizer/cf-optimizer/internal/benchmark"
 	"github.com/cf-optimizer/cf-optimizer/internal/config"
 	"github.com/cf-optimizer/cf-optimizer/internal/ipc"
@@ -34,6 +35,155 @@ type configUpdateBenchmark struct{}
 
 func (configUpdateBenchmark) Run(context.Context, []netip.Addr, func(benchmark.Progress)) ([]benchmark.Result, error) {
 	return nil, nil
+}
+
+type manualMappingBenchmark struct{}
+
+func (manualMappingBenchmark) Run(context.Context, []netip.Addr, func(benchmark.Progress)) ([]benchmark.Result, error) {
+	return []benchmark.Result{
+		{IP: netip.MustParseAddr("1.1.1.1"), Family: 4, Attempts: 2, Successes: 2, TCPQualified: true, TLSVerified: true, Qualified: true, Score: 99},
+		{IP: netip.MustParseAddr("1.1.1.2"), Family: 4, Attempts: 2, Successes: 2, TCPQualified: true, TLSVerified: true, Qualified: true, Score: 98},
+	}, nil
+}
+
+type manualMappingPolicy struct {
+	fail     bool
+	policies []proxy.DirectPolicy
+}
+
+func (*manualMappingPolicy) Capabilities() proxy.Capabilities {
+	return proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}
+}
+
+func (p *manualMappingPolicy) Apply(_ context.Context, policy proxy.DirectPolicy) (proxy.ApplyResult, error) {
+	if p.fail {
+		return proxy.ApplyResult{}, errors.New("forced policy application failure")
+	}
+	p.policies = append(p.policies, policy)
+	return proxy.ApplyResult{Receipts: []proxy.Receipt{{ID: "manual-mapping-test", Adapter: "test", Changed: true}}}, nil
+}
+
+func (*manualMappingPolicy) Rollback(context.Context, proxy.ApplyResult) error { return nil }
+
+type manualMappingResolver struct{}
+
+func (manualMappingResolver) Resolve(context.Context, string) ([]netip.Addr, error) {
+	return []netip.Addr{netip.MustParseAddr("1.1.1.1")}, nil
+}
+
+type manualMappingVerifier struct{}
+
+func (manualMappingVerifier) VerifyPreflight(context.Context, []proxy.DomainMapping) error {
+	return nil
+}
+func (manualMappingVerifier) VerifyApplied(context.Context, []proxy.DomainMapping) error { return nil }
+
+type manualMappingDownloadTester struct{}
+
+func (manualMappingDownloadTester) DiscoverProbeURL(context.Context, string, string) (string, error) {
+	return "https://manual.example/probe.bin", nil
+}
+
+func (manualMappingDownloadTester) Measure(context.Context, string, string, string) (acceleration.DownloadResult, error) {
+	return acceleration.DownloadResult{ProbeURL: "https://manual.example/probe.bin", Downloaded: 1 << 20, Duration: time.Second, Mbps: 40}, nil
+}
+
+func TestRunOptimizationUpdatesManualMappingOnlyAfterVerifiedApplication(t *testing.T) {
+	t.Run("verified application", func(t *testing.T) {
+		api, runtimeState, policy := newManualMappingRunAPI(t, false)
+		report, err := api.RunOptimization(context.Background(), optimizer.RunOptions{ApplyPolicy: true}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !report.PolicyApplied || len(report.DomainAllocations) != 1 || report.DomainAllocations[0].AssignedAddress != "1.1.1.1" {
+			t.Fatalf("verified optimization did not select the ranked mapping: %#v", report)
+		}
+		if len(policy.policies) != 1 || runtimeState.View().Config.Acceleration.ManualMappings["manual.example"] != "1.1.1.1" {
+			t.Fatalf("verified mapping was not published to runtime config: policies=%#v config=%#v", policy.policies, runtimeState.View().Config.Acceleration.ManualMappings)
+		}
+		persisted, loadErr := config.Load(runtimeState.ConfigPath, "")
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if persisted.Acceleration.ManualMappings["manual.example"] != "1.1.1.1" {
+			t.Fatalf("verified mapping was not persisted: %#v", persisted.Acceleration.ManualMappings)
+		}
+	})
+
+	t.Run("benchmark only", func(t *testing.T) {
+		api, runtimeState, _ := newManualMappingRunAPI(t, false)
+		if _, err := api.RunOptimization(context.Background(), optimizer.RunOptions{ApplyPolicy: false}, nil); err != nil {
+			t.Fatal(err)
+		}
+		assertSavedManualMapping(t, runtimeState, "1.1.1.3")
+	})
+
+	t.Run("application failure", func(t *testing.T) {
+		api, runtimeState, _ := newManualMappingRunAPI(t, true)
+		if _, err := api.RunOptimization(context.Background(), optimizer.RunOptions{ApplyPolicy: true}, nil); err == nil {
+			t.Fatal("policy application failure was not returned")
+		}
+		assertSavedManualMapping(t, runtimeState, "1.1.1.3")
+	})
+}
+
+func newManualMappingRunAPI(t *testing.T, failPolicy bool) (*API, *Runtime, *manualMappingPolicy) {
+	t.Helper()
+	dataDir := t.TempDir()
+	cfg := config.Default()
+	cfg.DataDir = dataDir
+	cfg.Benchmark.IPv4 = true
+	cfg.Benchmark.IPv6 = false
+	cfg.Benchmark.Candidates = 2
+	cfg.Benchmark.DownloadTop = 2
+	cfg.Acceleration.ManualDomains = []string{"manual.example"}
+	cfg.Acceleration.ManualMappings = map[string]string{"manual.example": "1.1.1.3"}
+	configPath := filepath.Join(dataDir, "config.yaml")
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err := store.Open(dataDir, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := &manualMappingPolicy{fail: failPolicy}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	runner, err := optimizer.NewRunner(
+		cfg,
+		configUpdateRanges{},
+		manualMappingBenchmark{},
+		stateStore,
+		nil,
+		cfnetwork.PhysicalPath{},
+		policy,
+		logger,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.SetDomainResolver(manualMappingResolver{})
+	runner.SetDomainMappingVerifier(manualMappingVerifier{})
+	runner.SetDomainDownloadTester(manualMappingDownloadTester{})
+	runtimeState := &Runtime{Config: cfg, ConfigPath: configPath, Store: stateStore, Runner: runner, Logger: logger}
+	api, err := NewAPI(runtimeState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return api, runtimeState, policy
+}
+
+func assertSavedManualMapping(t *testing.T, runtimeState *Runtime, expected string) {
+	t.Helper()
+	if actual := runtimeState.View().Config.Acceleration.ManualMappings["manual.example"]; actual != expected {
+		t.Fatalf("runtime manual mapping changed: got %q want %q", actual, expected)
+	}
+	persisted, err := config.Load(runtimeState.ConfigPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual := persisted.Acceleration.ManualMappings["manual.example"]; actual != expected {
+		t.Fatalf("persisted manual mapping changed: got %q want %q", actual, expected)
+	}
 }
 
 func TestDecodeStrictRejectsUnknownFieldAndTrailingValue(t *testing.T) {

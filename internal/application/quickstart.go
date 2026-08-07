@@ -214,6 +214,10 @@ func (a *API) runQuickStart(ctx context.Context, raw json.RawMessage, emit func(
 		result.Status = "partial"
 		result.Error = "以下手动域名未生效：" + strings.Join(failedManualDomains, "；")
 	}
+	verifiedMappings, mappingsReady := verifiedManualMappings(session.Config, report)
+	if mappingsReady {
+		session.Config.Acceleration.ManualMappings = cloneManualMappingConfig(verifiedMappings)
+	}
 	if parameters.Mode == quickStartApplyAndRemember {
 		if a.runtime.ConfigPath == "" {
 			result.Status = "partial"
@@ -224,6 +228,11 @@ func (a *API) runQuickStart(ctx context.Context, raw json.RawMessage, emit func(
 		} else {
 			a.runtime.ActivateSession(session)
 			result.AutoMaintenanceEnabled = true
+		}
+	} else if mappingsReady {
+		if _, persistErr := a.persistVerifiedManualMappings(report); persistErr != nil {
+			result.Status = "partial"
+			result.PersistenceWarning = "本次策略已验证，但手动域名映射保存失败：" + persistErr.Error()
 		}
 	}
 	a.runtime.Logger.Info("快速流程执行结束", "component", "quickstart", "run_id", report.ID, "interface", path.Interface, "result", result.Status, "auto_maintenance", result.AutoMaintenanceEnabled)

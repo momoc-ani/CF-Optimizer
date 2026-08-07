@@ -435,7 +435,7 @@ func TestAllocateDomainMappingsUsesManualConfigurationAndRankingOrder(t *testing
 		{IP: netip.MustParseAddr("1.1.1.3"), Qualified: true, TLSVerified: true, Score: 97},
 	}
 
-	mappings, allocations, warnings, err := runner.allocateDomainMappings(context.Background(), snapshot, results, store.State{})
+	mappings, allocations, warnings, err := runner.allocateDomainMappings(context.Background(), snapshot, results, store.State{}, domainAllocationOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,7 +453,7 @@ func TestAllocateDomainMappingsUsesManualConfigurationAndRankingOrder(t *testing
 	}
 }
 
-func TestAllocateDomainMappingsUsesExplicitManualMappingWithoutRankedFallback(t *testing.T) {
+func TestAllocateDomainMappingsUsesConfirmedManualMappingWithoutRankedFallback(t *testing.T) {
 	policyApplier := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
 	runner, _ := newTestRunner(t, policyApplier)
 	runner.config.Acceleration.ManualDomains = []string{"manual.example"}
@@ -462,12 +462,37 @@ func TestAllocateDomainMappingsUsesExplicitManualMappingWithoutRankedFallback(t 
 	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
 	results := []benchmark.Result{{IP: netip.MustParseAddr("1.1.1.1"), Qualified: true, Score: 99}}
 
-	mappings, allocations, warnings, err := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/30"}}, results, store.State{})
+	mappings, allocations, warnings, err := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/30"}}, results, store.State{}, domainAllocationOptions{
+		manualMappingOverrides: map[string]string{"manual.example": "1.1.1.3"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(warnings) != 0 || len(mappings) != 1 || len(allocations) != 1 || allocations[0].AssignedAddress != "1.1.1.3" {
 		t.Fatalf("explicit mapping did not bypass ranked pool: mappings=%#v allocations=%#v warnings=%#v", mappings, allocations, warnings)
+	}
+}
+
+func TestAllocateDomainMappingsIgnoresSavedMappingDuringConfirmedOptimization(t *testing.T) {
+	policyApplier := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
+	runner, _ := newTestRunner(t, policyApplier)
+	runner.config.Acceleration.ManualDomains = []string{"manual.example"}
+	runner.config.Acceleration.ManualMappings = map[string]string{"manual.example": "1.1.1.3"}
+	runner.domainResolver = staticDomainResolver{addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	results := []benchmark.Result{
+		{IP: netip.MustParseAddr("1.1.1.1"), Qualified: true, Score: 99},
+		{IP: netip.MustParseAddr("1.1.1.2"), Qualified: true, Score: 98},
+	}
+
+	mappings, allocations, warnings, err := runner.allocateDomainMappings(
+		context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/30"}}, results, store.State{}, domainAllocationOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(mappings) != 1 || len(allocations) != 1 || allocations[0].AssignedAddress != "1.1.1.1" {
+		t.Fatalf("saved mapping locked the confirmed optimization pool: mappings=%#v allocations=%#v warnings=%#v", mappings, allocations, warnings)
 	}
 }
 
@@ -534,7 +559,7 @@ func TestAllocateDomainMappingsUsesFirstCandidateMeetingManualDownloadThreshold(
 		{IP: netip.MustParseAddr("1.1.1.3"), Qualified: true, Score: 97},
 	}
 
-	mappings, allocations, warnings, err := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, store.State{})
+	mappings, allocations, warnings, err := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, store.State{}, domainAllocationOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -576,7 +601,7 @@ func TestAllocateDomainMappingsAppliesTemporaryRouteDuringManualDownload(t *test
 	}
 	results := []benchmark.Result{{IP: netip.MustParseAddr("1.1.1.1"), Qualified: true, Score: 99}}
 
-	mappings, allocations, warnings, err := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, store.State{})
+	mappings, allocations, warnings, err := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, store.State{}, domainAllocationOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -615,7 +640,7 @@ func TestAllocateDomainMappingsGivesRemainingPoolToAutomaticDomains(t *testing.T
 		{IP: netip.MustParseAddr("1.1.1.4"), Qualified: true, Score: 96},
 	}
 
-	mappings, _, warnings, err := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, stateStore.Snapshot())
+	mappings, _, warnings, err := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, stateStore.Snapshot(), domainAllocationOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -653,7 +678,7 @@ func TestAllocateDomainMappingsIgnoresAutomaticDomainsWithoutAllSwitches(t *test
 		{IP: netip.MustParseAddr("1.1.1.2"), Qualified: true, Score: 98},
 	}
 
-	mappings, _, warnings, err := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, stateStore.Snapshot())
+	mappings, _, warnings, err := runner.allocateDomainMappings(context.Background(), ranges.Snapshot{IPv4: []string{"1.1.1.0/24"}}, results, stateStore.Snapshot(), domainAllocationOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -994,6 +1019,43 @@ func TestRefreshPolicyRollsBackOnlyNewReceiptsWhenPreviousReceiptsAreInvalid(t *
 	}
 	if got := stateStore.Snapshot().Policy.Receipts; string(got) != `[]` {
 		t.Fatalf("failed refresh changed stored receipts: %s", got)
+	}
+}
+
+func TestRefreshPolicyPreservesCurrentVerifiedManualMapping(t *testing.T) {
+	policy := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
+	runner, stateStore := newTestRunner(t, policy)
+	runner.config.Acceleration.ManualDomains = []string{"manual.example"}
+	runner.config.Acceleration.ManualMappings = map[string]string{"manual.example": "1.1.1.2"}
+	runner.domainResolver = staticDomainResolver{addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	receipts, err := json.Marshal(proxy.ApplyResult{Receipts: []proxy.Receipt{{ID: "previous", Adapter: "test", Changed: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Update(func(state *store.State) error {
+		state.CurrentIPv4 = &store.Selection{IP: "1.1.1.1", Family: 4, PolicyVerified: true}
+		state.Nodes["1.1.1.1"] = store.NodeStats{Successes: 4, AverageScore: 99}
+		state.Nodes["1.1.1.3"] = store.NodeStats{Successes: 2, AverageScore: 50}
+		state.Policy = &store.PolicySnapshot{
+			IPv4CIDRs:      []string{"1.1.1.1/32", "1.1.1.3/32"},
+			DomainMappings: []store.DomainMappingSnapshot{{Domain: "manual.example", Addresses: []string{"1.1.1.3"}}},
+			Receipts:       receipts,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runner.RefreshPolicy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.policies) != 1 || len(policy.policies[0].DomainMappings) != 1 || policy.policies[0].DomainMappings[0].Addresses[0] != "1.1.1.3" {
+		t.Fatalf("background refresh replaced the current verified mapping: %#v", policy.policies)
+	}
+	stored := stateStore.Snapshot().Policy
+	if stored == nil || len(stored.DomainMappings) != 1 || stored.DomainMappings[0].Addresses[0] != "1.1.1.3" {
+		t.Fatalf("background refresh persisted a different mapping: %#v", stored)
 	}
 }
 
