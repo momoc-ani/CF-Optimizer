@@ -18,6 +18,7 @@ const autoProbeTimeout = 1200 * time.Millisecond
 type controllerCandidate struct {
 	Controller string
 	Process    string
+	ConfigPath string
 }
 
 // AutoDetect 从本机 Mihomo/Clash 监听进程中发现控制端，并以只读版本请求确认身份。
@@ -57,6 +58,9 @@ func probeControllerCandidates(ctx context.Context, cfg config.MihomoConfig, can
 			continue
 		}
 		detection.Endpoint = candidate.Controller
+		if candidate.ConfigPath != "" {
+			detection.ConfigPath = candidate.ConfigPath
+		}
 		if candidate.Process == "" {
 			detection.Message = "自动发现的控制 API 可访问"
 		} else {
@@ -72,31 +76,42 @@ func probeControllerCandidates(ctx context.Context, cfg config.MihomoConfig, can
 
 // uniqueControllerCandidates 去重候选并保持显式配置端点优先、其余端点稳定排序。
 func uniqueControllerCandidates(candidates []controllerCandidate) []controllerCandidate {
-	seen := make(map[string]struct{}, len(candidates))
+	seen := make(map[string]int, len(candidates))
 	result := make([]controllerCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
 		candidate.Controller = strings.TrimRight(strings.TrimSpace(candidate.Controller), "/")
 		if candidate.Controller == "" {
 			continue
 		}
-		if _, exists := seen[candidate.Controller]; exists {
+		if index, exists := seen[candidate.Controller]; exists {
+			if result[index].ConfigPath == "" {
+				result[index].ConfigPath = candidate.ConfigPath
+			}
 			continue
 		}
-		seen[candidate.Controller] = struct{}{}
+		seen[candidate.Controller] = len(result)
 		result = append(result, candidate)
 	}
 	if len(result) > 1 {
 		discovered := result[1:]
 		sort.SliceStable(discovered, func(i, j int) bool {
-			leftUnix := strings.HasPrefix(discovered[i].Controller, unixControllerScheme+"://")
-			rightUnix := strings.HasPrefix(discovered[j].Controller, unixControllerScheme+"://")
-			if leftUnix != rightUnix {
-				return leftUnix
+			leftPriority := controllerCandidatePriority(discovered[i].Controller)
+			rightPriority := controllerCandidatePriority(discovered[j].Controller)
+			if leftPriority != rightPriority {
+				return leftPriority < rightPriority
 			}
 			return discovered[i].Controller < discovered[j].Controller
 		})
 	}
 	return result
+}
+
+// controllerCandidatePriority 优先探测有明确本地 IPC 语义的控制端，再探测普通 TCP 监听端口。
+func controllerCandidatePriority(controller string) int {
+	if strings.HasPrefix(controller, unixControllerScheme+"://") || strings.HasPrefix(controller, namedPipeControllerScheme+":") {
+		return 0
+	}
+	return 1
 }
 
 // isLoopbackController 只允许自动探测访问本机回环控制端。
@@ -107,6 +122,10 @@ func isLoopbackController(rawController string) bool {
 	}
 	if controller.Scheme == unixControllerScheme {
 		_, err := unixControllerPath(controller)
+		return err == nil
+	}
+	if controller.Scheme == namedPipeControllerScheme {
+		_, err := namedPipeControllerPath(controller)
 		return err == nil
 	}
 	if controller.Host == "" || (controller.Scheme != "http" && controller.Scheme != "https") {

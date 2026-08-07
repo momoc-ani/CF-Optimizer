@@ -18,8 +18,10 @@ import (
 )
 
 const (
-	SchemaVersion              = 1
-	mihomoUnixControllerScheme = "unix"
+	SchemaVersion                   = 1
+	mihomoUnixControllerScheme      = "unix"
+	mihomoNamedPipeControllerScheme = "npipe"
+	windowsNamedPipePrefix          = `\\.\pipe\`
 	// DefaultDownloadURL 是未配置测速地址时使用的 Cloudflare 官方 50 MiB 测速资源。
 	DefaultDownloadURL = "https://speed.cloudflare.com/__down?bytes=52428800"
 	// DefaultDownloadMaxBytes 是默认下载测速上限，单位为字节（50 MiB）。
@@ -509,11 +511,14 @@ func validateProxyConfig(proxy ProxyConfig) error {
 	return nil
 }
 
-// validateMihomoController 仅允许本机回环 HTTP(S) 或绝对 Unix Socket 控制端。
+// validateMihomoController 仅允许本机回环 HTTP(S)、绝对 Unix Socket 或 Windows Named Pipe 控制端。
 func validateMihomoController(rawController string) error {
 	controller, err := url.Parse(rawController)
 	if err != nil {
-		return errors.New("proxy.mihomo.controller must be a local HTTP(S) or Unix Socket URL")
+		return errors.New("proxy.mihomo.controller must be a local HTTP(S), Unix Socket, or Windows Named Pipe URL")
+	}
+	if controller.Scheme == mihomoNamedPipeControllerScheme {
+		return validateMihomoNamedPipeController(controller)
 	}
 	if controller.Scheme == mihomoUnixControllerScheme {
 		if runtime.GOOS == "windows" {
@@ -525,7 +530,7 @@ func validateMihomoController(rawController string) error {
 		return nil
 	}
 	if controller.Hostname() == "" || (controller.Scheme != "http" && controller.Scheme != "https") {
-		return errors.New("proxy.mihomo.controller must be an absolute HTTP(S) URL or Unix Socket URL")
+		return errors.New("proxy.mihomo.controller must be an absolute HTTP(S), Unix Socket, or Windows Named Pipe URL")
 	}
 	host := strings.ToLower(controller.Hostname())
 	address := netip.Addr{}
@@ -534,6 +539,34 @@ func validateMihomoController(rawController string) error {
 	}
 	if host != "localhost" && (!address.IsValid() || !address.IsLoopback()) {
 		return errors.New("proxy.mihomo.controller must use a loopback address to protect its secret")
+	}
+	return nil
+}
+
+// validateMihomoNamedPipeController 只接受 Windows 本机 \\.\pipe 命名空间的规范 npipe URL。
+func validateMihomoNamedPipeController(controller *url.URL) error {
+	if runtime.GOOS != "windows" {
+		return errors.New("proxy.mihomo.controller does not support Windows Named Pipe URLs on this platform")
+	}
+	if controller == nil || controller.User != nil || controller.RawQuery != "" || controller.Fragment != "" {
+		return errors.New("proxy.mihomo.controller must not include Named Pipe credentials or query parameters")
+	}
+	rawPath := controller.Path
+	if controller.Host != "" {
+		rawPath = "//" + controller.Host + controller.Path
+	}
+	rawPath = strings.ReplaceAll(rawPath, "/", `\`)
+	if len(rawPath) <= len(windowsNamedPipePrefix) || !strings.EqualFold(rawPath[:len(windowsNamedPipePrefix)], windowsNamedPipePrefix) {
+		return errors.New("proxy.mihomo.controller must use npipe:////./pipe/<name> for a local Windows Named Pipe")
+	}
+	pipeName := rawPath[len(windowsNamedPipePrefix):]
+	if strings.ContainsAny(pipeName, "\x00\r\n") {
+		return errors.New("proxy.mihomo.controller Named Pipe contains an unsafe character")
+	}
+	for _, segment := range strings.Split(pipeName, `\`) {
+		if segment == "" || segment == "." || segment == ".." {
+			return errors.New("proxy.mihomo.controller Named Pipe contains an invalid path segment")
+		}
 	}
 	return nil
 }

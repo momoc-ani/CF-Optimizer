@@ -238,6 +238,42 @@ func TestValidateRejectsUnsafeMihomoUnixController(t *testing.T) {
 	}
 }
 
+func TestValidateMihomoNamedPipeController(t *testing.T) {
+	cfg := Default()
+	cfg.Proxy.Mihomo.Enabled = true
+	cfg.Proxy.Mihomo.Controller = "npipe:////./pipe/verge-mihomo"
+	cfg.Proxy.Mihomo.ProviderFile = filepath.Join(t.TempDir(), "cf-optimizer-mihomo.yaml")
+
+	err := cfg.Validate()
+	if runtime.GOOS != "windows" {
+		if err == nil {
+			t.Fatal("Validate() error = nil, want Windows Named Pipe rejection")
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestValidateRejectsUnsafeMihomoNamedPipeController(t *testing.T) {
+	for _, controller := range []string{
+		"npipe:////server/pipe/verge-mihomo",
+		"npipe:////./pipe/../verge-mihomo",
+		"npipe:////./pipe/verge-mihomo?token=secret",
+	} {
+		t.Run(controller, func(t *testing.T) {
+			cfg := Default()
+			cfg.Proxy.Mihomo.Enabled = true
+			cfg.Proxy.Mihomo.Controller = controller
+			cfg.Proxy.Mihomo.ProviderFile = filepath.Join(t.TempDir(), "cf-optimizer-mihomo.yaml")
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("Validate() error = nil for %q", controller)
+			}
+		})
+	}
+}
+
 func osWriteFile(path string, data []byte) error {
 	return fsutil.WriteFileAtomic(path, data, 0o600)
 }

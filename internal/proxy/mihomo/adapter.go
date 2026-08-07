@@ -25,13 +25,22 @@ import (
 )
 
 const (
-	adapterName          = "mihomo"
-	managedFileHeader    = "# Managed by CF Optimizer. Manual changes will be replaced.\n"
-	missingFileHash      = "missing"
-	maxAPIResponse       = 8 << 20
-	unixControllerScheme = "unix"
-	unixRequestHost      = "localhost"
+	adapterName               = "mihomo"
+	managedFileHeader         = "# Managed by CF Optimizer. Manual changes will be replaced.\n"
+	missingFileHash           = "missing"
+	maxAPIResponse            = 8 << 20
+	unixControllerScheme      = "unix"
+	namedPipeControllerScheme = "npipe"
+	localRequestHost          = "localhost"
+	windowsNamedPipePrefix    = `\\.\pipe\`
 )
+
+type parsedControllerEndpoint struct {
+	requestURL *url.URL
+	endpoint   string
+	network    string
+	address    string
+}
 
 type planPayload struct {
 	Content              []byte   `json:"content"`
@@ -76,20 +85,25 @@ type Adapter struct {
 
 // New 创建强制禁用系统代理的 Mihomo 控制 API 客户端。
 func New(cfg config.MihomoConfig) (*Adapter, error) {
-	controller, endpoint, socketPath, err := parseControllerEndpoint(cfg.Controller)
+	parsed, err := parseControllerEndpoint(cfg.Controller)
 	if err != nil {
 		return nil, err
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
-	if socketPath != "" {
+	switch parsed.network {
+	case unixControllerScheme:
 		dialer := &net.Dialer{Timeout: cfg.Timeout.Duration()}
 		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return dialer.DialContext(ctx, unixControllerScheme, socketPath)
+			return dialer.DialContext(ctx, unixControllerScheme, parsed.address)
+		}
+	case namedPipeControllerScheme:
+		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return dialNamedPipeController(ctx, parsed.address)
 		}
 	}
 	adapter := &Adapter{
-		config: cfg, controller: controller, endpoint: endpoint,
+		config: cfg, controller: parsed.requestURL, endpoint: parsed.endpoint,
 		client:              &http.Client{Transport: transport, Timeout: cfg.Timeout.Duration()},
 		verificationTimeout: cfg.Timeout.Duration(), verificationAttemptTimeout: cfg.Timeout.Duration(),
 		verificationRetryInterval: mappedConnectionVerificationRetryInterval, verificationMaxAttempts: mappedConnectionVerificationAttempts,
@@ -114,24 +128,48 @@ func (a *Adapter) SetConnectionVerificationWindow(total, attempt, retry time.Dur
 	}
 }
 
-// parseControllerEndpoint 将受支持的控制端转换为 HTTP 请求地址和可选 Unix Socket 路径。
-func parseControllerEndpoint(rawController string) (*url.URL, string, string, error) {
+// parseControllerEndpoint 将受支持的控制端转换为 HTTP 请求地址和本地传输参数。
+func parseControllerEndpoint(rawController string) (parsedControllerEndpoint, error) {
 	controller, err := url.Parse(rawController)
 	if err != nil {
-		return nil, "", "", errors.New("invalid Mihomo controller URL")
+		return parsedControllerEndpoint{}, errors.New("invalid Mihomo controller URL")
 	}
 	if controller.Scheme == unixControllerScheme {
 		socketPath, pathErr := unixControllerPath(controller)
 		if pathErr != nil {
-			return nil, "", "", pathErr
+			return parsedControllerEndpoint{}, pathErr
 		}
 		endpoint := (&url.URL{Scheme: unixControllerScheme, Path: socketPath}).String()
-		return &url.URL{Scheme: "http", Host: unixRequestHost}, endpoint, socketPath, nil
+		return parsedControllerEndpoint{
+			requestURL: &url.URL{Scheme: "http", Host: localRequestHost},
+			endpoint:   endpoint,
+			network:    unixControllerScheme,
+			address:    socketPath,
+		}, nil
+	}
+	if controller.Scheme == namedPipeControllerScheme {
+		if !namedPipeControllerSupported() {
+			return parsedControllerEndpoint{}, errors.New("Mihomo Named Pipe controllers are only supported on Windows")
+		}
+		pipePath, pathErr := namedPipeControllerPath(controller)
+		if pathErr != nil {
+			return parsedControllerEndpoint{}, pathErr
+		}
+		endpoint, endpointErr := namedPipeControllerEndpoint(pipePath)
+		if endpointErr != nil {
+			return parsedControllerEndpoint{}, endpointErr
+		}
+		return parsedControllerEndpoint{
+			requestURL: &url.URL{Scheme: "http", Host: localRequestHost},
+			endpoint:   endpoint,
+			network:    namedPipeControllerScheme,
+			address:    pipePath,
+		}, nil
 	}
 	if controller.Host == "" || (controller.Scheme != "http" && controller.Scheme != "https") {
-		return nil, "", "", errors.New("invalid Mihomo controller URL")
+		return parsedControllerEndpoint{}, errors.New("invalid Mihomo controller URL")
 	}
-	return controller, controller.String(), "", nil
+	return parsedControllerEndpoint{requestURL: controller, endpoint: controller.String()}, nil
 }
 
 // unixControllerPath 校验并规范化不携带认证信息的绝对 Unix Socket 路径。
@@ -140,6 +178,47 @@ func unixControllerPath(controller *url.URL) (string, error) {
 		return "", errors.New("invalid Mihomo Unix Socket controller URL")
 	}
 	return path.Clean(controller.Path), nil
+}
+
+// namedPipeControllerPath 校验并转换只指向本机 \\.\pipe 命名空间的 npipe URL。
+func namedPipeControllerPath(controller *url.URL) (string, error) {
+	if controller == nil || controller.Scheme != namedPipeControllerScheme || controller.User != nil || controller.RawQuery != "" || controller.Fragment != "" {
+		return "", errors.New("invalid Mihomo Named Pipe controller URL")
+	}
+	rawPath := controller.Path
+	if controller.Host != "" {
+		rawPath = "//" + controller.Host + controller.Path
+	}
+	return normalizeNamedPipePath(strings.ReplaceAll(rawPath, "/", `\`))
+}
+
+// namedPipeControllerEndpoint 将 Windows 本机命名管道路径转换为稳定的 npipe URL。
+func namedPipeControllerEndpoint(rawPath string) (string, error) {
+	pipePath, err := normalizeNamedPipePath(rawPath)
+	if err != nil {
+		return "", err
+	}
+	pipeName := strings.TrimPrefix(pipePath, windowsNamedPipePrefix)
+	return (&url.URL{Scheme: namedPipeControllerScheme, Path: "//./pipe/" + strings.ReplaceAll(pipeName, `\`, "/")}).String(), nil
+}
+
+// normalizeNamedPipePath 拒绝远程管道、空名称和类似路径跳转的命名管道地址。
+func normalizeNamedPipePath(rawPath string) (string, error) {
+	rawPath = strings.TrimSpace(rawPath)
+	if len(rawPath) <= len(windowsNamedPipePrefix) || !strings.EqualFold(rawPath[:len(windowsNamedPipePrefix)], windowsNamedPipePrefix) {
+		return "", errors.New("Mihomo Named Pipe controller must use a local \\\\.\\pipe\\ path")
+	}
+	pipeName := rawPath[len(windowsNamedPipePrefix):]
+	if strings.ContainsAny(pipeName, "\x00\r\n") {
+		return "", errors.New("Mihomo Named Pipe controller contains an unsafe character")
+	}
+	segments := strings.Split(pipeName, `\`)
+	for _, segment := range segments {
+		if segment == "" || segment == "." || segment == ".." {
+			return "", errors.New("Mihomo Named Pipe controller contains an invalid path segment")
+		}
+	}
+	return windowsNamedPipePrefix + strings.Join(segments, `\`), nil
 }
 
 // Name 返回稳定的适配器标识。

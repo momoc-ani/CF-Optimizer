@@ -49,3 +49,21 @@ func TestAdapterDetectRejectsUnrelatedVersionEndpoint(t *testing.T) {
 		t.Fatalf("unrelated endpoint was accepted: detection=%#v err=%v", detection, err)
 	}
 }
+
+func TestUniqueControllerCandidatesKeepsCompatibilityPriorityAndConfigPath(t *testing.T) {
+	candidates := uniqueControllerCandidates([]controllerCandidate{
+		{Controller: "http://127.0.0.1:9097", Process: "配置端点"},
+		{Controller: "http://127.0.0.1:7897", Process: "verge-mihomo"},
+		{Controller: "npipe:////./pipe/verge-mihomo", Process: "verge-mihomo"},
+		{Controller: "npipe:////./pipe/verge-mihomo", ConfigPath: `C:\Users\demo\clash-verge.yaml`},
+	})
+	if len(candidates) != 3 {
+		t.Fatalf("unexpected candidates: %#v", candidates)
+	}
+	if candidates[0].Controller != "http://127.0.0.1:9097" || candidates[1].Controller != "npipe:////./pipe/verge-mihomo" || candidates[2].Controller != "http://127.0.0.1:7897" {
+		t.Fatalf("unexpected compatibility order: %#v", candidates)
+	}
+	if candidates[1].ConfigPath != `C:\Users\demo\clash-verge.yaml` {
+		t.Fatalf("Named Pipe config path was not retained: %#v", candidates[1])
+	}
+}

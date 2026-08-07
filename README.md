@@ -15,7 +15,7 @@ CF Optimizer 是面向 Windows、Linux 和 macOS 的 Cloudflare 节点测速、�
 - 按成功率、延迟、抖动、丢包和吞吐评分，并通过历史平滑、冷却、迟滞与最短保持时间避免频繁切换。
 - 在启用后，以事务方式计划、应用、验证和回滚临时网段路由及最终 `/32`、`/128` 主机路由。
 - 支持 Generic Route、Mihomo、sing-box、Xray、版本化 External JSON-RPC 与可选 Windows Hosts 适配。
-- 将手动或已验证自动发现的 Cloudflare 精确域名映射到当前优选 IP，同时保留 TLS SNI 与 HTTP Host；Mihomo 可自动发现活动控制端口和配置，其他内核使用同一领域策略生成受管片段。
+- 将手动或已验证自动发现的 Cloudflare 精确域名映射到当前优选 IP，同时保留 TLS SNI 与 HTTP Host；Mihomo 可兼容发现回环 TCP、Unix Socket 和 Windows Named Pipe 控制端及其活动配置，其他内核使用同一领域策略生成受管片段。
 - 通过 Windows Service、systemd 或 LaunchDaemon 运行后台服务；关闭桌面窗口会隐藏到系统托盘，退出 UI 不会停止服务或正在运行的任务。
 - 提供总览、测速优选、域名加速、代理适配、网络路由、网段管理、历史、日志诊断和设置九个桌面页面。
 
@@ -150,7 +150,7 @@ The project does not treat a successful configuration write as proof that traffi
 - Score success rate, latency, jitter, loss, and throughput, with history smoothing, cooldown, hysteresis, and minimum hold time.
 - Plan, apply, verify, audit, and roll back temporary range routes and final `/32` or `/128` host routes when route management is enabled.
 - Integrate with Generic Route, Mihomo, sing-box, Xray, versioned External JSON-RPC, and optional Windows Hosts adapters.
-- Map manually configured or verified auto-discovered Cloudflare hostnames to the selected IP while preserving TLS SNI and HTTP Host. Mihomo can discover its active controller and configuration; other cores consume the same domain policy through managed fragments.
+- Map manually configured or verified auto-discovered Cloudflare hostnames to the selected IP while preserving TLS SNI and HTTP Host. Mihomo can discover active loopback TCP, Unix Socket, and Windows Named Pipe controllers with their active configuration; other cores consume the same domain policy through managed fragments.
 - Guard proxy-core rules through a shared strategy lifecycle. Mihomo is the first guarded core; clients such as Clash Verge and FLClash provide discovery evidence and reuse the Mihomo strategy instead of duplicating rule semantics. The guard only restores the last verified policy and never starts a benchmark or node reselection.
 - Run under Windows Service, systemd, or LaunchDaemon. Closing the desktop window hides it to the system tray; quitting the UI does not stop the service or an active task.
 - Provide nine operational views: overview, benchmark, domain acceleration, proxy adapters, routes, ranges, history, logs/diagnostics, and settings.

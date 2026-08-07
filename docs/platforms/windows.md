@@ -65,6 +65,8 @@ $cfopt = Join-Path $env:ProgramFiles "CF Optimizer\cf-optimizer.exe"
 
 查看状态和运行普通诊断通常不需要提升 UI 权限。编辑配置、控制服务或手动清理系统目录时，请使用管理员 PowerShell。
 
+Mihomo/Clash 自动发现同时兼容旧版回环 `external-controller` TCP 端口，以及新版 Clash Verge 使用的 `external-controller-pipe` / `-ext-ctl-pipe` Windows Named Pipe。命名管道在内部表示为 `npipe:////./pipe/<name>`；通常无需手工修改旧配置，失效的旧 TCP 端点探测失败后会继续确认当前活动的本机控制端。控制 API 可访问只表示适配器可管理，不等同于实际流量已经通过预期物理接口和网关直连。
+
 ### 5. 三步开始使用
 
 普通用户只需完成三步：
@@ -222,6 +224,8 @@ $cfopt = Join-Path $env:ProgramFiles "CF Optimizer\cf-optimizer.exe"
 | Optional Hosts file | `%SystemRoot%\System32\drivers\etc\hosts` |
 
 Reading status and normal diagnostics usually does not require an elevated UI. Use an Administrator PowerShell when editing configuration, controlling the service, or manually removing system data.
+
+Mihomo/Clash discovery supports both older loopback `external-controller` TCP ports and the `external-controller-pipe` / `-ext-ctl-pipe` Windows Named Pipe used by newer Clash Verge releases. A pipe is represented internally as `npipe:////./pipe/<name>`; existing configurations normally need no manual migration because discovery continues with the active local controller after a stale TCP endpoint fails. Controller availability only proves that the adapter is manageable and does not prove traffic is using the expected physical interface and gateway.
 
 ### 5. Start in three steps
 

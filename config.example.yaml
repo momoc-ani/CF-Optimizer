@@ -54,7 +54,8 @@ proxy:
     enabled: true
   mihomo:
     enabled: false
-    # Use a loopback HTTP(S) URL, or unix:///absolute/socket/path on macOS/Linux.
+    # Use loopback HTTP(S), unix:///absolute/socket/path on macOS/Linux,
+    # or npipe:////./pipe/<name> for a Windows local Named Pipe.
     controller: http://127.0.0.1:9090
     secret: ""
     provider_file: ""

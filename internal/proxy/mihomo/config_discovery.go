@@ -16,6 +16,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type activeConfigHeader struct {
+	ExternalController     string `yaml:"external-controller"`
+	ExternalControllerUnix string `yaml:"external-controller-unix"`
+	ExternalControllerPipe string `yaml:"external-controller-pipe"`
+}
+
 // ConfigureDetected 将已验证控制端与自动发现的活动配置文件组合为可管理配置。
 func ConfigureDetected(cfg config.MihomoConfig, detection proxy.Detection, dataDir string) (config.MihomoConfig, error) {
 	if !detection.Present || detection.Endpoint == "" {
@@ -27,11 +33,15 @@ func ConfigureDetected(cfg config.MihomoConfig, detection proxy.Detection, dataD
 		cfg.ProviderFile = filepath.Join(dataDir, "proxy", "mihomo", "cf-optimizer.yaml")
 	}
 	if cfg.ReloadConfig == "" {
-		path, err := discoverActiveConfig(detection.Endpoint)
-		if err != nil {
-			return cfg, err
+		if detection.ConfigPath != "" {
+			cfg.ReloadConfig = detection.ConfigPath
+		} else {
+			path, err := discoverActiveConfig(detection.Endpoint)
+			if err != nil {
+				return cfg, err
+			}
+			cfg.ReloadConfig = path
 		}
-		cfg.ReloadConfig = path
 	}
 	if !filepath.IsAbs(cfg.ProviderFile) || !filepath.IsAbs(cfg.ReloadConfig) {
 		return cfg, errors.New("Mihomo managed paths must be absolute")
@@ -72,16 +82,34 @@ func discoverActiveConfig(controller string) (string, error) {
 	return matches[0].path, nil
 }
 
-// activeConfigMatchesController 同时匹配 Mihomo 的 TCP 与 Unix Socket 控制端字段。
+// activeConfigMatchesController 同时匹配 Mihomo 的 TCP、Unix Socket 与 Windows Named Pipe 控制端字段。
 func activeConfigMatchesController(content []byte, controller string) bool {
-	var header struct {
-		ExternalController     string `yaml:"external-controller"`
-		ExternalControllerUnix string `yaml:"external-controller-unix"`
-	}
-	if yaml.Unmarshal(content, &header) != nil {
+	header, err := decodeActiveConfigHeader(content)
+	if err != nil {
 		return false
 	}
-	return sameController(header.ExternalController, controller) || sameController(header.ExternalControllerUnix, controller)
+	return sameController(header.ExternalController, controller) ||
+		sameController(header.ExternalControllerUnix, controller) ||
+		sameController(header.ExternalControllerPipe, controller)
+}
+
+// decodeActiveConfigHeader 只读取定位控制端需要的顶层字段，不接触节点或认证内容。
+func decodeActiveConfigHeader(content []byte) (activeConfigHeader, error) {
+	var header activeConfigHeader
+	if err := yaml.Unmarshal(content, &header); err != nil {
+		return activeConfigHeader{}, err
+	}
+	return header, nil
+}
+
+// activeConfigNamedPipeController 返回活动配置声明的本机 Windows Named Pipe 端点。
+func activeConfigNamedPipeController(content []byte) (string, bool) {
+	header, err := decodeActiveConfigHeader(content)
+	if err != nil || strings.TrimSpace(header.ExternalControllerPipe) == "" {
+		return "", false
+	}
+	endpoint, err := namedPipeControllerEndpoint(header.ExternalControllerPipe)
+	return endpoint, err == nil
 }
 
 // activeConfigCandidates 返回三个桌面平台上受支持客户端的去重配置候选路径。
@@ -162,6 +190,29 @@ func sameController(configured, detected string) bool {
 			}
 		}
 		return path.IsAbs(configuredPath) && path.Clean(configuredPath) == detectedPath
+	}
+	if detectedURL.Scheme == namedPipeControllerScheme {
+		detectedPath, err := namedPipeControllerPath(detectedURL)
+		if err != nil {
+			return false
+		}
+		configuredPath := configured
+		if strings.HasPrefix(strings.ToLower(configured), namedPipeControllerScheme+":") {
+			configuredURL, err := url.Parse(configured)
+			if err != nil {
+				return false
+			}
+			configuredPath, err = namedPipeControllerPath(configuredURL)
+			if err != nil {
+				return false
+			}
+		} else {
+			configuredPath, err = normalizeNamedPipePath(configuredPath)
+			if err != nil {
+				return false
+			}
+		}
+		return strings.EqualFold(configuredPath, detectedPath)
 	}
 	if !strings.Contains(configured, "://") {
 		configured = "http://" + configured
