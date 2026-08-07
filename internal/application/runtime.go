@@ -150,6 +150,7 @@ func Build(cfg config.Config, configPath string, logger *slog.Logger) (*Runtime,
 	if err != nil {
 		return nil, err
 	}
+	runner.SetNetworkFingerprinter(cfnetwork.NetworkFingerprint)
 	domainVerifier, err := acceleration.NewVerifierWithOptions(directDial, acceleration.VerificationOptions{
 		PreflightTimeout: managedConfig.Benchmark.TLSTimeout.Duration(),
 		ApplyTimeout:     managedConfig.Acceleration.ApplyVerificationTimeout.Duration(),
@@ -1047,6 +1048,7 @@ func (r *Runtime) BuildManagedSession(physicalPath cfnetwork.PhysicalPath, detec
 	if err != nil {
 		return RuntimeSession{}, err
 	}
+	runner.SetNetworkFingerprinter(cfnetwork.NetworkFingerprint)
 	domainVerifier, err := acceleration.NewVerifierWithOptions(directDial, acceleration.VerificationOptions{
 		PreflightTimeout: managedConfig.Benchmark.TLSTimeout.Duration(),
 		ApplyTimeout:     managedConfig.Acceleration.ApplyVerificationTimeout.Duration(),

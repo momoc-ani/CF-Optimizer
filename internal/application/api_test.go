@@ -434,6 +434,34 @@ func TestSystemStatusIncludesIsolatedSchedulePromise(t *testing.T) {
 	}
 }
 
+func TestSystemStatusIncludesCompactNodePoolAndCheckpoint(t *testing.T) {
+	stateStore, err := store.Open(t.TempDir(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdAt := time.Now().UTC().Add(-time.Hour)
+	validUntil := time.Now().UTC().Add(time.Hour)
+	if err := stateStore.Update(func(state *store.State) error {
+		state.NodePool = &store.NodePoolSnapshot{Version: store.NodePoolSchemaVersion, ID: "pool-1", CreatedAt: createdAt, ValidUntil: validUntil, Candidates: []benchmark.Result{{IP: netip.MustParseAddr("1.1.1.1")}, {IP: netip.MustParseAddr("1.1.1.2")}}}
+		state.Optimization = &store.OptimizationCheckpoint{Version: store.OptimizationCheckpointVersion, RunID: "run-1", CurrentStage: "apply_verify", LastError: "forced failure", UpdatedAt: createdAt}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	api, err := NewAPI(&Runtime{Store: stateStore})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := api.systemStatus()["state"].(statusState)
+	if response.NodePool == nil || response.NodePool.ID != "pool-1" || response.NodePool.Candidates != 2 || response.NodePool.Stale {
+		t.Fatalf("unexpected compact node pool status: %#v", response.NodePool)
+	}
+	if response.Optimization == nil || response.Optimization.Stage != "apply_verify" || response.Optimization.LastError != "forced failure" {
+		t.Fatalf("unexpected optimization checkpoint status: %#v", response.Optimization)
+	}
+}
+
 func TestSystemStatusIncludesIsolatedPolicyGuardStatus(t *testing.T) {
 	stateStore, err := store.Open(t.TempDir(), 10)
 	if err != nil {

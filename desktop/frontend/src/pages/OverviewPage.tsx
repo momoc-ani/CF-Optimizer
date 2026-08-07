@@ -142,9 +142,10 @@ export function OverviewPage() {
       {state?.last_error && <Alert color="red" title="上次任务失败">{state.last_error}</Alert>}
       <SimpleGrid cols={{ base: 2, md: 4 }} spacing="sm">
         <Metric label="后台服务" value={<Group gap={7}><ThemeIcon size="sm" color={state ? 'green' : 'red'} variant="light"><Activity size={14} /></ThemeIcon>{state?.running ? '优选运行中' : '运行正常'}</Group>} detail={`协议 v${status.data?.protocol_version ?? '—'}`} accent="#2b8a5a" />
-        <Metric label="下次周期" value={schedule.value} detail={schedule.detail} accent="#1677a6" />
+        <Metric label="下次节点池刷新" value={schedule.value} detail={schedule.detail} accent="#1677a6" />
         <Metric label="代理适配" value={`${detected} 个已检测`} detail="仅显示可验证的适配器状态" accent="#7a59a8" />
         <Metric label="Cloudflare 网段" value={`${(ranges.data?.ipv4.length ?? 0) + (ranges.data?.ipv6.length ?? 0)} 条`} detail={`${ranges.data?.source ?? '读取中'} · ${formatDate(ranges.data?.fetched_at)}`} accent="#c47a12" />
+        <Metric label="测速节点池" value={state?.node_pool ? (state.node_pool.stale ? '已过期，尝试刷新' : '有效，可复用') : '尚未建立'} detail={state?.node_pool ? `${state.node_pool.candidates} 个候选 · 有效至 ${formatDate(state.node_pool.valid_until)}` : '首次一键优选后生成'} accent="#2b8a5a" />
       </SimpleGrid>
 
       <Section title="当前生效节点" aside={<StatusBadge label={verifiedRoutes > 0 ? `${verifiedRoutes} 条路由已验证` : '无已验证路由'} tone={verifiedRoutes > 0 ? 'verified' : 'warning'} />}>

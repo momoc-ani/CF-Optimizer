@@ -11,7 +11,7 @@ describe('overview presentation', () => {
     );
     expect(result).toEqual({
       value: 'formatted:2026-08-02T09:30:00Z',
-      detail: '周期 6h0m0s · 周期执行',
+      detail: '节点池刷新周期 6h0m0s · 周期执行',
     });
   });
 

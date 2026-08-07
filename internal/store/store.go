@@ -9,14 +9,20 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cf-optimizer/cf-optimizer/internal/benchmark"
 	"github.com/cf-optimizer/cf-optimizer/internal/fsutil"
 )
 
 const (
-	legacyStateSchemaVersion = 1
+	legacyStateSchemaVersion   = 1
+	previousStateSchemaVersion = 2
 	// StateSchemaVersion 标识当前持久化状态结构版本。
-	StateSchemaVersion       = 2
+	StateSchemaVersion       = 3
 	policyTransactionVersion = 1
+	// NodePoolSchemaVersion 标识节点池快照的持久化契约版本。
+	NodePoolSchemaVersion = 1
+	// OptimizationCheckpointVersion 标识阶段检查点的持久化契约版本。
+	OptimizationCheckpointVersion = 1
 )
 
 // Selection 保存某个地址族当前生效的节点与稳定性状态。
@@ -89,6 +95,53 @@ type DomainDiscovery struct {
 	LastError             string    `json:"last_error,omitempty"`
 }
 
+// NodePoolSnapshot 保存一次完整 TCP、TLS 和下载测速产生的不可变候选池。
+type NodePoolSnapshot struct {
+	Version             int                `json:"version"`
+	ID                  string             `json:"id"`
+	CreatedAt           time.Time          `json:"created_at"`
+	ValidUntil          time.Time          `json:"valid_until"`
+	RefreshInterval     time.Duration      `json:"refresh_interval"`
+	RangeSource         string             `json:"range_source"`
+	RangeHash           string             `json:"range_hash"`
+	NetworkFingerprint  string             `json:"network_fingerprint"`
+	BenchmarkConfigHash string             `json:"benchmark_config_hash"`
+	Candidates          []benchmark.Result `json:"candidates"`
+	Checksum            string             `json:"checksum"`
+}
+
+// DomainEvidence 保存域名阶段已经完成的 DNS、预检和下载复测证据。
+type DomainEvidence struct {
+	Domain             string    `json:"domain"`
+	Source             string    `json:"source"`
+	ResolvedAddresses  []string  `json:"resolved_addresses,omitempty"`
+	AssignedAddress    string    `json:"assigned_address,omitempty"`
+	CloudflareVerified bool      `json:"cloudflare_verified"`
+	PreflightVerified  bool      `json:"preflight_verified"`
+	DownloadVerified   bool      `json:"download_verified"`
+	DownloadMbps       float64   `json:"download_mbps,omitempty"`
+	DownloadAddress    string    `json:"download_address,omitempty"`
+	DownloadProbeURL   string    `json:"download_probe_url,omitempty"`
+	TestedAt           time.Time `json:"tested_at"`
+	ValidUntil         time.Time `json:"valid_until"`
+	Error              string    `json:"error,omitempty"`
+}
+
+// OptimizationCheckpoint 保存一次一键优选可跨失败复用的阶段证据和策略计划。
+type OptimizationCheckpoint struct {
+	Version            int              `json:"version"`
+	RunID              string           `json:"run_id"`
+	CurrentStage       string           `json:"current_stage"`
+	PoolID             string           `json:"pool_id,omitempty"`
+	ConfigHash         string           `json:"config_hash"`
+	NetworkFingerprint string           `json:"network_fingerprint"`
+	DomainEvidence     []DomainEvidence `json:"domain_evidence,omitempty"`
+	PolicyPlan         json.RawMessage  `json:"policy_plan,omitempty"`
+	Attempts           map[string]int   `json:"attempts,omitempty"`
+	LastError          string           `json:"last_error,omitempty"`
+	UpdatedAt          time.Time        `json:"updated_at"`
+}
+
 // State 保存后台服务当前节点、运行状态和历史摘要。
 type State struct {
 	Version           int                        `json:"version"`
@@ -98,6 +151,8 @@ type State struct {
 	History           []RunSummary               `json:"history"`
 	Nodes             map[string]NodeStats       `json:"nodes"`
 	DiscoveredDomains map[string]DomainDiscovery `json:"discovered_domains"`
+	NodePool          *NodePoolSnapshot          `json:"node_pool,omitempty"`
+	Optimization      *OptimizationCheckpoint    `json:"optimization_checkpoint,omitempty"`
 	Policy            *PolicySnapshot            `json:"policy,omitempty"`
 	PendingPolicy     *PolicyTransaction         `json:"pending_policy,omitempty"`
 	LastError         string                     `json:"last_error,omitempty"`
@@ -156,7 +211,7 @@ func Open(dataDir string, maxRuns int) (*Store, error) {
 	if err := json.Unmarshal(data, &s.state); err != nil {
 		return nil, fmt.Errorf("decode state: %w", err)
 	}
-	if s.state.Version == legacyStateSchemaVersion {
+	if s.state.Version == legacyStateSchemaVersion || s.state.Version == previousStateSchemaVersion {
 		s.state.Version = StateSchemaVersion
 	}
 	if s.state.Version != StateSchemaVersion {
@@ -164,6 +219,12 @@ func Open(dataDir string, maxRuns int) (*Store, error) {
 	}
 	if s.state.PendingPolicy != nil && s.state.PendingPolicy.Version != policyTransactionVersion {
 		return nil, fmt.Errorf("unsupported pending policy transaction version %d", s.state.PendingPolicy.Version)
+	}
+	if s.state.NodePool != nil && s.state.NodePool.Version != NodePoolSchemaVersion {
+		return nil, fmt.Errorf("unsupported node pool version %d", s.state.NodePool.Version)
+	}
+	if s.state.Optimization != nil && s.state.Optimization.Version != OptimizationCheckpointVersion {
+		return nil, fmt.Errorf("unsupported optimization checkpoint version %d", s.state.Optimization.Version)
 	}
 	if s.state.Nodes == nil {
 		s.state.Nodes = map[string]NodeStats{}

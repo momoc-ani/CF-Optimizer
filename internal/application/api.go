@@ -84,14 +84,33 @@ type LatestBenchmark struct {
 
 // statusState 仅包含普通状态轮询所需字段，避免通过 IPC 暴露节点明细和策略回滚收据。
 type statusState struct {
-	Version       int              `json:"version"`
-	UpdatedAt     time.Time        `json:"updated_at"`
-	CurrentIPv4   *store.Selection `json:"current_ipv4,omitempty"`
-	CurrentIPv6   *store.Selection `json:"current_ipv6,omitempty"`
-	LastError     string           `json:"last_error,omitempty"`
-	LastStartedAt time.Time        `json:"last_started_at,omitempty"`
-	LastEndedAt   time.Time        `json:"last_ended_at,omitempty"`
-	Running       bool             `json:"running"`
+	Version       int                 `json:"version"`
+	UpdatedAt     time.Time           `json:"updated_at"`
+	CurrentIPv4   *store.Selection    `json:"current_ipv4,omitempty"`
+	CurrentIPv6   *store.Selection    `json:"current_ipv6,omitempty"`
+	LastError     string              `json:"last_error,omitempty"`
+	LastStartedAt time.Time           `json:"last_started_at,omitempty"`
+	LastEndedAt   time.Time           `json:"last_ended_at,omitempty"`
+	Running       bool                `json:"running"`
+	NodePool      *nodePoolStatus     `json:"node_pool,omitempty"`
+	Optimization  *optimizationStatus `json:"optimization,omitempty"`
+}
+
+// nodePoolStatus 是节点池的轻量状态摘要，不通过高频状态轮询暴露候选明细。
+type nodePoolStatus struct {
+	ID         string    `json:"id"`
+	CreatedAt  time.Time `json:"created_at"`
+	ValidUntil time.Time `json:"valid_until"`
+	Candidates int       `json:"candidates"`
+	Stale      bool      `json:"stale"`
+}
+
+// optimizationStatus 描述最近一次阶段检查点，供界面解释失败后的可复用边界。
+type optimizationStatus struct {
+	Stage     string    `json:"stage"`
+	RunID     string    `json:"run_id,omitempty"`
+	LastError string    `json:"last_error,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // NewAPI 创建后台服务业务处理器。
@@ -296,13 +315,21 @@ func (a *API) systemStatus() map[string]any {
 	view := a.runtime.View()
 	state := a.runtime.Store.Snapshot()
 	startupStatus := a.startupSnapshot()
+	var nodePool *nodePoolStatus
+	if state.NodePool != nil {
+		nodePool = &nodePoolStatus{ID: state.NodePool.ID, CreatedAt: state.NodePool.CreatedAt, ValidUntil: state.NodePool.ValidUntil, Candidates: len(state.NodePool.Candidates), Stale: !time.Now().UTC().Before(state.NodePool.ValidUntil)}
+	}
+	var optimization *optimizationStatus
+	if state.Optimization != nil {
+		optimization = &optimizationStatus{Stage: state.Optimization.CurrentStage, RunID: state.Optimization.RunID, LastError: state.Optimization.LastError, UpdatedAt: state.Optimization.UpdatedAt}
+	}
 	return map[string]any{
 		"build": version.Metadata(), "protocol_version": ipc.ProtocolVersion,
 		"state": statusState{
 			Version: state.Version, UpdatedAt: state.UpdatedAt,
 			CurrentIPv4: state.CurrentIPv4, CurrentIPv6: state.CurrentIPv6,
 			LastError: state.LastError, LastStartedAt: state.LastStartedAt,
-			LastEndedAt: state.LastEndedAt, Running: state.Running,
+			LastEndedAt: state.LastEndedAt, Running: state.Running, NodePool: nodePool, Optimization: optimization,
 		},
 		"physical_path":    view.PhysicalPath,
 		"policy_available": view.ProxyCoordinator != nil,

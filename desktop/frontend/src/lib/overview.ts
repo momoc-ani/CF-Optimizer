@@ -41,11 +41,11 @@ export function presentSchedule(
   if (!schedule.next_scheduled_at) {
     return {
       value: running || schedule.trigger === 'running' ? '本轮执行中' : '等待调度',
-      detail: `周期 ${schedule.interval}`,
+      detail: `节点池刷新周期 ${schedule.interval}`,
     };
   }
   const trigger = scheduleTriggerLabels[schedule.trigger ?? 'interval'] ?? '周期执行';
-  return { value: formatTime(schedule.next_scheduled_at), detail: `周期 ${schedule.interval} · ${trigger}` };
+  return { value: formatTime(schedule.next_scheduled_at), detail: `节点池刷新周期 ${schedule.interval} · ${trigger}` };
 }
 
 /** formatRunEventTitle 用真实候选统计生成最近事件标题。 */

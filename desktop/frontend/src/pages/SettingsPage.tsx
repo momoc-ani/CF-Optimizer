@@ -145,7 +145,7 @@ export function SettingsPage() {
           <Stack gap="md">
             <Section title="调度">
               <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
-                <Controller control={form.control} name="scheduleInterval" render={({ field }) => <TextInput {...field} label="优选周期" error={errors.scheduleInterval?.message} description="Go duration，例如 6h" />} />
+                <Controller control={form.control} name="scheduleInterval" render={({ field }) => <TextInput {...field} label="节点池刷新周期" error={errors.scheduleInterval?.message} description="节点池按此周期重新进行完整测速；例如 6h" />} />
                 <div className="switch-stack"><Controller control={form.control} name="scheduleEnabled" render={({ field }) => <Switch label="启用周期任务" checked={field.value} onChange={field.onChange} />} /><Controller control={form.control} name="runOnNetworkChange" render={({ field }) => <Switch label="网络变化时复测" checked={field.value} onChange={field.onChange} />} /></div>
               </SimpleGrid>
             </Section>

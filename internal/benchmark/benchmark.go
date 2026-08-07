@@ -161,6 +161,59 @@ func (t *Tester) Run(ctx context.Context, addresses []netip.Addr, progress func(
 	return results, nil
 }
 
+// Validate 对已持久化节点池做轻量 TCP/TLS 复核，不产生下载流量。
+func (t *Tester) Validate(ctx context.Context, previous []Result, progress func(Progress)) ([]Result, error) {
+	if len(previous) == 0 {
+		return nil, errors.New("node pool has no candidates")
+	}
+	ranked := append([]Result(nil), previous...)
+	sort.SliceStable(ranked, func(i, j int) bool { return ranked[i].Score > ranked[j].Score })
+	limit := len(ranked)
+	if t.config.DownloadTop > 0 && limit > t.config.DownloadTop {
+		limit = t.config.DownloadTop
+	}
+	checked := append([]Result(nil), ranked[:limit]...)
+	completed := 0
+	qualified := 0
+	var progressMu sync.Mutex
+	if err := runConcurrentDownloadProbes(ctx, len(checked), t.config.DownloadConcurrency, func(probeContext context.Context, index int) {
+		result := t.testTCP(probeContext, checked[index].IP)
+		if result.Qualified {
+			t.probeTLSHandshake(probeContext, &result)
+		}
+		result.Score = Score(result, false)
+		checked[index].AvgLatency = result.AvgLatency
+		checked[index].P95Latency = result.P95Latency
+		checked[index].Jitter = result.Jitter
+		checked[index].TLSLatency = result.TLSLatency
+		checked[index].TCPQualified = result.TCPQualified
+		checked[index].TLSVerified = result.TLSVerified
+		checked[index].Qualified = result.Qualified
+		checked[index].Error = result.Error
+		if progress != nil {
+			progressMu.Lock()
+			completed++
+			if result.Qualified {
+				qualified++
+			}
+			progress(Progress{Stage: StageTLS, Completed: completed, Total: len(checked), IP: result.IP.String(), Qualified: qualified})
+			progressMu.Unlock()
+		}
+	}); err != nil {
+		return nil, err
+	}
+	valid := make([]Result, 0, len(checked))
+	for _, result := range checked {
+		if result.Qualified {
+			valid = append(valid, result)
+		}
+	}
+	if len(valid) == 0 {
+		return nil, errors.New("node pool light validation found no qualified candidate")
+	}
+	return valid, nil
+}
+
 // runConcurrentDownloadProbes 使用受限 worker pool 执行 TLS/下载复筛，避免同时产生过多下载流量。
 func runConcurrentDownloadProbes(ctx context.Context, total, concurrency int, probe func(context.Context, int)) error {
 	if total <= 0 {
@@ -292,6 +345,39 @@ func (t *Tester) probeTLSAndDownload(ctx context.Context, result *Result) {
 		return
 	}
 	t.download(ctx, tlsConn, targetURL, result)
+}
+
+// probeTLSHandshake 只建立并关闭 TLS 连接，供节点池复用时验证当前网络路径。
+func (t *Tester) probeTLSHandshake(ctx context.Context, result *Result) {
+	serverName := t.config.TLSServerName
+	if serverName == "" && t.config.DownloadURL != "" {
+		parsed, err := url.Parse(t.config.DownloadURL)
+		if err == nil {
+			serverName = parsed.Hostname()
+		}
+	}
+	if serverName == "" {
+		return
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, t.config.TLSTimeout.Duration())
+	defer cancel()
+	raw, err := t.dial(dialCtx, "tcp", net.JoinHostPort(result.IP.String(), "443"))
+	if err != nil {
+		result.Qualified = false
+		result.Error = "TLS dial: " + err.Error()
+		return
+	}
+	defer raw.Close()
+	_ = raw.SetDeadline(time.Now().Add(t.config.TLSTimeout.Duration()))
+	tlsConn := tls.Client(raw, &tls.Config{ServerName: serverName, MinVersion: tls.VersionTLS12})
+	started := t.now()
+	if err := tlsConn.HandshakeContext(dialCtx); err != nil {
+		result.Qualified = false
+		result.Error = "TLS handshake: " + err.Error()
+		return
+	}
+	result.TLSLatency = t.now().Sub(started)
+	result.TLSVerified = true
 }
 
 func (t *Tester) download(ctx context.Context, conn net.Conn, target *url.URL, result *Result) {

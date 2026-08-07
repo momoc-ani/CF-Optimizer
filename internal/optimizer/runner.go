@@ -3,6 +3,7 @@ package optimizer
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -33,6 +34,16 @@ var ErrAlreadyRunning = errors.New("an optimization run is already active")
 const (
 	managedRouteMetric       = 5
 	routeCleanupTimeoutFloor = 30 * time.Second
+	domainEvidenceLifetime   = 15 * time.Minute
+)
+
+const (
+	stagePoolRefresh = "pool_refresh"
+	stagePoolReuse   = "pool_reuse"
+	stageDomain      = "domain_qualify"
+	stagePolicyPlan  = "policy_plan"
+	stageApplyVerify = "apply_verify"
+	stageCommit      = "commit"
 )
 
 // RangeSource 为运行器提供不可变网段快照，便于测试替换远程来源。
@@ -40,10 +51,23 @@ type RangeSource interface {
 	Update(context.Context, bool) (ranges.UpdateResult, error)
 }
 
+// RangeSnapshotLoader 在官方网段刷新异常时提供本地最后有效快照。
+type RangeSnapshotLoader interface {
+	Load() (ranges.Snapshot, error)
+}
+
 // Benchmarker 隔离两阶段测速实现。
 type Benchmarker interface {
 	Run(context.Context, []netip.Addr, func(benchmark.Progress)) ([]benchmark.Result, error)
 }
+
+// NodePoolValidator 复用有效节点池时只验证当前 TCP/TLS 物理路径，不重新下载测速。
+type NodePoolValidator interface {
+	Validate(context.Context, []benchmark.Result, func(benchmark.Progress)) ([]benchmark.Result, error)
+}
+
+// NetworkFingerprinter 返回当前默认路径和活动接口摘要，用于使跨网络节点池失效。
+type NetworkFingerprinter func(context.Context, time.Duration) (string, error)
 
 // PolicyApplier 隔离代理策略协调器。
 type PolicyApplier interface {
@@ -140,27 +164,32 @@ type RunReport struct {
 	BenchmarkPath             []proxy.BenchmarkPathEvidence `json:"benchmark_path,omitempty"`
 	DomainAllocations         []DomainAllocationResult      `json:"domain_allocations,omitempty"`
 	Warnings                  []string                      `json:"warnings,omitempty"`
+	NodePoolID                string                        `json:"node_pool_id,omitempty"`
+	NodePoolState             string                        `json:"node_pool_state,omitempty"`
+	NodePoolValidUntil        time.Time                     `json:"node_pool_valid_until,omitempty"`
 	domainMappings            []proxy.DomainMapping
 	domainAllocationCompleted bool
 }
 
 // Runner 协调网段、候选、测速、稳定选择、路由和代理策略的完整事务。
 type Runner struct {
-	config         config.Config
-	ranges         RangeSource
-	benchmark      Benchmarker
-	store          *store.Store
-	routes         *cfnetwork.RouteController
-	physicalPath   cfnetwork.PhysicalPath
-	policy         PolicyApplier
-	domainVerifier DomainMappingVerifier
-	domainResolver DomainResolver
-	domainDownload DomainDownloadTester
-	logger         *slog.Logger
-	now            func() time.Time
-	runMutex       sync.Mutex
-	pendingRuns    atomic.Int32
-	operationGate  operationGate
+	config                   config.Config
+	ranges                   RangeSource
+	benchmark                Benchmarker
+	store                    *store.Store
+	routes                   *cfnetwork.RouteController
+	physicalPath             cfnetwork.PhysicalPath
+	policy                   PolicyApplier
+	domainVerifier           DomainMappingVerifier
+	domainResolver           DomainResolver
+	domainDownload           DomainDownloadTester
+	networkFingerprint       NetworkFingerprinter
+	activeNetworkFingerprint string
+	logger                   *slog.Logger
+	now                      func() time.Time
+	runMutex                 sync.Mutex
+	pendingRuns              atomic.Int32
+	operationGate            operationGate
 }
 
 // SetDomainMappingVerifier 注入生产环境的物理接口 HTTPS 验证器。
@@ -176,6 +205,11 @@ func (r *Runner) SetDomainResolver(resolver DomainResolver) {
 // SetDomainDownloadTester 注入绑定物理接口的手动域名下载复测器。
 func (r *Runner) SetDomainDownloadTester(tester DomainDownloadTester) {
 	r.domainDownload = tester
+}
+
+// SetNetworkFingerprinter 注入当前操作系统网络路径指纹读取器。
+func (r *Runner) SetNetworkFingerprinter(fingerprinter NetworkFingerprinter) {
+	r.networkFingerprint = fingerprinter
 }
 
 // TestManualDomain 使用临时物理路由完成单个手动域名的 SNI、Host 和同域下载复测。
@@ -299,11 +333,13 @@ func (r *Runner) Reconfigure(
 	r.config, r.ranges, r.benchmark = cfg, rangeSource, benchmarker
 	r.routes, r.physicalPath, r.policy = routes, physicalPath, policy
 	r.domainResolver, r.domainVerifier, r.domainDownload = domainResolver, domainVerifier, domainDownload
+	r.activeNetworkFingerprint = ""
 
 	rollback := func() {
 		r.config, r.ranges, r.benchmark = previousConfig, previousRanges, previousBenchmark
 		r.routes, r.physicalPath, r.policy = previousRoutes, previousPath, previousPolicy
 		r.domainResolver, r.domainVerifier, r.domainDownload = previousResolver, previousVerifier, previousDownload
+		r.activeNetworkFingerprint = ""
 	}
 	if refreshPolicy && r.store.Snapshot().Policy != nil {
 		if r.policy == nil {
@@ -358,6 +394,7 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 	defer r.operationGate.release()
 	report.ID = newRunID()
 	report.StartedAt = r.now().UTC()
+	currentStage := stagePoolRefresh
 	r.emit(emit, Event{RunID: report.ID, Type: "run.started", Stage: "ranges", Message: "optimization started"})
 	if err := r.store.Update(func(state *store.State) error {
 		state.Running = true
@@ -369,6 +406,11 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 	}
 	defer func() {
 		report.FinishedAt = r.now().UTC()
+		if runErr != nil {
+			if checkpointErr := r.markCheckpointFailure(report.ID, currentStage, runErr); checkpointErr != nil {
+				runErr = errors.Join(runErr, checkpointErr)
+			}
+		}
 		if finalizeErr := r.finalize(report, runErr); finalizeErr != nil {
 			runErr = errors.Join(runErr, finalizeErr)
 		}
@@ -387,7 +429,23 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 
 	rangeResult, err := r.ranges.Update(ctx, options.ForceRangeRefresh)
 	if err != nil {
-		return report, fmt.Errorf("update ranges: %w", err)
+		if ctx.Err() != nil {
+			return report, ctx.Err()
+		}
+		state := r.store.Snapshot()
+		loader, canLoadCached := r.ranges.(RangeSnapshotLoader)
+		if state.NodePool == nil || !canLoadCached {
+			return report, fmt.Errorf("update ranges: %w", err)
+		}
+		cachedSnapshot, loadErr := loader.Load()
+		if loadErr != nil {
+			return report, errors.Join(fmt.Errorf("update ranges: %w", err), fmt.Errorf("load cached ranges for old node pool: %w", loadErr))
+		}
+		if cachedSnapshot.Hash != state.NodePool.RangeHash {
+			return report, errors.Join(fmt.Errorf("update ranges: %w", err), fmt.Errorf("cached ranges hash %q does not match old node pool %q", cachedSnapshot.Hash, state.NodePool.RangeHash))
+		}
+		rangeResult = ranges.UpdateResult{Snapshot: cachedSnapshot, Warning: fmt.Sprintf("range refresh failed; using cached snapshot for old node pool: %v", err)}
+		r.logger.Warn("官方网段刷新失败，已读取与旧节点池匹配的本地快照", "run_id", report.ID, "range_hash", cachedSnapshot.Hash, "error", err, "result", "degraded")
 	}
 	report.RangeSource = rangeResult.Snapshot.Source
 	report.RangeHash = rangeResult.Snapshot.Hash
@@ -418,61 +476,23 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 	}()
 
 	stateBefore := r.store.Snapshot()
-	addresses, err := r.generateCandidates(rangeResult.Snapshot, stateBefore, report.StartedAt)
+	report.Results, report.NodePoolState, report.NodePoolID, report.NodePoolValidUntil, report.BenchmarkPath, err = r.resolveNodePool(ctx, report.ID, rangeResult.Snapshot, stateBefore, options, temporaryTransactions, emit)
 	if err != nil {
 		return report, err
 	}
-	var benchmarkGuard proxy.BenchmarkGuard
-	var benchmarkGuardResult proxy.BenchmarkGuardResult
-	benchmarkGuardActive := false
-	defer func() {
-		if !benchmarkGuardActive {
-			return
-		}
-		if cleanupErr := r.endBenchmarkGuard(ctx, benchmarkGuard, benchmarkGuardResult); cleanupErr != nil {
-			runErr = errors.Join(runErr, fmt.Errorf("clean benchmark DIRECT guard: %w", cleanupErr))
-		}
-	}()
-	if options.ApplyPolicy && r.policy != nil {
-		benchmarkGuard, _ = r.policy.(proxy.BenchmarkGuard)
-		if benchmarkGuard != nil {
-			guardPolicy := benchmarkDirectPolicy(addresses)
-			benchmarkGuardResult, err = benchmarkGuard.BeginBenchmarkGuard(ctx, guardPolicy, addresses)
-			if err != nil {
-				return report, fmt.Errorf("apply benchmark DIRECT guard: %w", err)
-			}
-			benchmarkGuardActive = len(benchmarkGuardResult.Receipts) > 0
-			report.BenchmarkPath = append([]proxy.BenchmarkPathEvidence(nil), benchmarkGuardResult.Evidence...)
-			for index := range report.BenchmarkPath {
-				evidence := &report.BenchmarkPath[index]
-				if evidence.ProxyObserved && evidence.DirectVerified {
-					evidence.PhysicalRouteUsed = len(temporaryTransactions) > 0
-				} else if !evidence.ProxyObserved && evidence.SocketBound && len(temporaryTransactions) > 0 {
-					evidence.DirectVerified = true
-					evidence.PhysicalRouteUsed = true
-					evidence.Verification = "bound_socket_and_verified_physical_route"
-				}
-				if !evidence.DirectVerified {
-					return report, fmt.Errorf("benchmark path to %s lacks DIRECT connection or verified physical-route evidence", evidence.Target)
-				}
-				r.logger.Info("测速直连路径验证完成", "run_id", report.ID, "adapter", evidence.Adapter, "interface", evidence.Interface, "target_ip", evidence.Target, "proxy_observed", evidence.ProxyObserved, "physical_route_used", evidence.PhysicalRouteUsed, "result", "verified")
-			}
+	if report.NodePoolState == "stale" {
+		report.Warnings = append(report.Warnings, "节点池刷新失败，本轮继续使用已过期但通过轻量校验的旧节点池")
+	}
+	currentStage = stageDomain
+	stateBefore = r.store.Snapshot()
+	checkpoint := stateBefore.Optimization
+	resumeDomain := r.resumableDomainCheckpoint(checkpoint, report.NodePoolID)
+	if !resumeDomain {
+		if err := r.updateCheckpoint(report.ID, stageDomain, report.NodePoolID, nil); err != nil {
+			return report, fmt.Errorf("persist domain stage checkpoint: %w", err)
 		}
 	}
-	r.logger.Info("候选生成完成", "run_id", report.ID, "candidates", len(addresses), "range_hash", report.RangeHash)
-	r.emit(emit, Event{RunID: report.ID, Type: "stage.started", Stage: "benchmark", Message: fmt.Sprintf("testing %d candidates", len(addresses))})
-	report.Results, err = r.benchmark.Run(ctx, addresses, func(progress benchmark.Progress) {
-		r.emit(emit, Event{RunID: report.ID, Type: "benchmark.progress", Stage: string(progress.Stage), Progress: &progress})
-	})
-	if err != nil {
-		return report, fmt.Errorf("benchmark candidates: %w", err)
-	}
-	if benchmarkGuardActive {
-		if err := r.endBenchmarkGuard(ctx, benchmarkGuard, benchmarkGuardResult); err != nil {
-			return report, fmt.Errorf("rollback benchmark DIRECT guard before final policy: %w", err)
-		}
-		benchmarkGuardActive = false
-	}
+	r.emit(emit, Event{RunID: report.ID, Type: "stage.started", Stage: stageDomain, Message: "qualifying accelerated domains from node pool"})
 	ApplyHistory(report.Results, stateBefore.Nodes)
 	sort.SliceStable(report.Results, func(i, j int) bool { return report.Results[i].Score > report.Results[j].Score })
 	report.IPv4Decision = Decide(report.Results, stateBefore.CurrentIPv4, 4, r.config.Benchmark, r.now())
@@ -483,24 +503,40 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 	var removedRouteTransactions []string
 	failedAddresses := make(map[string]struct{})
 	if options.ApplyPolicy {
+		r.emit(emit, Event{RunID: report.ID, Type: "stage.started", Stage: stagePolicyPlan, Message: "planning accelerated domain policy"})
+		// 保留既有 IPC 消费者的 policy 阶段事件，同时提供更细的检查点阶段。
 		r.emit(emit, Event{RunID: report.ID, Type: "stage.started", Stage: "policy", Message: "applying and verifying selected policy"})
 		failedDomainAddresses := make(map[string]map[string]struct{})
 		failedVerificationErrors := make(map[string]error)
+		resumedPolicyPlan := false
 	retryPolicy:
 		for {
-			var allocationWarnings []string
-			report.domainMappings, report.DomainAllocations, allocationWarnings, err = r.allocateDomainMappings(ctx, rangeResult.Snapshot, report.Results, r.store.Snapshot(), domainAllocationOptions{
-				excludedAddresses: failedDomainAddresses,
-			})
-			if err != nil {
-				return report, fmt.Errorf("allocate accelerated domains: %w", err)
+			if resumeDomain {
+				var resumed bool
+				report.domainMappings, report.DomainAllocations, resumed = r.restoreDomainCheckpoint(checkpoint)
+				if !resumed {
+					resumeDomain = false
+					continue retryPolicy
+				}
+				report.domainAllocationCompleted = true
+				resumeDomain = false
+				resumedPolicyPlan = true
+			} else {
+				var allocationWarnings []string
+				report.domainMappings, report.DomainAllocations, allocationWarnings, err = r.allocateDomainMappings(ctx, rangeResult.Snapshot, report.Results, r.store.Snapshot(), domainAllocationOptions{
+					excludedAddresses: failedDomainAddresses,
+				})
+				if err != nil {
+					return report, fmt.Errorf("allocate accelerated domains: %w", err)
+				}
+				report.Warnings = append(report.Warnings, allocationWarnings...)
+				report.domainAllocationCompleted = true
 			}
-			report.Warnings = append(report.Warnings, allocationWarnings...)
-			report.domainAllocationCompleted = true
 			if failure := manualDomainAllocationFailure(report); failure != "" {
 				if recordErr := r.persistDomainAllocationFailure(report); recordErr != nil {
 					return report, errors.Join(errors.New(failure), recordErr)
 				}
+				currentStage = stageDomain
 				return report, errors.New(failure)
 			}
 			for domain, verificationFailure := range failedVerificationErrors {
@@ -515,10 +551,19 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 					continue retryPolicy
 				}
 			}
+			if !resumedPolicyPlan {
+				if err := r.persistPolicyPlanCheckpoint(report.ID, report.NodePoolID, stateBefore, report); err != nil {
+					return report, fmt.Errorf("persist policy plan checkpoint: %w", err)
+				}
+			}
+			resumedPolicyPlan = false
+			currentStage = stageApplyVerify
+			r.emit(emit, Event{RunID: report.ID, Type: "stage.started", Stage: stageApplyVerify, Message: "applying and verifying selected policy"})
 			applied, removedRouteTransactions, err = r.applySelectedPolicy(ctx, stateBefore, report)
 			if err == nil {
 				break
 			}
+			resumeDomain = false
 			var verificationErr *proxy.DomainVerificationError
 			if errors.As(err, &verificationErr) && verificationErr.Address != "" {
 				domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(verificationErr.Domain)), ".")
@@ -555,7 +600,10 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 		stateBefore = r.store.Snapshot()
 		report.PolicyApplied = true
 	}
+	currentStage = stageCommit
+	r.emit(emit, Event{RunID: report.ID, Type: "stage.started", Stage: stageCommit, Message: "committing optimization state"})
 	if err := r.persistSuccessfulRun(report, stateBefore, applied, options.ApplyPolicy); err != nil {
+		currentStage = stageApplyVerify
 		if rollbackErr := r.rollbackRoutes(ctx, removedRouteTransactions); rollbackErr != nil {
 			err = errors.Join(err, fmt.Errorf("restore obsolete routes after persistence failure: %w", rollbackErr))
 		}
@@ -574,6 +622,426 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 		}
 	}
 	return report, nil
+}
+
+// resolveNodePool 复用有效节点池，或在刷新失败时验证并降级使用兼容的旧池。
+func (r *Runner) resolveNodePool(
+	ctx context.Context,
+	runID string,
+	snapshot ranges.Snapshot,
+	state store.State,
+	options RunOptions,
+	temporaryTransactions []string,
+	emit func(Event),
+) ([]benchmark.Result, string, string, time.Time, []proxy.BenchmarkPathEvidence, error) {
+	now := r.now().UTC()
+	benchmarkHash, err := stableHash(r.config.Benchmark)
+	if err != nil {
+		return nil, "", "", time.Time{}, nil, fmt.Errorf("hash benchmark config: %w", err)
+	}
+	networkFingerprint, err := r.measureNetworkFingerprint(ctx)
+	if err != nil {
+		return nil, "", "", time.Time{}, nil, fmt.Errorf("fingerprint physical path: %w", err)
+	}
+	r.activeNetworkFingerprint = networkFingerprint
+	pool := state.NodePool
+	refreshInterval := r.config.Schedule.Interval.Duration()
+	compatible := nodePoolCompatible(pool, snapshot.Hash, benchmarkHash, networkFingerprint, refreshInterval)
+	validator, canValidate := r.benchmark.(NodePoolValidator)
+	freshValidationFailed := false
+	if !options.ForceRangeRefresh && compatible && now.Before(pool.ValidUntil) {
+		r.emit(emit, Event{RunID: runID, Type: "stage.started", Stage: stagePoolReuse, Message: "validating reusable node pool"})
+		results := append([]benchmark.Result(nil), pool.Candidates...)
+		if canValidate {
+			validated, evidence, validateErr := r.validateNodePool(ctx, runID, validator, results, options.ApplyPolicy, temporaryTransactions, emit)
+			if validateErr == nil {
+				r.logger.Info("节点池已复用", "run_id", runID, "pool_id", pool.ID, "valid_until", pool.ValidUntil, "candidates", len(validated), "result", "fresh")
+				return validated, "fresh", pool.ID, pool.ValidUntil, evidence, nil
+			}
+			if ctx.Err() != nil {
+				return nil, "", "", time.Time{}, evidence, ctx.Err()
+			}
+			freshValidationFailed = true
+			r.logger.Warn("有效节点池轻量校验失败，将执行完整刷新", "run_id", runID, "pool_id", pool.ID, "error", validateErr)
+		} else {
+			r.logger.Warn("节点池验证器不可用，复用持久化节点池", "run_id", runID, "pool_id", pool.ID, "result", "degraded")
+			return results, "fresh", pool.ID, pool.ValidUntil, nil, nil
+		}
+	}
+
+	r.emit(emit, Event{RunID: runID, Type: "stage.started", Stage: stagePoolRefresh, Message: "refreshing benchmark node pool"})
+	addresses, err := r.generateCandidates(snapshot, state, now)
+	if err != nil {
+		return nil, "", "", time.Time{}, nil, err
+	}
+	r.logger.Info("候选生成完成", "run_id", runID, "candidates", len(addresses), "range_hash", snapshot.Hash)
+	finishGuard, evidence, err := r.beginNodePoolProbe(ctx, runID, addresses, options.ApplyPolicy, temporaryTransactions)
+	if err != nil {
+		return nil, "", "", time.Time{}, nil, err
+	}
+	results, benchmarkErr := r.benchmark.Run(ctx, addresses, func(progress benchmark.Progress) {
+		r.emit(emit, Event{RunID: runID, Type: "benchmark.progress", Stage: string(progress.Stage), Progress: &progress})
+	})
+	guardErr := finishGuard()
+	if guardErr != nil {
+		return nil, "", "", time.Time{}, evidence, fmt.Errorf("rollback benchmark DIRECT guard before final policy: %w", guardErr)
+	}
+	if benchmarkErr == nil {
+		sort.SliceStable(results, func(i, j int) bool { return results[i].Score > results[j].Score })
+		if !hasQualifiedResult(results) {
+			if !compatible || freshValidationFailed {
+				return results, "unavailable", "", time.Time{}, evidence, nil
+			}
+			benchmarkErr = errors.New("benchmark produced no qualified node")
+		}
+		if benchmarkErr == nil {
+			poolCandidates := make([]benchmark.Result, 0, len(results))
+			for _, result := range results {
+				if result.Qualified && result.IP.IsValid() {
+					poolCandidates = append(poolCandidates, result)
+				}
+			}
+			validUntil := now.Add(refreshInterval).UTC()
+			pool = &store.NodePoolSnapshot{
+				Version: store.NodePoolSchemaVersion, ID: newRunID(), CreatedAt: now, ValidUntil: validUntil,
+				RefreshInterval: refreshInterval,
+				RangeSource:     snapshot.Source, RangeHash: snapshot.Hash, NetworkFingerprint: networkFingerprint,
+				BenchmarkConfigHash: benchmarkHash, Candidates: poolCandidates,
+			}
+			pool.Checksum, err = nodePoolChecksum(pool)
+			if err != nil {
+				return nil, "", "", time.Time{}, evidence, fmt.Errorf("checksum node pool: %w", err)
+			}
+			if err := r.persistNodePool(pool); err != nil {
+				return nil, "", "", time.Time{}, evidence, fmt.Errorf("persist node pool: %w", err)
+			}
+			r.logger.Info("节点池刷新完成", "run_id", runID, "pool_id", pool.ID, "valid_until", validUntil, "candidates", len(results), "result", "refreshed")
+			return results, "refreshed", pool.ID, validUntil, evidence, nil
+		}
+	}
+	if ctx.Err() != nil {
+		return nil, "", "", time.Time{}, evidence, ctx.Err()
+	}
+	if compatible && !freshValidationFailed {
+		staleResults := append([]benchmark.Result(nil), pool.Candidates...)
+		var staleEvidence []proxy.BenchmarkPathEvidence
+		if canValidate {
+			staleResults, staleEvidence, err = r.validateNodePool(ctx, runID, validator, staleResults, options.ApplyPolicy, temporaryTransactions, emit)
+			if err != nil {
+				return nil, "", "", time.Time{}, append(evidence, staleEvidence...), errors.Join(fmt.Errorf("benchmark candidates: %w", benchmarkErr), fmt.Errorf("validate stale node pool: %w", err))
+			}
+		}
+		r.logger.Warn("节点池刷新失败，已降级复用旧池", "run_id", runID, "pool_id", pool.ID, "error", benchmarkErr, "result", "stale")
+		return staleResults, "stale", pool.ID, pool.ValidUntil, append(evidence, staleEvidence...), nil
+	}
+	return nil, "", "", time.Time{}, evidence, fmt.Errorf("benchmark candidates: %w", benchmarkErr)
+}
+
+// validateNodePool 对节点池排名候选执行当前网络下的 TCP/TLS 轻量校验。
+func (r *Runner) validateNodePool(
+	ctx context.Context,
+	runID string,
+	validator NodePoolValidator,
+	results []benchmark.Result,
+	applyPolicy bool,
+	temporaryTransactions []string,
+	emit func(Event),
+) ([]benchmark.Result, []proxy.BenchmarkPathEvidence, error) {
+	addresses := qualifiedAddresses(results)
+	finishGuard, evidence, err := r.beginNodePoolProbe(ctx, runID, addresses, applyPolicy, temporaryTransactions)
+	if err != nil {
+		return nil, nil, err
+	}
+	validated, validateErr := validator.Validate(ctx, results, func(progress benchmark.Progress) {
+		r.emit(emit, Event{RunID: runID, Type: "benchmark.progress", Stage: string(progress.Stage), Progress: &progress})
+	})
+	guardErr := finishGuard()
+	if guardErr != nil {
+		return nil, evidence, errors.Join(validateErr, fmt.Errorf("clean node pool validation guard: %w", guardErr))
+	}
+	return validated, evidence, validateErr
+}
+
+// beginNodePoolProbe 在需要时建立并验证临时 DIRECT 保护，返回幂等清理函数。
+func (r *Runner) beginNodePoolProbe(ctx context.Context, runID string, addresses []netip.Addr, applyPolicy bool, temporaryTransactions []string) (func() error, []proxy.BenchmarkPathEvidence, error) {
+	noop := func() error { return nil }
+	if !applyPolicy || r.policy == nil || len(addresses) == 0 {
+		return noop, nil, nil
+	}
+	guard, _ := r.policy.(proxy.BenchmarkGuard)
+	if guard == nil {
+		return noop, nil, nil
+	}
+	guardResult, err := guard.BeginBenchmarkGuard(ctx, benchmarkDirectPolicy(addresses), addresses)
+	if err != nil {
+		return noop, nil, fmt.Errorf("apply benchmark DIRECT guard: %w", err)
+	}
+	evidence := append([]proxy.BenchmarkPathEvidence(nil), guardResult.Evidence...)
+	for index := range evidence {
+		item := &evidence[index]
+		if item.ProxyObserved && item.DirectVerified {
+			item.PhysicalRouteUsed = len(temporaryTransactions) > 0
+		} else if !item.ProxyObserved && item.SocketBound && len(temporaryTransactions) > 0 {
+			item.DirectVerified = true
+			item.PhysicalRouteUsed = true
+			item.Verification = "bound_socket_and_verified_physical_route"
+		}
+		if !item.DirectVerified {
+			cleanupErr := r.endBenchmarkGuard(ctx, guard, guardResult)
+			return noop, evidence, errors.Join(fmt.Errorf("benchmark path to %s lacks DIRECT connection or verified physical-route evidence", item.Target), cleanupErr)
+		}
+		r.logger.Info("测速直连路径验证完成", "run_id", runID, "adapter", item.Adapter, "interface", item.Interface, "target_ip", item.Target, "proxy_observed", item.ProxyObserved, "physical_route_used", item.PhysicalRouteUsed, "result", "verified")
+	}
+	finished := false
+	finish := func() error {
+		if finished {
+			return nil
+		}
+		finished = true
+		return r.endBenchmarkGuard(ctx, guard, guardResult)
+	}
+	return finish, evidence, nil
+}
+
+func qualifiedAddresses(results []benchmark.Result) []netip.Addr {
+	addresses := make([]netip.Addr, 0, len(results))
+	seen := make(map[netip.Addr]struct{}, len(results))
+	for _, result := range results {
+		address := result.IP.Unmap()
+		if !result.Qualified || !address.IsValid() {
+			continue
+		}
+		if _, exists := seen[address]; exists {
+			continue
+		}
+		seen[address] = struct{}{}
+		addresses = append(addresses, address)
+	}
+	return addresses
+}
+
+func hasQualifiedResult(results []benchmark.Result) bool {
+	for _, result := range results {
+		if result.Qualified && result.IP.IsValid() {
+			return true
+		}
+	}
+	return false
+}
+
+func nodePoolCompatible(pool *store.NodePoolSnapshot, rangeHash, benchmarkHash, networkFingerprint string, refreshInterval time.Duration) bool {
+	if pool == nil || pool.Version != store.NodePoolSchemaVersion || pool.ID == "" || len(pool.Candidates) == 0 {
+		return false
+	}
+	if pool.RangeHash != rangeHash || pool.BenchmarkConfigHash != benchmarkHash || pool.NetworkFingerprint != networkFingerprint || pool.RefreshInterval != refreshInterval {
+		return false
+	}
+	checksum, err := nodePoolChecksum(pool)
+	return err == nil && checksum == pool.Checksum
+}
+
+func nodePoolChecksum(pool *store.NodePoolSnapshot) (string, error) {
+	if pool == nil {
+		return "", errors.New("node pool is required")
+	}
+	clone := *pool
+	clone.Checksum = ""
+	return stableHash(clone)
+}
+
+// measureNetworkFingerprint 优先读取实时网络摘要，读取失败时使用已发现物理路径摘要降级。
+func (r *Runner) measureNetworkFingerprint(ctx context.Context) (string, error) {
+	if r.networkFingerprint != nil {
+		fingerprint, err := r.networkFingerprint(ctx, r.config.Network.CommandTimeout.Duration())
+		if err == nil && fingerprint != "" {
+			return fingerprint, nil
+		}
+		if err != nil {
+			r.logger.Warn("实时网络路径指纹读取失败，改用已发现物理路径", "error", err, "result", "degraded")
+		}
+	}
+	return stableHash(r.physicalPath)
+}
+
+func (r *Runner) checkpointNetworkFingerprint() (string, error) {
+	if r.activeNetworkFingerprint != "" {
+		return r.activeNetworkFingerprint, nil
+	}
+	return stableHash(r.physicalPath)
+}
+
+func stableHash(value any) (string, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+// persistNodePool 原子切换活动节点池；失败刷新不会触碰旧池。
+func (r *Runner) persistNodePool(pool *store.NodePoolSnapshot) error {
+	return r.store.Update(func(state *store.State) error {
+		state.NodePool = pool
+		if state.Optimization != nil && state.Optimization.PoolID != pool.ID {
+			state.Optimization = nil
+		}
+		return nil
+	})
+}
+
+// updateCheckpoint 原子保存阶段证据，并保留同一节点池上一次失败的域名证据。
+func (r *Runner) updateCheckpoint(runID, stage, poolID string, evidence []store.DomainEvidence) error {
+	configHash, err := r.optimizationConfigHash()
+	if err != nil {
+		return err
+	}
+	networkFingerprint, err := r.checkpointNetworkFingerprint()
+	if err != nil {
+		return err
+	}
+	now := r.now().UTC()
+	return r.store.Update(func(state *store.State) error {
+		previous := state.Optimization
+		checkpoint := &store.OptimizationCheckpoint{Version: store.OptimizationCheckpointVersion, RunID: runID, CurrentStage: stage, PoolID: poolID, ConfigHash: configHash, NetworkFingerprint: networkFingerprint, UpdatedAt: now, Attempts: map[string]int{}}
+		if previous != nil && previous.PoolID == poolID && previous.ConfigHash == configHash && previous.NetworkFingerprint == networkFingerprint && previous.CurrentStage != stageDomain {
+			checkpoint.DomainEvidence = append([]store.DomainEvidence(nil), previous.DomainEvidence...)
+			checkpoint.PolicyPlan = append(json.RawMessage(nil), previous.PolicyPlan...)
+			for key, value := range previous.Attempts {
+				checkpoint.Attempts[key] = value
+			}
+		}
+		if evidence != nil {
+			checkpoint.DomainEvidence = append([]store.DomainEvidence(nil), evidence...)
+		}
+		checkpoint.Attempts[stage]++
+		state.Optimization = checkpoint
+		return nil
+	})
+}
+
+// persistPolicyPlanCheckpoint 保存已完成域名证据和待应用策略计划，应用失败时可跳过域名复测。
+func (r *Runner) persistPolicyPlanCheckpoint(runID, poolID string, state store.State, report RunReport) error {
+	if r.policy == nil {
+		return errors.New("policy application requested but no adapter is configured")
+	}
+	finalPolicy, err := r.policyForDecisions(state, report, false)
+	if err != nil {
+		return err
+	}
+	transitionPolicy, err := r.policyForDecisions(state, report, true)
+	if err != nil {
+		return err
+	}
+	planned, err := json.Marshal(struct {
+		Final      proxy.DirectPolicy `json:"final"`
+		Transition proxy.DirectPolicy `json:"transition"`
+	}{Final: finalPolicy, Transition: transitionPolicy})
+	if err != nil {
+		return err
+	}
+	evidence := domainEvidenceFromAllocations(report.DomainAllocations, r.now().UTC().Add(domainEvidenceLifetime))
+	if err := r.updateCheckpoint(runID, stagePolicyPlan, poolID, evidence); err != nil {
+		return err
+	}
+	return r.store.Update(func(state *store.State) error {
+		if state.Optimization == nil {
+			return errors.New("optimization checkpoint disappeared while saving policy plan")
+		}
+		state.Optimization.PolicyPlan = planned
+		return nil
+	})
+}
+
+// markCheckpointFailure 记录当前阶段错误，让下一次一键优选能判断可复用检查点。
+func (r *Runner) markCheckpointFailure(runID, stage string, operationErr error) error {
+	if operationErr == nil {
+		return nil
+	}
+	configHash, err := r.optimizationConfigHash()
+	if err != nil {
+		return err
+	}
+	networkFingerprint, err := r.checkpointNetworkFingerprint()
+	if err != nil {
+		return err
+	}
+	return r.store.Update(func(state *store.State) error {
+		checkpoint := state.Optimization
+		if checkpoint == nil || checkpoint.Version != store.OptimizationCheckpointVersion {
+			checkpoint = &store.OptimizationCheckpoint{Version: store.OptimizationCheckpointVersion, Attempts: map[string]int{}}
+		}
+		checkpoint.RunID = runID
+		checkpoint.CurrentStage = stage
+		checkpoint.ConfigHash = configHash
+		checkpoint.NetworkFingerprint = networkFingerprint
+		checkpoint.LastError = operationErr.Error()
+		checkpoint.UpdatedAt = r.now().UTC()
+		if checkpoint.Attempts == nil {
+			checkpoint.Attempts = map[string]int{}
+		}
+		checkpoint.Attempts[stage]++
+		state.Optimization = checkpoint
+		return nil
+	})
+}
+
+func (r *Runner) optimizationConfigHash() (string, error) {
+	return stableHash(struct {
+		Benchmark    config.BenchmarkConfig    `json:"benchmark"`
+		Network      config.NetworkConfig      `json:"network"`
+		Acceleration config.AccelerationConfig `json:"acceleration"`
+		Proxy        config.ProxyConfig        `json:"proxy"`
+	}{Benchmark: r.config.Benchmark, Network: r.config.Network, Acceleration: r.config.Acceleration, Proxy: r.config.Proxy})
+}
+
+func (r *Runner) resumableDomainCheckpoint(checkpoint *store.OptimizationCheckpoint, poolID string) bool {
+	if checkpoint == nil || poolID == "" || checkpoint.PoolID != poolID || (checkpoint.CurrentStage != stagePolicyPlan && checkpoint.CurrentStage != stageApplyVerify) {
+		return false
+	}
+	configHash, err := r.optimizationConfigHash()
+	if err != nil || checkpoint.ConfigHash != configHash {
+		return false
+	}
+	networkFingerprint, err := r.checkpointNetworkFingerprint()
+	if err != nil || checkpoint.NetworkFingerprint != networkFingerprint || len(checkpoint.DomainEvidence) == 0 {
+		return false
+	}
+	now := r.now()
+	for _, evidence := range checkpoint.DomainEvidence {
+		if evidence.AssignedAddress == "" || evidence.ValidUntil.Before(now) || !evidence.CloudflareVerified || !evidence.PreflightVerified {
+			return false
+		}
+		if evidence.DownloadVerified && evidence.DownloadMbps < r.config.Acceleration.ManualDownloadMinMbps {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *Runner) restoreDomainCheckpoint(checkpoint *store.OptimizationCheckpoint) ([]proxy.DomainMapping, []DomainAllocationResult, bool) {
+	if checkpoint == nil || len(checkpoint.DomainEvidence) == 0 {
+		return nil, nil, false
+	}
+	mappings := make([]proxy.DomainMapping, 0, len(checkpoint.DomainEvidence))
+	allocations := make([]DomainAllocationResult, 0, len(checkpoint.DomainEvidence))
+	for _, evidence := range checkpoint.DomainEvidence {
+		if evidence.AssignedAddress == "" {
+			return nil, nil, false
+		}
+		mappings = append(mappings, proxy.DomainMapping{Domain: evidence.Domain, Addresses: []string{evidence.AssignedAddress}})
+		allocations = append(allocations, DomainAllocationResult{Domain: evidence.Domain, Source: evidence.Source, ResolvedAddresses: append([]string(nil), evidence.ResolvedAddresses...), AssignedAddress: evidence.AssignedAddress, DownloadAddress: evidence.DownloadAddress, DownloadProbeURL: evidence.DownloadProbeURL, CloudflareVerified: evidence.CloudflareVerified, PreflightVerified: evidence.PreflightVerified, DownloadVerified: evidence.DownloadVerified, DownloadMbps: evidence.DownloadMbps})
+	}
+	return mappings, allocations, true
+}
+
+func domainEvidenceFromAllocations(allocations []DomainAllocationResult, validUntil time.Time) []store.DomainEvidence {
+	now := time.Now().UTC()
+	evidence := make([]store.DomainEvidence, 0, len(allocations))
+	for _, allocation := range allocations {
+		evidence = append(evidence, store.DomainEvidence{Domain: allocation.Domain, Source: allocation.Source, ResolvedAddresses: append([]string(nil), allocation.ResolvedAddresses...), AssignedAddress: allocation.AssignedAddress, CloudflareVerified: allocation.CloudflareVerified, PreflightVerified: allocation.PreflightVerified, DownloadVerified: allocation.DownloadVerified, DownloadMbps: allocation.DownloadMbps, DownloadAddress: allocation.DownloadAddress, DownloadProbeURL: allocation.DownloadProbeURL, TestedAt: now, ValidUntil: validUntil, Error: allocation.Error})
+	}
+	return evidence
 }
 
 // benchmarkDirectPolicy 将本次实际候选收敛为精确主机规则，避免临时保护扩大范围。
@@ -1818,6 +2286,13 @@ func (r *Runner) removeObsoletePolicyRoutes(ctx context.Context, previous *store
 
 func (r *Runner) persistSuccessfulRun(report RunReport, before store.State, applied proxy.ApplyResult, policyApplied bool) error {
 	now := r.now().UTC()
+	details, err := json.Marshal(report.Results)
+	if err != nil {
+		return err
+	}
+	if err := r.store.SaveRunDetail(report.ID, details, r.config.History.DetailRetention.Duration()); err != nil {
+		return err
+	}
 	if err := r.store.Update(func(state *store.State) error {
 		RecordResults(state.Nodes, report.Results, r.config.Benchmark, now)
 		if policyApplied {
@@ -1842,15 +2317,12 @@ func (r *Runner) persistSuccessfulRun(report RunReport, before store.State, appl
 			state.PendingPolicy = nil
 		}
 		recordDomainAllocationResults(state, report.DomainAllocations, policyApplied, now)
+		state.Optimization = nil
 		return nil
 	}); err != nil {
 		return err
 	}
-	details, err := json.Marshal(report.Results)
-	if err != nil {
-		return err
-	}
-	return r.store.SaveRunDetail(report.ID, details, r.config.History.DetailRetention.Duration())
+	return nil
 }
 
 // persistDomainAllocationFailure 记录本次域名分配失败，但不触碰上一份已验证策略。

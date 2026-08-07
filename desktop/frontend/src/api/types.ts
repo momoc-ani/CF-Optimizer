@@ -54,6 +54,23 @@ export interface ServiceState {
   last_started_at?: string;
   last_ended_at?: string;
   running: boolean;
+  node_pool?: NodePoolStatus;
+  optimization?: OptimizationStatus;
+}
+
+export interface NodePoolStatus {
+  id: string;
+  created_at: string;
+  valid_until: string;
+  candidates: number;
+  stale: boolean;
+}
+
+export interface OptimizationStatus {
+  stage: string;
+  run_id?: string;
+  last_error?: string;
+  updated_at: string;
 }
 
 export interface DomainDiscovery {
@@ -253,6 +270,9 @@ export interface RunReport {
   benchmark_path?: BenchmarkPathEvidence[];
   domain_allocations?: DomainAllocationResult[];
   warnings?: string[];
+  node_pool_id?: string;
+  node_pool_state?: 'refreshed' | 'fresh' | 'stale' | 'unavailable';
+  node_pool_valid_until?: string;
 }
 
 export type QuickStartMode = 'apply_once' | 'apply_and_remember';

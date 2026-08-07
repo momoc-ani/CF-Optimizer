@@ -64,6 +64,19 @@ func (staticBenchmark) Run(_ context.Context, addresses []netip.Addr, progress f
 	return results, nil
 }
 
+type countingBenchmark struct {
+	calls int
+	err   error
+}
+
+func (b *countingBenchmark) Run(_ context.Context, addresses []netip.Addr, progress func(benchmark.Progress)) ([]benchmark.Result, error) {
+	b.calls++
+	if b.err != nil {
+		return nil, b.err
+	}
+	return staticBenchmark{}.Run(context.Background(), addresses, progress)
+}
+
 type unqualifiedBenchmark struct{}
 
 func (unqualifiedBenchmark) Run(_ context.Context, addresses []netip.Addr, _ func(benchmark.Progress)) ([]benchmark.Result, error) {
@@ -586,6 +599,80 @@ func TestAllocateDomainMappingsUsesFirstCandidateMeetingManualDownloadThreshold(
 	}
 	if !slices.Equal(downloadTester.calls, []string{"1.1.1.1", "1.1.1.2"}) {
 		t.Fatalf("candidate testing did not stop at the first passing address: %#v", downloadTester.calls)
+	}
+}
+
+func TestRunReusesFreshNodePoolWithoutRepeatingBenchmark(t *testing.T) {
+	runner, stateStore := newTestRunner(t, nil)
+	benchmarkCounter := &countingBenchmark{}
+	runner.benchmark = benchmarkCounter
+
+	first, err := runner.Run(context.Background(), RunOptions{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.NodePoolState != "refreshed" || benchmarkCounter.calls != 1 {
+		t.Fatalf("first run did not refresh node pool: report=%#v calls=%d", first, benchmarkCounter.calls)
+	}
+	second, err := runner.Run(context.Background(), RunOptions{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.NodePoolState != "fresh" || benchmarkCounter.calls != 1 {
+		t.Fatalf("fresh node pool was benchmarked again: report=%#v calls=%d", second, benchmarkCounter.calls)
+	}
+	if state := stateStore.Snapshot(); state.NodePool == nil || state.Optimization != nil {
+		t.Fatalf("node pool/checkpoint state was not committed correctly: %#v", state)
+	}
+}
+
+func TestRunUsesStaleNodePoolWhenRefreshFails(t *testing.T) {
+	runner, stateStore := newTestRunner(t, nil)
+	benchmarkCounter := &countingBenchmark{}
+	runner.benchmark = benchmarkCounter
+	if _, err := runner.Run(context.Background(), RunOptions{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Update(func(state *store.State) error {
+		state.NodePool.ValidUntil = time.Now().UTC().Add(-time.Minute)
+		checksum, checksumErr := nodePoolChecksum(state.NodePool)
+		if checksumErr != nil {
+			return checksumErr
+		}
+		state.NodePool.Checksum = checksum
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	benchmarkCounter.err = errors.New("simulated benchmark outage")
+	report, err := runner.Run(context.Background(), RunOptions{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.NodePoolState != "stale" || benchmarkCounter.calls != 2 {
+		t.Fatalf("expired pool was not retained after refresh failure: report=%#v calls=%d", report, benchmarkCounter.calls)
+	}
+}
+
+func TestRunRefreshesNodePoolAfterNetworkOrIntervalChange(t *testing.T) {
+	runner, _ := newTestRunner(t, nil)
+	benchmarkCounter := &countingBenchmark{}
+	runner.benchmark = benchmarkCounter
+	fingerprint := "network-a"
+	runner.SetNetworkFingerprinter(func(context.Context, time.Duration) (string, error) { return fingerprint, nil })
+	if _, err := runner.Run(context.Background(), RunOptions{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint = "network-b"
+	if report, err := runner.Run(context.Background(), RunOptions{}, nil); err != nil || report.NodePoolState != "refreshed" {
+		t.Fatalf("network change did not refresh node pool: report=%#v err=%v", report, err)
+	}
+	runner.config.Schedule.Interval = config.Duration(7 * time.Hour)
+	if report, err := runner.Run(context.Background(), RunOptions{}, nil); err != nil || report.NodePoolState != "refreshed" {
+		t.Fatalf("interval change did not refresh node pool: report=%#v err=%v", report, err)
+	}
+	if benchmarkCounter.calls != 3 {
+		t.Fatalf("unexpected benchmark count after invalidation: %d", benchmarkCounter.calls)
 	}
 }
 
