@@ -27,7 +27,11 @@ export function useRoutes() {
 }
 
 export function useProxies() {
-  return useQuery({ queryKey: queryKeys.proxies, queryFn: () => request<ProxyDetections>('proxy.detect') });
+  return useQuery({
+    queryKey: queryKeys.proxies,
+    queryFn: () => request<ProxyDetections>('proxy.detect'),
+    refetchInterval: 5_000,
+  });
 }
 
 export function useHistory() {
