@@ -3,7 +3,7 @@ export function shouldApplyPolicy(policyAvailable: boolean, policyRequested: boo
   return policyAvailable && policyRequested;
 }
 
-// canApplyManualDomain 只有在策略适配器和当前已验证策略均可用时允许应用域名映射。
-export function canApplyManualDomain(policyAvailable: boolean, policyVerified: boolean): boolean {
-  return policyAvailable && policyVerified;
+// canApplyManualDomain 只接受与当前草稿一致且已达标的最近一次手动测速证据。
+export function canApplyManualDomain(downloadVerified: boolean, testedAddress: string | undefined, draftAddress: string): boolean {
+  return downloadVerified && Boolean(testedAddress) && testedAddress === draftAddress.trim();
 }

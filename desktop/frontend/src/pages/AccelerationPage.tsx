@@ -137,7 +137,11 @@ export function AccelerationPage() {
   const discoveredCount = domains.data?.discovered ?? 0;
   const policyAvailable = Boolean(status.data?.policy_available);
   const policyVerified = Boolean(status.data?.state.current_ipv4?.policy_verified || status.data?.state.current_ipv6?.policy_verified);
-  const manualDomainApplyReady = canApplyManualDomain(policyAvailable, policyVerified);
+  const manualDomainApplyReady = canApplyManualDomain(
+    Boolean(domainTestResult?.download_verified),
+    domainTestResult?.address,
+    mappingDraft,
+  );
 
   const columns = useMemo<ColumnDef<DomainRow>[]>(() => [
     { accessorKey: 'domain', header: '域名', size: 220, cell: ({ getValue }) => <Text ff="monospace" size="sm" fw={650}>{String(getValue())}</Text> },
@@ -205,7 +209,30 @@ export function AccelerationPage() {
   const applyDomain = useMutation({
     mutationFn: ({ domain, address }: { domain: string; address: string }) => request<DomainApplyResult>('acceleration.domain_apply', { domain, address }),
     onSuccess: async (result) => {
-      notifications.show({ color: 'green', title: '域名加速已应用', message: `${result.domain} → ${result.address}` });
+      // 后台可能在没有可用适配器时返回 deferred，前端不能将配置保存误报为已生效。
+      const applyState = result.apply_state ?? 'applied';
+      const adapters = result.applied_adapters?.join('、');
+      const skipped = result.skipped_capabilities?.join('、');
+      const warning = result.warnings?.join('；');
+      if (applyState === 'deferred') {
+        notifications.show({
+          color: 'yellow',
+          title: '域名映射已保存，等待适配器',
+          message: `${result.domain} → ${result.address}；当前未声明加速已生效。${warning ? ` ${warning}` : ''}`,
+        });
+      } else if (applyState === 'partial') {
+        notifications.show({
+          color: 'yellow',
+          title: '域名映射部分应用',
+          message: `${result.domain} → ${result.address}${adapters ? `；已应用：${adapters}` : ''}${skipped ? `；跳过：${skipped}` : ''}${warning ? `；${warning}` : ''}`,
+        });
+      } else {
+        notifications.show({
+          color: 'green',
+          title: '域名映射已应用并验证',
+          message: `${result.domain} → ${result.address}${adapters ? `；已应用：${adapters}` : ''}`,
+        });
+      }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.config }),
         queryClient.invalidateQueries({ queryKey: queryKeys.accelerationDomains }),
@@ -324,9 +351,9 @@ export function AccelerationPage() {
                 ) : selected.download_tested_at ? (
                   <Text size="sm" c="dimmed">上次测速：{selected.download_mbps?.toFixed(2) ?? '—'} Mbps · {formatDate(selected.download_tested_at)}</Text>
                 ) : <Text size="sm" c="dimmed">测速完成后才可选择应用此映射。</Text>}
-                {!policyAvailable && <Alert color="yellow" icon={<ShieldAlert size={17} />} title="当前没有活动策略适配器">请先在“测速优选”中完成一次确认并应用策略，再应用手动域名映射。</Alert>}
-                {policyAvailable && !policyVerified && <Alert color="yellow" icon={<ShieldAlert size={17} />} title="当前没有已验证策略">手动域名映射只能追加到已有的已验证策略，请先完成一次“应用并验证策略”的优选。</Alert>}
-                <Button color="green" leftSection={<ShieldCheck size={16} />} loading={applyDomain.isPending} disabled={!manualDomainApplyReady || !domainTestResult || domainTestResult.address !== mappingDraft.trim() || !domainTestResult.download_verified} onClick={() => applyDomain.mutate({ domain: selected.domain, address: mappingDraft.trim() })}>应用此映射</Button>
+                {!policyAvailable && <Alert color="yellow" icon={<ShieldAlert size={17} />} title="当前没有可用适配器">映射会先保存到配置；适配器恢复后可再次应用，或通过下一次策略刷新重试。当前未声明加速已生效。</Alert>}
+                {policyAvailable && !policyVerified && <Alert color="yellow" icon={<ShieldAlert size={17} />} title="当前没有已验证的整体策略">仍可按当前适配器能力尝试应用域名映射，实际结果以应用状态和验证证据为准。</Alert>}
+                <Button color="green" leftSection={<ShieldCheck size={16} />} loading={applyDomain.isPending} disabled={!manualDomainApplyReady} onClick={() => applyDomain.mutate({ domain: selected.domain, address: mappingDraft.trim() })}>应用此映射</Button>
               </Stack>
             ) : (
               <Alert color="blue" title="自动发现域名只读">

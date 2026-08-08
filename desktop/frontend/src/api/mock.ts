@@ -205,7 +205,7 @@ export async function mockRequest<T>(method: string, parameters: Record<string, 
     case 'acceleration.domain_apply':
       return {
         domain: String(parameters.domain), address: String(parameters.address), download_mbps: 42.5,
-        download_verified: true, policy_refreshed: true, applied_at: new Date().toISOString(),
+        download_verified: true, policy_refreshed: true, apply_state: 'applied', applied_adapters: ['mihomo'], applied_at: new Date().toISOString(),
       } as T;
     case 'config.get': return mockConfig as T;
     case 'config.update': return { saved: true, hot_applied: true, policy_refreshed: false, restart_required: false } as T;

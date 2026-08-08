@@ -186,6 +186,56 @@ func assertSavedManualMapping(t *testing.T, runtimeState *Runtime, expected stri
 	}
 }
 
+func TestApplyManualDomainMappingPersistsDeferredResultWithoutPolicyAdapter(t *testing.T) {
+	dataDir := t.TempDir()
+	cfg := config.Default()
+	cfg.DataDir = dataDir
+	cfg.Acceleration.ManualDomains = []string{"manual.example"}
+	cfg.Acceleration.ManualMappings = map[string]string{}
+	configPath := filepath.Join(dataDir, "config.yaml")
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err := store.Open(dataDir, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := "104.16.0.1"
+	testedAt := time.Now().UTC()
+	if err := stateStore.Update(func(state *store.State) error {
+		state.DiscoveredDomains["manual.example"] = store.DomainDiscovery{
+			Domain: "manual.example", Source: "manual", CloudflareVerified: true, PreflightVerified: true,
+			DownloadVerified: true, DownloadMbps: 40, DownloadAddress: address, DownloadTestedAt: testedAt,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	runner, err := optimizer.NewRunner(cfg, configUpdateRanges{}, configUpdateBenchmark{}, stateStore, nil, cfnetwork.PhysicalPath{}, nil, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeState := &Runtime{
+		Config: cfg, ConfigPath: configPath, Store: stateStore, Runner: runner,
+		Ranges: ranges.NewCatalog(cfg.Ranges, dataDir), Logger: logger,
+	}
+	result, err := runtimeState.ApplyManualDomainMapping(context.Background(), "manual.example", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ApplyState != optimizer.ManualMappingApplyStateDeferred || result.PolicyRefreshed || stateStore.Snapshot().Policy != nil {
+		t.Fatalf("manual mapping was not safely deferred: %#v", result)
+	}
+	persisted, err := config.Load(configPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Acceleration.ManualMappings["manual.example"] != address || runtimeState.View().Config.Acceleration.ManualMappings["manual.example"] != address {
+		t.Fatalf("deferred mapping was not retained: persisted=%#v runtime=%#v", persisted.Acceleration.ManualMappings, runtimeState.View().Config.Acceleration.ManualMappings)
+	}
+}
+
 func TestDecodeStrictRejectsUnknownFieldAndTrailingValue(t *testing.T) {
 	var target struct {
 		Value bool `json:"value"`

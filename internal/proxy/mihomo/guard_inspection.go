@@ -70,7 +70,11 @@ func (a *Adapter) InspectManagedPolicy(ctx context.Context, policy proxy.DirectP
 	if err := a.verifyOnce(ctx, expectedRules); err != nil {
 		reasons = append(reasons, "控制面未加载全部 DIRECT 规则")
 	}
-	return guard.Inspection{Healthy: len(reasons) == 0, DriftReasons: reasons, Fingerprint: contentHash(configContent)}, nil
+	fingerprint := contentHash(configContent)
+	if semantic, semanticErr := semanticYAMLHash(configContent); semanticErr == nil {
+		fingerprint = semantic
+	}
+	return guard.Inspection{Healthy: len(reasons) == 0, DriftReasons: reasons, Fingerprint: fingerprint}, nil
 }
 
 // VerifyPolicy 不依赖历史收据，验证当前控制面规则和真实 Mihomo 连接。

@@ -125,7 +125,11 @@ export interface DomainApplyResult {
   download_mbps: number;
   download_verified: boolean;
   policy_refreshed: boolean;
-  applied_at: string;
+  apply_state?: 'applied' | 'partial' | 'deferred';
+  applied_adapters?: string[];
+  skipped_capabilities?: string[];
+  warnings?: string[];
+  applied_at?: string;
 }
 
 export interface Progress {

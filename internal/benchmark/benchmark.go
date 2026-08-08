@@ -20,6 +20,7 @@ import (
 
 	"github.com/cf-optimizer/cf-optimizer/internal/config"
 	cfnetwork "github.com/cf-optimizer/cf-optimizer/internal/network"
+	"github.com/cf-optimizer/cf-optimizer/internal/proxy"
 )
 
 // Stage 标识 TCP、TLS 或下载测速阶段。
@@ -70,14 +71,44 @@ type Result struct {
 
 // Tester 使用显式直连 Dialer 执行有并发上限的两阶段测速。
 type Tester struct {
-	config config.BenchmarkConfig
-	dial   cfnetwork.DialContextFunc
-	now    func() time.Time
+	config         config.BenchmarkConfig
+	dial           cfnetwork.DialContextFunc
+	boundInterface string
+	now            func() time.Time
 }
 
 // New 创建测速器；调用方负责提供不使用系统代理的 Dialer。
 func New(cfg config.BenchmarkConfig, dial cfnetwork.DialContextFunc) *Tester {
 	return &Tester{config: cfg, dial: dial, now: time.Now}
+}
+
+// SetBoundInterface 记录测速 Dialer 已绑定的物理接口名称，供无代理控制面时生成证据。
+func (t *Tester) SetBoundInterface(interfaceName string) {
+	t.boundInterface = interfaceName
+}
+
+// VerifyPhysicalPath 通过一次真实绑定 Socket 验证临时路由和物理 Dialer 可用。
+func (t *Tester) VerifyPhysicalPath(ctx context.Context, targets []netip.Addr) (proxy.BenchmarkPathEvidence, error) {
+	if t.dial == nil || t.boundInterface == "" {
+		return proxy.BenchmarkPathEvidence{}, errors.New("bound physical benchmark Dialer is unavailable")
+	}
+	for _, target := range targets {
+		target = target.Unmap()
+		if !target.IsValid() {
+			continue
+		}
+		connection, err := t.dial(ctx, "tcp", net.JoinHostPort(target.String(), "443"))
+		if err != nil {
+			continue
+		}
+		_ = connection.Close()
+		return proxy.BenchmarkPathEvidence{
+			Adapter: "physical-route", Interface: t.boundInterface, Target: target.String(),
+			SocketBound: true, DirectVerified: true, PhysicalRouteUsed: true,
+			Verification: "bound_socket_and_verified_physical_route",
+		}, nil
+	}
+	return proxy.BenchmarkPathEvidence{}, errors.New("unable to open a bound physical benchmark Socket")
 }
 
 // Run 执行 TCP 初筛和 TLS/可选 HTTPS 复筛，并按最终分数降序返回。

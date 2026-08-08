@@ -19,6 +19,36 @@ type lifecycleAdapter struct {
 	rollbackContextError error
 }
 
+type rediscoveredAdapter struct {
+	name         string
+	present      bool
+	detectErr    error
+	capabilities Capabilities
+	rolledBack   bool
+}
+
+func (a *rediscoveredAdapter) Name() string { return a.name }
+func (a *rediscoveredAdapter) Capabilities() Capabilities {
+	return a.capabilities
+}
+func (a *rediscoveredAdapter) Detect(context.Context) (Detection, error) {
+	return Detection{Present: a.present}, a.detectErr
+}
+func (a *rediscoveredAdapter) Plan(_ context.Context, policy DirectPolicy) (Plan, error) {
+	return Plan{ID: "rediscovered-receipt", Adapter: a.name, Policy: policy, Payload: json.RawMessage(`{}`)}, nil
+}
+func (a *rediscoveredAdapter) Apply(context.Context, Plan) (Receipt, error) {
+	return Receipt{ID: "rediscovered-receipt", Adapter: a.name, Changed: true, AppliedAt: time.Now(), Payload: json.RawMessage(`{}`)}, nil
+}
+func (a *rediscoveredAdapter) Verify(context.Context, DirectPolicy, Receipt) error { return nil }
+func (a *rediscoveredAdapter) Rollback(context.Context, Receipt) error {
+	a.rolledBack = true
+	return nil
+}
+func (a *rediscoveredAdapter) VerifyBenchmarkPath(context.Context, []netip.Addr) (BenchmarkPathEvidence, error) {
+	return BenchmarkPathEvidence{Target: "1.1.1.1", SocketBound: true, ProxyObserved: true, DirectVerified: true, Verification: "rediscovered_direct"}, nil
+}
+
 type recordingReceiptJournal struct {
 	begins   int
 	recorded []Receipt
@@ -143,5 +173,46 @@ func TestCoordinatorJournalsReceiptBeforeVerificationAndRemovesItAfterRollback(t
 	}
 	if journal.begins != 1 || len(journal.recorded) != 1 || len(journal.removed) != 1 || journal.recorded[0].ID != "journaled" {
 		t.Fatalf("unexpected receipt journal lifecycle: %#v", journal)
+	}
+}
+
+func TestCoordinatorRediscoveryRefreshesCapabilitiesAndKeepsReceiptAdapter(t *testing.T) {
+	stale := &rediscoveredAdapter{
+		name: "mihomo", detectErr: errors.New("connection refused"),
+		capabilities: Capabilities{Processes: true, IPv4: true, Rollback: true},
+	}
+	refreshed := &rediscoveredAdapter{
+		name: "mihomo", present: true,
+		capabilities: Capabilities{IPv4: true, Rollback: true},
+	}
+	coordinator, err := NewCoordinator([]Adapter{stale}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolverCalls := 0
+	coordinator.SetAdapterResolver("mihomo", func(context.Context) (Adapter, error) {
+		resolverCalls++
+		return refreshed, nil
+	})
+	guardResult, err := coordinator.BeginBenchmarkGuard(
+		context.Background(), DirectPolicy{IPv4CIDRs: []string{"1.1.1.1/32"}}, []netip.Addr{netip.MustParseAddr("1.1.1.1")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolverCalls != 1 || len(guardResult.Evidence) != 1 || guardResult.Evidence[0].Adapter != "mihomo" {
+		t.Fatalf("rediscovered adapter was not used: calls=%d result=%#v", resolverCalls, guardResult)
+	}
+	capabilities := coordinator.ActiveCapabilities(context.Background())
+	if !capabilities.IPv4 || capabilities.Processes {
+		t.Fatalf("stale adapter capabilities leaked into active set: %#v", capabilities)
+	}
+	replacement := &rediscoveredAdapter{name: "mihomo", present: true, capabilities: Capabilities{IPv4: true, Rollback: true}}
+	coordinator.replaceAdapter("mihomo", replacement)
+	if err := coordinator.EndBenchmarkGuard(context.Background(), guardResult); err != nil {
+		t.Fatal(err)
+	}
+	if !refreshed.rolledBack || replacement.rolledBack {
+		t.Fatalf("receipt rollback used a different adapter instance: refreshed=%t replacement=%t", refreshed.rolledBack, replacement.rolledBack)
 	}
 }

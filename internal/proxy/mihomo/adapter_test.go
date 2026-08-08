@@ -15,6 +15,7 @@ import (
 
 	"github.com/cf-optimizer/cf-optimizer/internal/config"
 	"github.com/cf-optimizer/cf-optimizer/internal/proxy"
+	"gopkg.in/yaml.v3"
 )
 
 func TestAdapterApplyVerifyRollbackAndIdempotency(t *testing.T) {
@@ -139,6 +140,114 @@ func TestAdapterApplyVerifyRollbackAndIdempotency(t *testing.T) {
 	assertThirdPartyConfigPermission(t, activeConfigPath, 0o644)
 	if _, err := os.Stat(managedMetadataPath(providerPath)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("new managed metadata was not removed: %v", err)
+	}
+}
+
+func TestVerifyAndRollbackAcceptSemanticFormattingChanges(t *testing.T) {
+	var expectedRules []string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/version":
+			_, _ = response.Write([]byte(`{"version":"1.19.25"}`))
+		case "/configs":
+			response.WriteHeader(http.StatusNoContent)
+		case "/rules":
+			rules := make([]map[string]string, 0, len(expectedRules))
+			for _, rule := range expectedRules {
+				parts := splitRule(rule)
+				rules = append(rules, map[string]string{"type": parts[0], "payload": parts[1], "proxy": "DIRECT"})
+			}
+			_ = json.NewEncoder(response).Encode(map[string]any{"rules": rules})
+		default:
+			response.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	directory := t.TempDir()
+	providerPath := filepath.Join(directory, "provider.yaml")
+	configPath := filepath.Join(directory, "config.yaml")
+	providerPrevious := []byte("payload: []\n")
+	configPrevious := []byte("dns:\n  use-hosts: false\nhosts: {}\nrules:\n  - MATCH,proxy\n")
+	if err := os.WriteFile(providerPath, providerPrevious, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, configPrevious, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default().Proxy.Mihomo
+	cfg.Enabled = true
+	cfg.Controller = server.URL
+	cfg.ProviderFile = providerPath
+	cfg.ReloadConfig = configPath
+	adapter, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.connectionVerifier = func(context.Context, []proxy.DomainMapping) error { return nil }
+	policy, err := (proxy.DirectPolicy{
+		IPv4CIDRs: []string{"1.1.1.1/32"}, Domains: []string{"example.com"},
+		DomainMappings: []proxy.DomainMapping{{Domain: "example.com", Addresses: []string{"1.1.1.1"}}},
+	}).Normalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedRules = rulesForPolicy(policy)
+	plan, err := adapter.Plan(context.Background(), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := adapter.Apply(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{providerPath, configPath} {
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		var document any
+		if decodeErr := yaml.Unmarshal(content, &document); decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		reformatted, encodeErr := json.MarshalIndent(document, "", "    ")
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		if writeErr := os.WriteFile(path, append(reformatted, '\n'), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	metadataPath := managedMetadataPath(providerPath)
+	metadataContent, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata any
+	if err := json.Unmarshal(metadataContent, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	metadataContent, err = json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadataPath, metadataContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := adapter.Verify(context.Background(), policy, receipt); err != nil {
+		t.Fatalf("semantic formatting change failed verification: %v", err)
+	}
+	if err := adapter.Rollback(context.Background(), receipt); err != nil {
+		t.Fatalf("semantic formatting change blocked rollback: %v", err)
+	}
+	providerRestored, err := os.ReadFile(providerPath)
+	if err != nil || string(providerRestored) != string(providerPrevious) {
+		t.Fatalf("provider was not restored: %q err=%v", providerRestored, err)
+	}
+	configRestored, err := os.ReadFile(configPath)
+	if err != nil || string(configRestored) != string(configPrevious) {
+		t.Fatalf("active config was not restored: %q err=%v", configRestored, err)
 	}
 }
 

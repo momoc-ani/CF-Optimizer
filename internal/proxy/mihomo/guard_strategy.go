@@ -75,7 +75,11 @@ func (s *RuleGuardStrategy) Observe(ctx context.Context) (guard.Observation, err
 	}
 	observation.Revision = detection.Endpoint + "\x00" + managed.ReloadConfig
 	if content, readErr := os.ReadFile(managed.ReloadConfig); readErr == nil {
-		observation.Revision += "\x00" + contentHash(content)
+		revisionHash := contentHash(content)
+		if semantic, semanticErr := semanticYAMLHash(content); semanticErr == nil {
+			revisionHash = semantic
+		}
+		observation.Revision += "\x00" + revisionHash
 	}
 	s.adapter = adapter
 	s.managed = managed

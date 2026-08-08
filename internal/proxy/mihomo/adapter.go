@@ -53,19 +53,22 @@ type planPayload struct {
 }
 
 type receiptPayload struct {
-	ProviderFile           string   `json:"provider_file"`
-	ConfigFile             string   `json:"config_file,omitempty"`
-	MetadataFile           string   `json:"metadata_file,omitempty"`
-	PreviousExists         bool     `json:"previous_exists"`
-	Previous               []byte   `json:"previous"`
-	AppliedHash            string   `json:"applied_hash"`
-	ConfigPreviousExists   bool     `json:"config_previous_exists"`
-	ConfigPrevious         []byte   `json:"config_previous,omitempty"`
-	ConfigAppliedHash      string   `json:"config_applied_hash,omitempty"`
-	MetadataPreviousExists bool     `json:"metadata_previous_exists"`
-	MetadataPrevious       []byte   `json:"metadata_previous,omitempty"`
-	MetadataAppliedHash    string   `json:"metadata_applied_hash,omitempty"`
-	Rules                  []string `json:"rules"`
+	ProviderFile                string   `json:"provider_file"`
+	ConfigFile                  string   `json:"config_file,omitempty"`
+	MetadataFile                string   `json:"metadata_file,omitempty"`
+	PreviousExists              bool     `json:"previous_exists"`
+	Previous                    []byte   `json:"previous"`
+	AppliedHash                 string   `json:"applied_hash"`
+	AppliedSemanticHash         string   `json:"applied_semantic_hash,omitempty"`
+	ConfigPreviousExists        bool     `json:"config_previous_exists"`
+	ConfigPrevious              []byte   `json:"config_previous,omitempty"`
+	ConfigAppliedHash           string   `json:"config_applied_hash,omitempty"`
+	ConfigAppliedSemanticHash   string   `json:"config_applied_semantic_hash,omitempty"`
+	MetadataPreviousExists      bool     `json:"metadata_previous_exists"`
+	MetadataPrevious            []byte   `json:"metadata_previous,omitempty"`
+	MetadataAppliedHash         string   `json:"metadata_applied_hash,omitempty"`
+	MetadataAppliedSemanticHash string   `json:"metadata_applied_semantic_hash,omitempty"`
+	Rules                       []string `json:"rules"`
 }
 
 // Adapter 管理独立 Mihomo rule-provider 文件，并通过控制 API 重载和验证。
@@ -362,6 +365,18 @@ func (a *Adapter) Apply(ctx context.Context, plan proxy.Plan) (proxy.Receipt, er
 	configChanged := len(payload.ConfigContent) > 0 && !bytes.Equal(configPrevious, payload.ConfigContent)
 	metadataChanged := len(payload.MetadataContent) > 0 && (!metadataExisted || !bytes.Equal(metadataPrevious, payload.MetadataContent))
 	changed := providerChanged || configChanged || metadataChanged
+	providerSemanticHash, err := semanticYAMLHash(payload.Content)
+	if err != nil {
+		return proxy.Receipt{}, fmt.Errorf("hash Mihomo provider semantics: %w", err)
+	}
+	configSemanticHash, err := optionalSemanticHash(payload.ConfigContent, semanticYAMLHash)
+	if err != nil {
+		return proxy.Receipt{}, fmt.Errorf("hash Mihomo active config semantics: %w", err)
+	}
+	metadataSemanticHash, err := optionalSemanticHash(payload.MetadataContent, semanticJSONHash)
+	if err != nil {
+		return proxy.Receipt{}, fmt.Errorf("hash Mihomo metadata semantics: %w", err)
+	}
 	restoreAll := func() {
 		if len(payload.ConfigContent) > 0 {
 			_ = restoreOptionalFilePreservingMetadata(a.config.ReloadConfig, configPrevious, configExisted)
@@ -395,9 +410,9 @@ func (a *Adapter) Apply(ctx context.Context, plan proxy.Plan) (proxy.Receipt, er
 	}
 	receiptData, err := json.Marshal(receiptPayload{
 		ProviderFile: a.config.ProviderFile, ConfigFile: a.config.ReloadConfig, MetadataFile: managedMetadataPath(a.config.ProviderFile),
-		PreviousExists: existed, Previous: previous, AppliedHash: contentHash(payload.Content),
-		ConfigPreviousExists: configExisted, ConfigPrevious: configPrevious, ConfigAppliedHash: optionalAppliedHash(payload.ConfigContent),
-		MetadataPreviousExists: metadataExisted, MetadataPrevious: metadataPrevious, MetadataAppliedHash: optionalAppliedHash(payload.MetadataContent),
+		PreviousExists: existed, Previous: previous, AppliedHash: contentHash(payload.Content), AppliedSemanticHash: providerSemanticHash,
+		ConfigPreviousExists: configExisted, ConfigPrevious: configPrevious, ConfigAppliedHash: optionalAppliedHash(payload.ConfigContent), ConfigAppliedSemanticHash: configSemanticHash,
+		MetadataPreviousExists: metadataExisted, MetadataPrevious: metadataPrevious, MetadataAppliedHash: optionalAppliedHash(payload.MetadataContent), MetadataAppliedSemanticHash: metadataSemanticHash,
 		Rules: payload.Rules,
 	})
 	if err != nil {
@@ -412,15 +427,23 @@ func (a *Adapter) Verify(ctx context.Context, policy proxy.DirectPolicy, receipt
 	if err := json.Unmarshal(receipt.Payload, &payload); err != nil {
 		return err
 	}
+	providerFile := payload.ProviderFile
+	if providerFile == "" {
+		providerFile = a.config.ProviderFile
+	}
+	providerContent, providerExists, providerErr := readOptionalFile(providerFile)
+	if providerErr != nil || !providerExists || !matchesAppliedContent(providerContent, payload.AppliedHash, payload.AppliedSemanticHash, semanticYAMLHash) {
+		return errors.New("Mihomo provider verification failed")
+	}
 	if payload.ConfigAppliedHash != "" {
 		content, exists, err := readOptionalFile(payload.ConfigFile)
-		if err != nil || !exists || contentHash(content) != payload.ConfigAppliedHash {
+		if err != nil || !exists || !matchesAppliedContent(content, payload.ConfigAppliedHash, payload.ConfigAppliedSemanticHash, semanticYAMLHash) {
 			return errors.New("Mihomo active config verification failed")
 		}
 	}
 	if payload.MetadataAppliedHash != "" {
 		content, exists, err := readOptionalFile(payload.MetadataFile)
-		if err != nil || !exists || contentHash(content) != payload.MetadataAppliedHash {
+		if err != nil || !exists || !matchesAppliedContent(content, payload.MetadataAppliedHash, payload.MetadataAppliedSemanticHash, semanticJSONHash) {
 			return errors.New("Mihomo managed metadata verification failed")
 		}
 	}
@@ -469,7 +492,7 @@ func (a *Adapter) Rollback(ctx context.Context, receipt proxy.Receipt) error {
 	if err != nil {
 		return err
 	}
-	providerRestored := optionalFileEquals(current, exists, payload.Previous, payload.PreviousExists)
+	providerRestored := optionalFileSemanticallyEquals(current, exists, payload.Previous, payload.PreviousExists, semanticYAMLHash)
 	configCurrent, configExists, metadataCurrent, metadataExists := []byte(nil), false, []byte(nil), false
 	configRestored, metadataRestored := true, true
 	if payload.ConfigAppliedHash != "" {
@@ -477,25 +500,25 @@ func (a *Adapter) Rollback(ctx context.Context, receipt proxy.Receipt) error {
 		if err != nil {
 			return err
 		}
-		configRestored = optionalFileEquals(configCurrent, configExists, payload.ConfigPrevious, payload.ConfigPreviousExists)
+		configRestored = optionalFileSemanticallyEquals(configCurrent, configExists, payload.ConfigPrevious, payload.ConfigPreviousExists, semanticYAMLHash)
 	}
 	if payload.MetadataAppliedHash != "" {
 		metadataCurrent, metadataExists, err = readOptionalFile(metadataFile)
 		if err != nil {
 			return err
 		}
-		metadataRestored = optionalFileEquals(metadataCurrent, metadataExists, payload.MetadataPrevious, payload.MetadataPreviousExists)
+		metadataRestored = optionalFileSemanticallyEquals(metadataCurrent, metadataExists, payload.MetadataPrevious, payload.MetadataPreviousExists, semanticJSONHash)
 	}
 	if providerRestored && configRestored && metadataRestored {
 		return nil
 	}
-	if !providerRestored && (!exists || contentHash(current) != payload.AppliedHash) {
+	if !providerRestored && (!exists || !matchesAppliedContent(current, payload.AppliedHash, payload.AppliedSemanticHash, semanticYAMLHash)) {
 		return errors.New("Mihomo provider changed after apply; refusing to overwrite it during rollback")
 	}
-	if !configRestored && (!configExists || contentHash(configCurrent) != payload.ConfigAppliedHash) {
+	if !configRestored && (!configExists || !matchesAppliedContent(configCurrent, payload.ConfigAppliedHash, payload.ConfigAppliedSemanticHash, semanticYAMLHash)) {
 		return errors.New("Mihomo active config changed after apply; refusing to overwrite it during rollback")
 	}
-	if !metadataRestored && (!metadataExists || contentHash(metadataCurrent) != payload.MetadataAppliedHash) {
+	if !metadataRestored && (!metadataExists || !matchesAppliedContent(metadataCurrent, payload.MetadataAppliedHash, payload.MetadataAppliedSemanticHash, semanticJSONHash)) {
 		return errors.New("Mihomo managed metadata changed after apply; refusing to overwrite it during rollback")
 	}
 	if payload.ConfigAppliedHash != "" {
@@ -804,6 +827,67 @@ func restoreOptionalFilePreservingMetadata(path string, content []byte, existed 
 func contentHash(content []byte) string {
 	digest := sha256.Sum256(content)
 	return hex.EncodeToString(digest[:])
+}
+
+type semanticHashFunc func([]byte) (string, error)
+
+// semanticYAMLHash 忽略 YAML 注释、缩进和映射键顺序，只对解码后的语义计算摘要。
+func semanticYAMLHash(content []byte) (string, error) {
+	var document any
+	if err := yaml.Unmarshal(content, &document); err != nil {
+		return "", err
+	}
+	canonical, err := yaml.Marshal(document)
+	if err != nil {
+		return "", err
+	}
+	return contentHash(canonical), nil
+}
+
+// semanticJSONHash 忽略 JSON 空白和对象键顺序，只对解码后的语义计算摘要。
+func semanticJSONHash(content []byte) (string, error) {
+	var document any
+	if err := json.Unmarshal(content, &document); err != nil {
+		return "", err
+	}
+	canonical, err := json.Marshal(document)
+	if err != nil {
+		return "", err
+	}
+	return contentHash(canonical), nil
+}
+
+// optionalSemanticHash 只为实际参与事务的可选文件生成语义摘要。
+func optionalSemanticHash(content []byte, hash semanticHashFunc) (string, error) {
+	if len(content) == 0 {
+		return "", nil
+	}
+	return hash(content)
+}
+
+// matchesAppliedContent 优先使用精确摘要，并为新版收据接受纯格式规范化。
+func matchesAppliedContent(content []byte, exactHash, semanticHash string, hash semanticHashFunc) bool {
+	if contentHash(content) == exactHash {
+		return true
+	}
+	if semanticHash == "" || hash == nil {
+		return false
+	}
+	actual, err := hash(content)
+	return err == nil && actual == semanticHash
+}
+
+// optionalFileSemanticallyEquals 比较存在状态，并允许第三方只调整序列化格式。
+func optionalFileSemanticallyEquals(current []byte, currentExists bool, previous []byte, previousExists bool, hash semanticHashFunc) bool {
+	if optionalFileEquals(current, currentExists, previous, previousExists) {
+		return true
+	}
+	if !currentExists || !previousExists || hash == nil {
+		return false
+	}
+	currentHash, currentErr := hash(current)
+	previousHash, previousErr := hash(previous)
+	return currentErr == nil && previousErr == nil && currentHash == previousHash
 }
 
 // optionalAppliedHash 只为实际参与事务的可选文件生成并发校验摘要。

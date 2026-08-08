@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"sync"
 	"time"
 )
 
@@ -20,6 +21,13 @@ type Capabilities struct {
 	HotReload      bool `json:"hot_reload"`
 	Rollback       bool `json:"rollback"`
 }
+
+var (
+	// ErrNoActiveAdapters 表示策略应用前没有检测到任何可参与本次策略的活动适配器。
+	ErrNoActiveAdapters = errors.New("no enabled proxy adapter was detected")
+	// ErrDomainMappingsUnavailable 表示策略应用前的活动适配器无法维护域名映射。
+	ErrDomainMappingsUnavailable = errors.New("no active adapter supports domain mappings")
+)
 
 // Detection 表示代理内核是否存在以及可展示的非敏感版本信息。
 type Detection struct {
@@ -59,6 +67,10 @@ type Adapter interface {
 	Verify(context.Context, DirectPolicy, Receipt) error
 	Rollback(context.Context, Receipt) error
 }
+
+// AdapterResolver 在已缓存适配器失效时重新发现同名代理适配器。
+// resolver 只能返回相同 Name 的适配器，协调器会再次执行 Detect 验证。
+type AdapterResolver func(context.Context) (Adapter, error)
 
 // ReceiptJournal 在策略提交前持久化已应用收据，避免进程退出后失去回滚依据。
 type ReceiptJournal interface {
@@ -148,9 +160,12 @@ func (e *DomainVerificationError) Unwrap() error {
 
 // Coordinator 按顺序应用适配器，并在任一步失败时逆序回滚。
 type Coordinator struct {
-	adapters []Adapter
-	logger   *slog.Logger
-	journal  ReceiptJournal
+	adapters        []Adapter
+	logger          *slog.Logger
+	journal         ReceiptJournal
+	mu              sync.RWMutex
+	resolvers       map[string]AdapterResolver
+	receiptAdapters map[string]Adapter
 }
 
 // NewCoordinator 创建统一策略协调器；适配器顺序同时决定回滚逆序。
@@ -168,7 +183,12 @@ func NewCoordinator(adapters []Adapter, logger *slog.Logger) (*Coordinator, erro
 		}
 		seen[adapter.Name()] = struct{}{}
 	}
-	return &Coordinator{adapters: adapters, logger: logger.With("component", "proxy")}, nil
+	return &Coordinator{
+		adapters:        append([]Adapter(nil), adapters...),
+		logger:          logger.With("component", "proxy"),
+		resolvers:       make(map[string]AdapterResolver),
+		receiptAdapters: make(map[string]Adapter),
+	}, nil
 }
 
 // SetReceiptJournal 注入与状态存储绑定的待提交收据日志。
@@ -176,18 +196,36 @@ func (c *Coordinator) SetReceiptJournal(journal ReceiptJournal) {
 	c.journal = journal
 }
 
+// SetAdapterResolver 为指定适配器注册一次性重新发现回调；传入 nil 会移除回调。
+func (c *Coordinator) SetAdapterResolver(name string, resolver AdapterResolver) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.resolvers == nil {
+		c.resolvers = make(map[string]AdapterResolver)
+	}
+	if resolver == nil {
+		delete(c.resolvers, name)
+		return
+	}
+	c.resolvers[name] = resolver
+}
+
 // Detect 查询所有已注册适配器，不因单个内核不可用而丢弃其他结果。
 func (c *Coordinator) Detect(ctx context.Context) map[string]Detection {
-	result := make(map[string]Detection, len(c.adapters))
-	for _, adapter := range c.adapters {
-		detection, err := adapter.Detect(ctx)
+	adapters := c.adapterSnapshot()
+	result := make(map[string]Detection, len(adapters))
+	for _, configured := range adapters {
+		adapter, detection, err := c.resolveAdapter(ctx, configured)
 		if err != nil {
 			detection.Message = err.Error()
 		}
 		if detection.Present && err == nil {
 			detection.Manageable = true
 		}
-		result[adapter.Name()] = detection
+		result[configured.Name()] = detection
+		if adapter == nil {
+			continue
+		}
 	}
 	return result
 }
@@ -195,15 +233,25 @@ func (c *Coordinator) Detect(ctx context.Context) map[string]Detection {
 // Capabilities 合并全部已配置适配器的静态能力，用于生成最小必要策略。
 func (c *Coordinator) Capabilities() Capabilities {
 	combined := Capabilities{}
-	for _, adapter := range c.adapters {
+	for _, adapter := range c.adapterSnapshot() {
 		capability := adapter.Capabilities()
-		combined.Processes = combined.Processes || capability.Processes
-		combined.IPv4 = combined.IPv4 || capability.IPv4
-		combined.IPv6 = combined.IPv6 || capability.IPv6
-		combined.Domains = combined.Domains || capability.Domains
-		combined.DomainMappings = combined.DomainMappings || capability.DomainMappings
-		combined.HotReload = combined.HotReload || capability.HotReload
-		combined.Rollback = combined.Rollback || capability.Rollback
+		combined = mergeCapabilities(combined, capability)
+	}
+	return combined
+}
+
+// ActiveCapabilities 只合并当前控制端检测成功的适配器能力；检测失败的适配器不会影响策略生成。
+func (c *Coordinator) ActiveCapabilities(ctx context.Context) Capabilities {
+	combined := Capabilities{}
+	for _, configured := range c.adapterSnapshot() {
+		adapter, detection, err := c.resolveAdapter(ctx, configured)
+		if err != nil || !detection.Present || adapter == nil {
+			if err != nil {
+				c.logger.Warn("刷新代理能力失败", "adapter", configured.Name(), "result", "deferred", "error", err)
+			}
+			continue
+		}
+		combined = mergeCapabilities(combined, adapter.Capabilities())
 	}
 	return combined
 }
@@ -215,21 +263,22 @@ func (c *Coordinator) Apply(ctx context.Context, policy DirectPolicy) (ApplyResu
 		return ApplyResult{}, err
 	}
 	result := ApplyResult{}
-	activeAdapters := make([]Adapter, 0, len(c.adapters))
-	for _, adapter := range c.adapters {
-		detection, detectErr := adapter.Detect(ctx)
+	configuredAdapters := c.adapterSnapshot()
+	activeAdapters := make([]Adapter, 0, len(configuredAdapters))
+	for _, configured := range configuredAdapters {
+		adapter, detection, detectErr := c.resolveAdapter(ctx, configured)
 		if detectErr != nil || !detection.Present {
-			result.Skipped = append(result.Skipped, adapter.Name())
+			result.Skipped = append(result.Skipped, configured.Name())
 			continue
 		}
 		if adapterSupportsAny(normalized, adapter.Capabilities()) {
 			activeAdapters = append(activeAdapters, adapter)
 		} else {
-			result.Skipped = append(result.Skipped, adapter.Name())
+			result.Skipped = append(result.Skipped, configured.Name())
 		}
 	}
 	if len(activeAdapters) == 0 {
-		return result, errors.New("no enabled proxy adapter was detected")
+		return result, ErrNoActiveAdapters
 	}
 	if err := ensurePolicyCoverage(normalized, activeAdapters); err != nil {
 		return result, err
@@ -250,6 +299,7 @@ func (c *Coordinator) Apply(ctx context.Context, policy DirectPolicy) (ApplyResu
 			return result, c.rollbackAll(ctx, result.Receipts, fmt.Errorf("apply %s: %w", adapter.Name(), applyErr))
 		}
 		result.Receipts = append(result.Receipts, receipt)
+		c.rememberReceiptAdapter(receipt, adapter)
 		if c.journal != nil {
 			if journalErr := c.journal.Record(receipt); journalErr != nil {
 				return result, c.rollbackAll(ctx, result.Receipts, fmt.Errorf("persist %s receipt: %w", adapter.Name(), journalErr))
@@ -290,7 +340,7 @@ func (c *Coordinator) Cleanup(ctx context.Context, result ApplyResult) error {
 		if cleanedAdapters[receipt.Adapter] {
 			continue
 		}
-		adapter := c.adapterByName(receipt.Adapter)
+		adapter := c.adapterForReceipt(receipt)
 		if adapter == nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("adapter %s is unavailable for cleanup", receipt.Adapter))
 			continue
@@ -337,14 +387,16 @@ func (c *Coordinator) BeginBenchmarkGuard(ctx context.Context, policy DirectPoli
 		return BenchmarkGuardResult{}, err
 	}
 	result := BenchmarkGuardResult{}
-	for _, adapter := range c.adapters {
+	for _, configured := range c.adapterSnapshot() {
+		adapter, detection, detectErr := c.resolveAdapter(ctx, configured)
 		verifier, supported := adapter.(benchmarkPathVerifier)
 		if !supported {
 			continue
 		}
-		detection, detectErr := adapter.Detect(ctx)
 		if detectErr != nil {
-			return result, c.rollbackBenchmarkGuard(ctx, result, fmt.Errorf("detect benchmark guard %s: %w", adapter.Name(), detectErr))
+			// 代理控制面离线时保留真实物理路由回退机会；可用适配器仍会继续建立 guard。
+			c.logger.Warn("benchmark guard 适配器不可用", "adapter", configured.Name(), "result", "deferred", "error", detectErr)
+			continue
 		}
 		if !detection.Present {
 			continue
@@ -362,6 +414,7 @@ func (c *Coordinator) BeginBenchmarkGuard(ctx context.Context, policy DirectPoli
 			return result, c.rollbackBenchmarkGuard(ctx, result, fmt.Errorf("apply benchmark guard %s: %w", adapter.Name(), applyErr))
 		}
 		result.Receipts = append(result.Receipts, receipt)
+		c.rememberReceiptAdapter(receipt, adapter)
 		c.logPhase(adapter.Name(), receipt.ID, "benchmark_apply", "completed", nil)
 		if verifyErr := adapter.Verify(ctx, normalized, receipt); verifyErr != nil {
 			return result, c.rollbackBenchmarkGuard(ctx, result, fmt.Errorf("verify benchmark guard %s: %w", adapter.Name(), verifyErr))
@@ -402,15 +455,9 @@ func ensurePolicyCoverage(policy DirectPolicy, adapters []Adapter) error {
 	combined := Capabilities{}
 	for _, adapter := range adapters {
 		capability := adapter.Capabilities()
-		combined.Processes = combined.Processes || capability.Processes
-		combined.IPv4 = combined.IPv4 || capability.IPv4
-		combined.IPv6 = combined.IPv6 || capability.IPv6
-		combined.Domains = combined.Domains || capability.Domains
-		combined.DomainMappings = combined.DomainMappings || capability.DomainMappings
+		combined = mergeCapabilities(combined, capability)
 	}
-	if len(policy.Processes) > 0 && !combined.Processes {
-		return errors.New("no active adapter supports process DIRECT rules")
-	}
+	// 进程规则是可选附加能力；缺少它不能阻塞 IP 或域名映射策略。
 	if len(policy.IPv4CIDRs) > 0 && !combined.IPv4 {
 		return errors.New("no active adapter supports IPv4 DIRECT rules")
 	}
@@ -421,7 +468,7 @@ func ensurePolicyCoverage(policy DirectPolicy, adapters []Adapter) error {
 		return errors.New("no active adapter supports domain DIRECT rules")
 	}
 	if len(policy.DomainMappings) > 0 && !combined.DomainMappings {
-		return errors.New("no active adapter supports domain mappings")
+		return ErrDomainMappingsUnavailable
 	}
 	return nil
 }
@@ -442,7 +489,7 @@ func (c *Coordinator) rollbackReceipts(ctx context.Context, receipts []Receipt) 
 	var rollbackErrors []error
 	for index := len(receipts) - 1; index >= 0; index-- {
 		receipt := receipts[index]
-		adapter := c.adapterByName(receipt.Adapter)
+		adapter := c.adapterForReceipt(receipt)
 		if adapter == nil {
 			rollbackErrors = append(rollbackErrors, fmt.Errorf("adapter %s is unavailable for rollback", receipt.Adapter))
 			continue
@@ -458,12 +505,112 @@ func (c *Coordinator) rollbackReceipts(ctx context.Context, receipts []Receipt) 
 }
 
 func (c *Coordinator) adapterByName(name string) Adapter {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	for _, adapter := range c.adapters {
 		if adapter.Name() == name {
 			return adapter
 		}
 	}
 	return nil
+}
+
+func (c *Coordinator) adapterSnapshot() []Adapter {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return append([]Adapter(nil), c.adapters...)
+}
+
+func (c *Coordinator) resolverFor(name string) AdapterResolver {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.resolvers[name]
+}
+
+func (c *Coordinator) replaceAdapter(name string, adapter Adapter) {
+	if adapter == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for index, current := range c.adapters {
+		if current.Name() == name {
+			c.adapters[index] = adapter
+			return
+		}
+	}
+}
+
+func (c *Coordinator) rememberReceiptAdapter(receipt Receipt, adapter Adapter) {
+	if receipt.ID == "" || adapter == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.receiptAdapters == nil {
+		c.receiptAdapters = make(map[string]Adapter)
+	}
+	c.receiptAdapters[receipt.ID] = adapter
+}
+
+func (c *Coordinator) adapterForReceipt(receipt Receipt) Adapter {
+	c.mu.RLock()
+	if adapter := c.receiptAdapters[receipt.ID]; adapter != nil {
+		c.mu.RUnlock()
+		return adapter
+	}
+	for _, adapter := range c.adapters {
+		if adapter.Name() == receipt.Adapter {
+			c.mu.RUnlock()
+			return adapter
+		}
+	}
+	c.mu.RUnlock()
+	return nil
+}
+
+func (c *Coordinator) resolveAdapter(ctx context.Context, configured Adapter) (Adapter, Detection, error) {
+	if configured == nil {
+		return nil, Detection{}, errors.New("proxy adapter is nil")
+	}
+	detection, detectErr := configured.Detect(ctx)
+	if detectErr == nil && detection.Present {
+		return configured, detection, nil
+	}
+	resolver := c.resolverFor(configured.Name())
+	if resolver == nil {
+		return configured, detection, detectErr
+	}
+	refreshed, refreshErr := resolver(ctx)
+	if refreshErr != nil {
+		if detectErr != nil {
+			return configured, detection, errors.Join(detectErr, fmt.Errorf("rediscover %s: %w", configured.Name(), refreshErr))
+		}
+		return configured, detection, fmt.Errorf("rediscover %s: %w", configured.Name(), refreshErr)
+	}
+	if refreshed == nil || refreshed.Name() != configured.Name() {
+		return configured, detection, fmt.Errorf("rediscover %s returned an incompatible adapter", configured.Name())
+	}
+	refreshedDetection, refreshedErr := refreshed.Detect(ctx)
+	if refreshedErr != nil || !refreshedDetection.Present {
+		if refreshedErr == nil {
+			refreshedErr = errors.New("rediscovered adapter is not reachable")
+		}
+		return configured, refreshedDetection, fmt.Errorf("detect rediscovered %s: %w", configured.Name(), refreshedErr)
+	}
+	c.replaceAdapter(configured.Name(), refreshed)
+	return refreshed, refreshedDetection, nil
+}
+
+func mergeCapabilities(left, right Capabilities) Capabilities {
+	left.Processes = left.Processes || right.Processes
+	left.IPv4 = left.IPv4 || right.IPv4
+	left.IPv6 = left.IPv6 || right.IPv6
+	left.Domains = left.Domains || right.Domains
+	left.DomainMappings = left.DomainMappings || right.DomainMappings
+	left.HotReload = left.HotReload || right.HotReload
+	left.Rollback = left.Rollback || right.Rollback
+	return left
 }
 
 func (c *Coordinator) logPhase(adapter, transactionID, phase, result string, operationErr error) {

@@ -100,14 +100,15 @@ func TestConfigForStoredReceiptsRejectsUnknownAdapter(t *testing.T) {
 	}
 }
 
-func TestConfigForDetectedAdaptersUsesManageableDiscoveredMihomo(t *testing.T) {
+func TestConfigForDetectedAdaptersKeepsControlOnlyDiscoveredMihomo(t *testing.T) {
 	detections := map[string]proxy.Detection{
 		cleanupAdapterMihomo: {Present: true, Endpoint: "http://127.0.0.1:19097"},
 	}
 	cfg := config.Default()
-	disabled := configForDetectedAdapters(cfg, detections)
-	if disabled.Proxy.Mihomo.Enabled || disabled.Proxy.Mihomo.Controller != cfg.Proxy.Mihomo.Controller {
-		t.Fatalf("只读发现不应启用 Mihomo 写入：%#v", disabled.Proxy.Mihomo)
+	cfg.DataDir = t.TempDir()
+	controlOnly := configForDetectedAdapters(cfg, detections)
+	if !controlOnly.Proxy.Mihomo.Enabled || controlOnly.Proxy.Mihomo.Controller != detections[cleanupAdapterMihomo].Endpoint || controlOnly.Proxy.Mihomo.ReloadConfig != "" {
+		t.Fatalf("可访问控制端应保留 IP/进程规则能力：%#v", controlOnly.Proxy.Mihomo)
 	}
 	cfg.Proxy.Mihomo.ProviderFile = filepath.Join(t.TempDir(), "provider.yaml")
 	cfg.Proxy.Mihomo.ReloadConfig = filepath.Join(t.TempDir(), "config.yaml")

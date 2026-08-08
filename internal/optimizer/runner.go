@@ -66,6 +66,11 @@ type NodePoolValidator interface {
 	Validate(context.Context, []benchmark.Result, func(benchmark.Progress)) ([]benchmark.Result, error)
 }
 
+// physicalBenchmarkPathVerifier 通过真实绑定 Socket 提供物理路由回退证据。
+type physicalBenchmarkPathVerifier interface {
+	VerifyPhysicalPath(context.Context, []netip.Addr) (proxy.BenchmarkPathEvidence, error)
+}
+
 // NetworkFingerprinter 返回当前默认路径和活动接口摘要，用于使跨网络节点池失效。
 type NetworkFingerprinter func(context.Context, time.Duration) (string, error)
 
@@ -74,6 +79,31 @@ type PolicyApplier interface {
 	Capabilities() proxy.Capabilities
 	Apply(context.Context, proxy.DirectPolicy) (proxy.ApplyResult, error)
 	Rollback(context.Context, proxy.ApplyResult) error
+}
+
+// activeCapabilitiesProvider 为可动态发现适配器的策略协调器提供当前可用能力。
+type activeCapabilitiesProvider interface {
+	ActiveCapabilities(context.Context) proxy.Capabilities
+}
+
+const (
+	// ManualMappingApplyStateApplied 表示映射已应用并通过验证。
+	ManualMappingApplyStateApplied = "applied"
+	// ManualMappingApplyStatePartial 表示部分映射能力已应用，仍有能力等待恢复。
+	ManualMappingApplyStatePartial = "partial"
+	// ManualMappingApplyStateDeferred 表示映射已保存，但当前没有可用适配器。
+	ManualMappingApplyStateDeferred = "deferred"
+	// domainMappingCapabilityUnavailableReason 是域名分配阶段可安全延后应用的稳定原因。
+	domainMappingCapabilityUnavailableReason = "domain mapping capability is unavailable"
+)
+
+// ManualMappingApplyResult 汇总手动域名映射的持久化、应用和能力降级状态。
+type ManualMappingApplyResult struct {
+	PolicyRefreshed     bool
+	ApplyState          string
+	AppliedAdapters     []string
+	SkippedCapabilities []string
+	Warnings            []string
 }
 
 type policyReceiptJournalSetter interface {
@@ -247,34 +277,215 @@ func (r *Runner) TestManualDomain(ctx context.Context, domain, rawAddress string
 	return result, err
 }
 
-// ApplyManualDomainMapping 保存指定映射并刷新整份策略，保留其它手动域名的当前映射。
+// ApplyManualDomainMapping 保留旧版 bool 返回契约，并转发到结构化手动映射流程。
 func (r *Runner) ApplyManualDomainMapping(ctx context.Context, domain, rawAddress string, mappings map[string]string) (bool, error) {
-	if r.policy == nil {
-		return false, errors.New("policy application requested but no adapter is configured")
-	}
+	result, err := r.ApplyManualDomainMappingDetailed(ctx, domain, rawAddress, mappings)
+	return result.PolicyRefreshed, err
+}
+
+// ApplyManualDomainMappingDetailed 保存映射；适配器不可用时返回 deferred 而不回滚配置。
+func (r *Runner) ApplyManualDomainMappingDetailed(ctx context.Context, domain, rawAddress string, mappings map[string]string) (ManualMappingApplyResult, error) {
+	result := ManualMappingApplyResult{ApplyState: ManualMappingApplyStateDeferred}
 	if !r.tryAcquireMaintenance() {
-		return false, ErrAlreadyRunning
+		return result, ErrAlreadyRunning
 	}
 	defer r.operationGate.release()
 	if err := ctx.Err(); err != nil {
-		return false, err
+		return result, err
 	}
 	previousMappings := cloneManualMappings(r.config.Acceleration.ManualMappings)
 	nextMappings := cloneManualMappings(mappings)
-	nextMappings[normalizeDomainForMapping(domain)] = strings.TrimSpace(rawAddress)
-	if reflect.DeepEqual(previousMappings, nextMappings) && r.store.Snapshot().Policy != nil {
-		return false, nil
-	}
+	normalizedDomain := normalizeDomainForMapping(domain)
+	nextMappings[normalizedDomain] = strings.TrimSpace(rawAddress)
+	stateBefore := r.store.Snapshot()
 	r.config.Acceleration.ManualMappings = nextMappings
-	if r.store.Snapshot().Policy == nil {
-		return false, errors.New("cannot apply manual domain mapping before a verified policy exists")
+
+	capabilities := r.activePolicyCapabilities(ctx)
+	if r.policy == nil || !capabilities.DomainMappings {
+		result.SkippedCapabilities = []string{"domain_mappings"}
+		result.Warnings = []string{"当前没有可用的域名映射适配器；映射已保存，请在适配器恢复后重新应用或刷新策略"}
+		r.logger.Warn("手动域名映射已保存但暂未应用", "domain", normalizedDomain, "policy_refreshed", false, "result", "deferred")
+		return result, nil
 	}
-	if err := r.refreshPolicyWithManualMappingsLocked(ctx, nextMappings, nil); err != nil {
-		r.config.Acceleration.ManualMappings = previousMappings
-		return false, fmt.Errorf("refresh policy after manual domain mapping: %w", err)
+
+	var applyErr error
+	if stateBefore.Policy == nil || !storedPolicyCoveredByCapabilities(stateBefore.Policy, capabilities) {
+		applyResult, _, err := r.applyManualMappingOnlyLocked(ctx, stateBefore, nextMappings, capabilities)
+		if err == nil {
+			result = manualMappingResultFromApply(applyResult, false)
+			result.PolicyRefreshed = true
+			return result, nil
+		}
+		applyErr = err
+	} else {
+		applyErr = r.refreshPolicyWithManualMappingsLocked(ctx, nextMappings, nil)
+		if applyErr == nil {
+			result.ApplyState = ManualMappingApplyStateApplied
+			result.PolicyRefreshed = true
+			r.logger.Info("手动域名映射已应用并验证", "domain", normalizedDomain, "target_ip", strings.TrimSpace(rawAddress), "policy_refreshed", true, "result", "completed")
+			return result, nil
+		}
 	}
-	r.logger.Info("手动域名映射已应用并验证", "domain", normalizeDomainForMapping(domain), "target_ip", strings.TrimSpace(rawAddress), "policy_refreshed", true, "result", "completed")
-	return true, nil
+	// 仅应用前的能力缺失可降级；验证或回滚错误必须向上返回，不能被离线复检吞掉。
+	if errors.Is(applyErr, proxy.ErrNoActiveAdapters) || errors.Is(applyErr, proxy.ErrDomainMappingsUnavailable) {
+		result.SkippedCapabilities = []string{"domain_mappings"}
+		result.Warnings = []string{"域名映射适配器在应用期间不可用；映射已保存，请在适配器恢复后重新应用或刷新策略"}
+		r.logger.Warn("手动域名映射应用延后", "domain", normalizedDomain, "result", "deferred", "error", applyErr)
+		return result, nil
+	}
+	r.config.Acceleration.ManualMappings = previousMappings
+	return result, fmt.Errorf("refresh policy after manual domain mapping: %w", applyErr)
+}
+
+// activePolicyCapabilities 返回当前已检测可用能力，兼容旧的静态策略替身。
+func (r *Runner) activePolicyCapabilities(ctx context.Context) proxy.Capabilities {
+	if r.policy == nil {
+		return proxy.Capabilities{}
+	}
+	if provider, ok := r.policy.(activeCapabilitiesProvider); ok {
+		return provider.ActiveCapabilities(ctx)
+	}
+	return r.policy.Capabilities()
+}
+
+// storedPolicyCoveredByCapabilities 判断完整旧策略能否由当前活动能力继续维护。
+func storedPolicyCoveredByCapabilities(policy *store.PolicySnapshot, capabilities proxy.Capabilities) bool {
+	if policy == nil {
+		return false
+	}
+	if len(policy.IPv4CIDRs) > 0 && !capabilities.IPv4 {
+		return false
+	}
+	if len(policy.IPv6CIDRs) > 0 && !capabilities.IPv6 {
+		return false
+	}
+	if len(policy.Domains) > 0 && !capabilities.Domains {
+		return false
+	}
+	return len(policy.DomainMappings) == 0 || capabilities.DomainMappings
+}
+
+// applyManualMappingOnlyLocked 只向映射适配器提交手动域名，避免覆盖离线适配器的旧 IP 策略。
+func (r *Runner) applyManualMappingOnlyLocked(ctx context.Context, before store.State, mappings map[string]string, capabilities proxy.Capabilities) (proxy.ApplyResult, proxy.DirectPolicy, error) {
+	if r.policy == nil {
+		return proxy.ApplyResult{}, proxy.DirectPolicy{}, errors.New("policy application requested but no adapter is configured")
+	}
+	policy := proxy.DirectPolicy{}
+	for _, domain := range r.config.Acceleration.ManualDomains {
+		normalized := normalizeDomainForMapping(domain)
+		address := strings.TrimSpace(mappings[normalized])
+		if address == "" {
+			continue
+		}
+		policy.DomainMappings = append(policy.DomainMappings, proxy.DomainMapping{Domain: normalized, Addresses: []string{address}})
+	}
+	if capabilities.Domains {
+		for _, mapping := range policy.DomainMappings {
+			policy.Domains = append(policy.Domains, mapping.Domain)
+		}
+	}
+	normalized, err := policy.Normalize()
+	if err != nil {
+		return proxy.ApplyResult{}, proxy.DirectPolicy{}, err
+	}
+	applied, err := r.policy.Apply(ctx, normalized)
+	if err != nil {
+		return proxy.ApplyResult{}, proxy.DirectPolicy{}, err
+	}
+	if len(normalized.DomainMappings) > 0 {
+		if r.domainVerifier == nil {
+			if rollbackErr := r.policy.Rollback(ctx, applied); rollbackErr != nil {
+				return proxy.ApplyResult{}, proxy.DirectPolicy{}, errors.Join(errors.New("domain mapping verification is unavailable"), rollbackErr)
+			}
+			return proxy.ApplyResult{}, proxy.DirectPolicy{}, errors.New("domain mapping verification is unavailable")
+		}
+		if err := r.domainVerifier.VerifyApplied(ctx, normalized.DomainMappings); err != nil {
+			if rollbackErr := r.policy.Rollback(ctx, applied); rollbackErr != nil {
+				err = errors.Join(err, rollbackErr)
+			}
+			return proxy.ApplyResult{}, proxy.DirectPolicy{}, err
+		}
+	}
+	mergedPolicy := mergeManualMappingsIntoStoredPolicy(before.Policy, normalized)
+	committed := applied
+	if before.Policy != nil {
+		var previous proxy.ApplyResult
+		if err := json.Unmarshal(before.Policy.Receipts, &previous); err != nil {
+			_ = r.policy.Rollback(ctx, applied)
+			return proxy.ApplyResult{}, proxy.DirectPolicy{}, fmt.Errorf("decode previous policy receipts: %w", err)
+		}
+		committed.Receipts = append(previous.Receipts, applied.Receipts...)
+	}
+	receipts, err := json.Marshal(committed)
+	if err != nil {
+		_ = r.policy.Rollback(ctx, applied)
+		return proxy.ApplyResult{}, proxy.DirectPolicy{}, err
+	}
+	if err := r.store.Update(func(state *store.State) error {
+		state.Policy = policySnapshot(mergedPolicy, receipts, r.now().UTC())
+		for _, mapping := range normalized.DomainMappings {
+			record := state.DiscoveredDomains[mapping.Domain]
+			record.Domain = mapping.Domain
+			record.Source = "manual"
+			record.Active = true
+			record.LastError = ""
+			state.DiscoveredDomains[mapping.Domain] = record
+		}
+		return nil
+	}); err != nil {
+		_ = r.policy.Rollback(ctx, applied)
+		return proxy.ApplyResult{}, proxy.DirectPolicy{}, err
+	}
+	return applied, normalized, nil
+}
+
+// mergeManualMappingsIntoStoredPolicy 将新手动映射合并到旧策略快照，保留自动域名和地址族规则。
+func mergeManualMappingsIntoStoredPolicy(previous *store.PolicySnapshot, mappingPolicy proxy.DirectPolicy) proxy.DirectPolicy {
+	if previous == nil {
+		return mappingPolicy
+	}
+	merged := proxy.DirectPolicy{
+		IPv4CIDRs: append([]string(nil), previous.IPv4CIDRs...), IPv6CIDRs: append([]string(nil), previous.IPv6CIDRs...),
+		Domains: append([]string(nil), previous.Domains...), Processes: append([]string(nil), previous.Processes...),
+	}
+	manual := make(map[string]proxy.DomainMapping, len(mappingPolicy.DomainMappings))
+	for _, mapping := range mappingPolicy.DomainMappings {
+		manual[normalizeDomainForMapping(mapping.Domain)] = mapping
+	}
+	for _, snapshot := range previous.DomainMappings {
+		domain := normalizeDomainForMapping(snapshot.Domain)
+		if replacement, exists := manual[domain]; exists {
+			merged.DomainMappings = append(merged.DomainMappings, replacement)
+			delete(manual, domain)
+			continue
+		}
+		merged.DomainMappings = append(merged.DomainMappings, proxy.DomainMapping{Domain: domain, Addresses: append([]string(nil), snapshot.Addresses...)})
+	}
+	for _, mapping := range manual {
+		merged.DomainMappings = append(merged.DomainMappings, mapping)
+	}
+	merged, _ = merged.Normalize()
+	return merged
+}
+
+// manualMappingResultFromApply 将协调器收据转换为稳定的前端状态载荷。
+func manualMappingResultFromApply(applied proxy.ApplyResult, partial bool) ManualMappingApplyResult {
+	result := ManualMappingApplyResult{PolicyRefreshed: len(applied.Receipts) > 0, ApplyState: ManualMappingApplyStateDeferred}
+	seen := make(map[string]struct{}, len(applied.Receipts))
+	for _, receipt := range applied.Receipts {
+		if _, exists := seen[receipt.Adapter]; exists {
+			continue
+		}
+		seen[receipt.Adapter] = struct{}{}
+		result.AppliedAdapters = append(result.AppliedAdapters, receipt.Adapter)
+	}
+	if len(result.AppliedAdapters) > 0 {
+		result.ApplyState = ManualMappingApplyStateApplied
+		if partial {
+			result.ApplyState = ManualMappingApplyStatePartial
+		}
+	}
+	return result
 }
 
 func cloneManualMappings(mappings map[string]string) map[string]string {
@@ -552,7 +763,7 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 				}
 			}
 			if !resumedPolicyPlan {
-				if err := r.persistPolicyPlanCheckpoint(report.ID, report.NodePoolID, stateBefore, report); err != nil {
+				if err := r.persistPolicyPlanCheckpoint(ctx, report.ID, report.NodePoolID, stateBefore, report); err != nil {
 					return report, fmt.Errorf("persist policy plan checkpoint: %w", err)
 				}
 			}
@@ -602,7 +813,7 @@ func (r *Runner) Run(ctx context.Context, options RunOptions, emit func(Event)) 
 	}
 	currentStage = stageCommit
 	r.emit(emit, Event{RunID: report.ID, Type: "stage.started", Stage: stageCommit, Message: "committing optimization state"})
-	if err := r.persistSuccessfulRun(report, stateBefore, applied, options.ApplyPolicy); err != nil {
+	if err := r.persistSuccessfulRun(ctx, report, stateBefore, applied, options.ApplyPolicy); err != nil {
 		currentStage = stageApplyVerify
 		if rollbackErr := r.rollbackRoutes(ctx, removedRouteTransactions); rollbackErr != nil {
 			err = errors.Join(err, fmt.Errorf("restore obsolete routes after persistence failure: %w", rollbackErr))
@@ -777,6 +988,14 @@ func (r *Runner) beginNodePoolProbe(ctx context.Context, runID string, addresses
 		return noop, nil, fmt.Errorf("apply benchmark DIRECT guard: %w", err)
 	}
 	evidence := append([]proxy.BenchmarkPathEvidence(nil), guardResult.Evidence...)
+	if len(evidence) == 0 {
+		physicalEvidence, physicalErr := r.verifyPhysicalBenchmarkFallback(ctx, addresses, temporaryTransactions)
+		if physicalErr != nil {
+			cleanupErr := r.endBenchmarkGuard(ctx, guard, guardResult)
+			return noop, nil, errors.Join(fmt.Errorf("benchmark guard produced no DIRECT evidence: %w", physicalErr), cleanupErr)
+		}
+		evidence = append(evidence, physicalEvidence)
+	}
 	for index := range evidence {
 		item := &evidence[index]
 		if item.ProxyObserved && item.DirectVerified {
@@ -790,7 +1009,7 @@ func (r *Runner) beginNodePoolProbe(ctx context.Context, runID string, addresses
 			cleanupErr := r.endBenchmarkGuard(ctx, guard, guardResult)
 			return noop, evidence, errors.Join(fmt.Errorf("benchmark path to %s lacks DIRECT connection or verified physical-route evidence", item.Target), cleanupErr)
 		}
-		r.logger.Info("测速直连路径验证完成", "run_id", runID, "adapter", item.Adapter, "interface", item.Interface, "target_ip", item.Target, "proxy_observed", item.ProxyObserved, "physical_route_used", item.PhysicalRouteUsed, "result", "verified")
+		r.logBenchmarkPathEvidence(runID, *item)
 	}
 	finished := false
 	finish := func() error {
@@ -801,6 +1020,36 @@ func (r *Runner) beginNodePoolProbe(ctx context.Context, runID string, addresses
 		return r.endBenchmarkGuard(ctx, guard, guardResult)
 	}
 	return finish, evidence, nil
+}
+
+// verifyPhysicalBenchmarkFallback 要求临时路由已验证，并通过真实物理接口 Socket 补充 DIRECT 证据。
+func (r *Runner) verifyPhysicalBenchmarkFallback(ctx context.Context, addresses []netip.Addr, temporaryTransactions []string) (proxy.BenchmarkPathEvidence, error) {
+	if len(temporaryTransactions) == 0 {
+		return proxy.BenchmarkPathEvidence{}, errors.New("no verified temporary physical route is available")
+	}
+	verifier, ok := r.benchmark.(physicalBenchmarkPathVerifier)
+	if !ok {
+		return proxy.BenchmarkPathEvidence{}, errors.New("benchmark does not expose bound physical Socket verification")
+	}
+	evidence, err := verifier.VerifyPhysicalPath(ctx, addresses)
+	if err != nil {
+		return proxy.BenchmarkPathEvidence{}, err
+	}
+	if r.physicalPath.Interface == "" || evidence.Interface != r.physicalPath.Interface || !evidence.SocketBound || !evidence.DirectVerified {
+		return proxy.BenchmarkPathEvidence{}, errors.New("physical benchmark evidence does not match the confirmed interface")
+	}
+	evidence.Adapter = "physical-route"
+	evidence.GuardApplied = false
+	evidence.PhysicalRouteUsed = true
+	if evidence.Verification == "" {
+		evidence.Verification = "bound_socket_and_verified_physical_route"
+	}
+	return evidence, nil
+}
+
+// logBenchmarkPathEvidence 记录不含认证信息的测速路径验证摘要。
+func (r *Runner) logBenchmarkPathEvidence(runID string, evidence proxy.BenchmarkPathEvidence) {
+	r.logger.Info("测速直连路径验证完成", "run_id", runID, "adapter", evidence.Adapter, "interface", evidence.Interface, "target_ip", evidence.Target, "proxy_observed", evidence.ProxyObserved, "physical_route_used", evidence.PhysicalRouteUsed, "result", "verified")
 }
 
 func qualifiedAddresses(results []benchmark.Result) []netip.Addr {
@@ -921,15 +1170,15 @@ func (r *Runner) updateCheckpoint(runID, stage, poolID string, evidence []store.
 }
 
 // persistPolicyPlanCheckpoint 保存已完成域名证据和待应用策略计划，应用失败时可跳过域名复测。
-func (r *Runner) persistPolicyPlanCheckpoint(runID, poolID string, state store.State, report RunReport) error {
+func (r *Runner) persistPolicyPlanCheckpoint(ctx context.Context, runID, poolID string, state store.State, report RunReport) error {
 	if r.policy == nil {
 		return errors.New("policy application requested but no adapter is configured")
 	}
-	finalPolicy, err := r.policyForDecisions(state, report, false)
+	finalPolicy, err := r.policyForDecisionsWithContext(ctx, state, report, false)
 	if err != nil {
 		return err
 	}
-	transitionPolicy, err := r.policyForDecisions(state, report, true)
+	transitionPolicy, err := r.policyForDecisionsWithContext(ctx, state, report, true)
 	if err != nil {
 		return err
 	}
@@ -1083,7 +1332,7 @@ func (r *Runner) replaceUnsafeLegacyDomainMappings(ctx context.Context, before s
 		return errors.New("unsafe legacy domain mappings cannot be replaced because no adapter is configured")
 	}
 	report := RunReport{domainAllocationCompleted: true}
-	safePolicy, err := r.policyForDecisions(before, report, false)
+	safePolicy, err := r.policyForDecisionsWithContext(ctx, before, report, false)
 	if err != nil {
 		return err
 	}
@@ -1323,6 +1572,9 @@ retryRefresh:
 		}
 		report := RunReport{DomainAllocations: allocations, domainMappings: mappings, domainAllocationCompleted: true}
 		if failure := manualDomainAllocationFailure(report); failure != "" {
+			if manualMappingOverrides != nil && hasDomainMappingCapabilityFailure(report.DomainAllocations) {
+				return fmt.Errorf("%w: %s", proxy.ErrDomainMappingsUnavailable, failure)
+			}
 			if recordErr := r.persistDomainAllocationFailure(report); recordErr != nil {
 				return errors.Join(errors.New(failure), recordErr)
 			}
@@ -1340,7 +1592,7 @@ retryRefresh:
 				continue retryRefresh
 			}
 		}
-		policy, policyErr := r.policyForDecisions(planned, report, false)
+		policy, policyErr := r.policyForDecisionsWithContext(ctx, planned, report, false)
 		if policyErr != nil {
 			return policyErr
 		}
@@ -1643,11 +1895,11 @@ func (r *Runner) applySelectedPolicy(ctx context.Context, state store.State, rep
 	if r.policy == nil {
 		return proxy.ApplyResult{}, nil, errors.New("policy application requested but no adapter is configured")
 	}
-	finalPolicy, err := r.policyForDecisions(state, report, false)
+	finalPolicy, err := r.policyForDecisionsWithContext(ctx, state, report, false)
 	if err != nil {
 		return proxy.ApplyResult{}, nil, err
 	}
-	transitionPolicy, err := r.policyForDecisions(state, report, true)
+	transitionPolicy, err := r.policyForDecisionsWithContext(ctx, state, report, true)
 	if err != nil {
 		return proxy.ApplyResult{}, nil, err
 	}
@@ -1832,8 +2084,8 @@ func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Sna
 	if len(candidatesByDomain) == 0 {
 		return nil, nil, nil, nil
 	}
-	if r.policy == nil || !r.policy.Capabilities().DomainMappings {
-		allocations := failedDomainAllocations(candidatesByDomain, "domain mapping capability is unavailable")
+	if r.policy == nil || !r.activePolicyCapabilities(ctx).DomainMappings {
+		allocations := failedDomainAllocations(candidatesByDomain, domainMappingCapabilityUnavailableReason)
 		return nil, allocations, domainAllocationWarnings(allocations), nil
 	}
 	if r.domainResolver == nil || r.domainVerifier == nil {
@@ -2074,6 +2326,16 @@ func manualDomainAllocationFailure(report RunReport) string {
 	return "手动域名未全部生效: " + strings.Join(failures, "; ")
 }
 
+// hasDomainMappingCapabilityFailure 判断手动映射是否仅因适配器能力暂时不可用而失败。
+func hasDomainMappingCapabilityFailure(allocations []DomainAllocationResult) bool {
+	for _, allocation := range allocations {
+		if allocation.Source == "manual" && allocation.AssignedAddress == "" && allocation.Error == domainMappingCapabilityUnavailableReason {
+			return true
+		}
+	}
+	return false
+}
+
 // automaticDomainAllocationEnabled 要求三个开关同时开启后才允许自动域名消费剩余地址池。
 func automaticDomainAllocationEnabled(cfg config.Config) bool {
 	return cfg.Acceleration.Enabled && cfg.Acceleration.AutoDiscover && cfg.Acceleration.AutoApply
@@ -2128,8 +2390,23 @@ func rankedHistoricalResults(state store.State, now time.Time) []benchmark.Resul
 	return results
 }
 
+// policyForDecisions 保留测试和旧调用方的静态能力入口。
 func (r *Runner) policyForDecisions(state store.State, report RunReport, includePrevious bool) (proxy.DirectPolicy, error) {
-	capabilities := r.policy.Capabilities()
+	if r.policy == nil {
+		return proxy.DirectPolicy{}, errors.New("policy application requested but no adapter is configured")
+	}
+	return r.policyForDecisionsWithCapabilities(state, report, includePrevious, r.policy.Capabilities())
+}
+
+// policyForDecisionsWithContext 使用当前检测成功的适配器能力生成策略。
+func (r *Runner) policyForDecisionsWithContext(ctx context.Context, state store.State, report RunReport, includePrevious bool) (proxy.DirectPolicy, error) {
+	if r.policy == nil {
+		return proxy.DirectPolicy{}, errors.New("policy application requested but no adapter is configured")
+	}
+	return r.policyForDecisionsWithCapabilities(state, report, includePrevious, r.activePolicyCapabilities(ctx))
+}
+
+func (r *Runner) policyForDecisionsWithCapabilities(state store.State, report RunReport, includePrevious bool, capabilities proxy.Capabilities) (proxy.DirectPolicy, error) {
 	policy := proxy.DirectPolicy{}
 	if capabilities.Processes {
 		policy.Processes = []string{"cf-optimizer", "cf-optimizerd", "cf-optimizer.exe", "cf-optimizerd.exe"}
@@ -2166,7 +2443,10 @@ func (r *Runner) policyForDecisions(state store.State, report RunReport, include
 	if !report.domainAllocationCompleted {
 		domainMappings = storedDomainMappings(r.config, state)
 	}
-	if capabilities.DomainMappings {
+	if len(domainMappings) > 0 {
+		if !capabilities.DomainMappings {
+			return proxy.DirectPolicy{}, proxy.ErrDomainMappingsUnavailable
+		}
 		for _, mapping := range domainMappings {
 			if capabilities.Domains {
 				policy.Domains = append(policy.Domains, mapping.Domain)
@@ -2284,7 +2564,7 @@ func (r *Runner) removeObsoletePolicyRoutes(ctx context.Context, previous *store
 	return transactionIDs, nil
 }
 
-func (r *Runner) persistSuccessfulRun(report RunReport, before store.State, applied proxy.ApplyResult, policyApplied bool) error {
+func (r *Runner) persistSuccessfulRun(ctx context.Context, report RunReport, before store.State, applied proxy.ApplyResult, policyApplied bool) error {
 	now := r.now().UTC()
 	details, err := json.Marshal(report.Results)
 	if err != nil {
@@ -2309,7 +2589,7 @@ func (r *Runner) persistSuccessfulRun(report RunReport, before store.State, appl
 			if err != nil {
 				return err
 			}
-			policy, err := r.policyForDecisions(before, report, false)
+			policy, err := r.policyForDecisionsWithContext(ctx, before, report, false)
 			if err != nil {
 				return err
 			}

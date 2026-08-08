@@ -97,6 +97,29 @@ type recordingPolicy struct {
 	rollbacks      []proxy.ApplyResult
 }
 
+type activeRecordingPolicy struct {
+	*recordingPolicy
+	active proxy.Capabilities
+}
+
+func (p *activeRecordingPolicy) ActiveCapabilities(context.Context) proxy.Capabilities {
+	return p.active
+}
+
+type failingActivePolicy struct {
+	*recordingPolicy
+	active   proxy.Capabilities
+	applyErr error
+}
+
+func (p *failingActivePolicy) ActiveCapabilities(context.Context) proxy.Capabilities {
+	return p.active
+}
+
+func (p *failingActivePolicy) Apply(context.Context, proxy.DirectPolicy) (proxy.ApplyResult, error) {
+	return proxy.ApplyResult{}, p.applyErr
+}
+
 type candidateRejectingPolicy struct {
 	recordingPolicy
 	rejectedAddress string
@@ -120,6 +143,33 @@ type guardedRecordingPolicy struct {
 	recordingPolicy
 	events      []string
 	guardActive bool
+}
+
+type emptyGuardPolicy struct {
+	recordingPolicy
+}
+
+func (*emptyGuardPolicy) BeginBenchmarkGuard(context.Context, proxy.DirectPolicy, []netip.Addr) (proxy.BenchmarkGuardResult, error) {
+	return proxy.BenchmarkGuardResult{}, nil
+}
+
+func (*emptyGuardPolicy) EndBenchmarkGuard(context.Context, proxy.BenchmarkGuardResult) error {
+	return nil
+}
+
+type physicalEvidenceBenchmark struct {
+	staticBenchmark
+	interfaceName string
+}
+
+func (b physicalEvidenceBenchmark) VerifyPhysicalPath(_ context.Context, targets []netip.Addr) (proxy.BenchmarkPathEvidence, error) {
+	if len(targets) == 0 {
+		return proxy.BenchmarkPathEvidence{}, errors.New("missing target")
+	}
+	return proxy.BenchmarkPathEvidence{
+		Interface: b.interfaceName, Target: targets[0].String(), SocketBound: true, DirectVerified: true,
+		Verification: "bound_socket_and_verified_physical_route",
+	}, nil
 }
 
 func (p *guardedRecordingPolicy) BeginBenchmarkGuard(context.Context, proxy.DirectPolicy, []netip.Addr) (proxy.BenchmarkGuardResult, error) {
@@ -534,7 +584,7 @@ func TestTestManualDomainRollsBackTemporaryRoute(t *testing.T) {
 	}
 }
 
-func TestApplyManualDomainMappingRejectsMissingAdapter(t *testing.T) {
+func TestApplyManualDomainMappingDefersWhenAdapterIsMissing(t *testing.T) {
 	runner, stateStore := newTestRunner(t, nil)
 	if err := stateStore.Update(func(state *store.State) error {
 		state.Policy = &store.PolicySnapshot{Receipts: json.RawMessage(`{"receipts":[]}`)}
@@ -543,9 +593,91 @@ func TestApplyManualDomainMappingRejectsMissingAdapter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	refreshed, err := runner.ApplyManualDomainMapping(context.Background(), "manual.example", "1.1.1.2", map[string]string{"manual.example": "1.1.1.2"})
-	if err == nil || !strings.Contains(err.Error(), "no adapter is configured") {
-		t.Fatalf("missing adapter was not rejected: refreshed=%v err=%v", refreshed, err)
+	result, err := runner.ApplyManualDomainMappingDetailed(context.Background(), "manual.example", "1.1.1.2", map[string]string{"manual.example": "1.1.1.2"})
+	if err != nil || result.ApplyState != ManualMappingApplyStateDeferred || result.PolicyRefreshed {
+		t.Fatalf("missing adapter was not deferred: result=%#v err=%v", result, err)
+	}
+	if runner.config.Acceleration.ManualMappings["manual.example"] != "1.1.1.2" {
+		t.Fatalf("deferred mapping was not retained in runner config: %#v", runner.config.Acceleration.ManualMappings)
+	}
+	if stateStore.Snapshot().Policy == nil {
+		t.Fatal("deferred mapping unexpectedly removed the previous policy")
+	}
+	repeated, err := runner.ApplyManualDomainMappingDetailed(context.Background(), "manual.example", "1.1.1.2", map[string]string{"manual.example": "1.1.1.2"})
+	if err != nil || repeated.ApplyState != ManualMappingApplyStateDeferred || repeated.PolicyRefreshed {
+		t.Fatalf("repeated deferred mapping was reported as applied: result=%#v err=%v", repeated, err)
+	}
+}
+
+func TestApplyManualDomainMappingCanCreateMappingOnlyPolicy(t *testing.T) {
+	policyApplier := &recordingPolicy{capabilities: proxy.Capabilities{Domains: true, DomainMappings: true}}
+	runner, stateStore := newTestRunner(t, policyApplier)
+	runner.config.Acceleration.ManualDomains = []string{"manual.example"}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	result, err := runner.ApplyManualDomainMappingDetailed(context.Background(), "manual.example", "1.1.1.2", map[string]string{"manual.example": "1.1.1.2"})
+	if err != nil || result.ApplyState != ManualMappingApplyStateApplied || !result.PolicyRefreshed {
+		t.Fatalf("mapping-only policy was not applied: result=%#v err=%v", result, err)
+	}
+	if len(policyApplier.policies) != 1 || len(policyApplier.policies[0].DomainMappings) != 1 {
+		t.Fatalf("unexpected mapping-only policy: %#v", policyApplier.policies)
+	}
+	if stateStore.Snapshot().Policy == nil {
+		t.Fatal("mapping-only policy was not committed")
+	}
+}
+
+func TestApplyManualDomainMappingDoesNotDeferVerificationOrRollbackFailure(t *testing.T) {
+	policyApplier := &failingActivePolicy{
+		recordingPolicy: &recordingPolicy{capabilities: proxy.Capabilities{Domains: true, DomainMappings: true}},
+		active:          proxy.Capabilities{Domains: true, DomainMappings: true},
+		applyErr:        errors.New("rollback conflict"),
+	}
+	runner, _ := newTestRunner(t, policyApplier)
+	runner.config.Acceleration.ManualDomains = []string{"manual.example"}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	result, err := runner.ApplyManualDomainMappingDetailed(context.Background(), "manual.example", "1.1.1.2", map[string]string{"manual.example": "1.1.1.2"})
+	if err == nil || !strings.Contains(err.Error(), "rollback conflict") || result.ApplyState != ManualMappingApplyStateDeferred {
+		t.Fatalf("application failure was incorrectly downgraded: result=%#v err=%v", result, err)
+	}
+	if _, exists := runner.config.Acceleration.ManualMappings["manual.example"]; exists {
+		t.Fatalf("failed mapping remained in runner config: %#v", runner.config.Acceleration.ManualMappings)
+	}
+}
+
+func TestApplyManualDomainMappingDefersTypedAdapterAvailabilityFailure(t *testing.T) {
+	policyApplier := &failingActivePolicy{
+		recordingPolicy: &recordingPolicy{capabilities: proxy.Capabilities{Domains: true, DomainMappings: true}},
+		active:          proxy.Capabilities{Domains: true, DomainMappings: true},
+		applyErr:        proxy.ErrNoActiveAdapters,
+	}
+	runner, _ := newTestRunner(t, policyApplier)
+	runner.config.Acceleration.ManualDomains = []string{"manual.example"}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	result, err := runner.ApplyManualDomainMappingDetailed(context.Background(), "manual.example", "1.1.1.2", map[string]string{"manual.example": "1.1.1.2"})
+	if err != nil || result.ApplyState != ManualMappingApplyStateDeferred || result.PolicyRefreshed {
+		t.Fatalf("typed adapter availability failure was not deferred: result=%#v err=%v", result, err)
+	}
+	if runner.config.Acceleration.ManualMappings["manual.example"] != "1.1.1.2" {
+		t.Fatalf("deferred mapping was not retained: %#v", runner.config.Acceleration.ManualMappings)
+	}
+}
+
+func TestPolicyForDecisionsUsesOnlyActiveAdapterCapabilities(t *testing.T) {
+	static := &recordingPolicy{capabilities: proxy.Capabilities{Processes: true, IPv4: true, Domains: true, DomainMappings: true}}
+	policyApplier := &activeRecordingPolicy{recordingPolicy: static, active: proxy.Capabilities{IPv4: true}}
+	runner, stateStore := newTestRunner(t, policyApplier)
+	if err := stateStore.Update(func(state *store.State) error {
+		state.CurrentIPv4 = &store.Selection{IP: "1.1.1.1", Family: 4, PolicyVerified: true}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := runner.policyForDecisionsWithContext(context.Background(), stateStore.Snapshot(), RunReport{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.Processes) != 0 || len(policy.IPv4CIDRs) != 1 {
+		t.Fatalf("inactive process capability leaked into generated policy: %#v", policy)
 	}
 }
 
@@ -993,6 +1125,31 @@ func TestRunRollsBackBenchmarkGuardBeforeFinalPolicy(t *testing.T) {
 	}
 	if len(report.BenchmarkPath) != 1 || !report.BenchmarkPath[0].DirectVerified || policy.guardActive {
 		t.Fatalf("benchmark guard evidence or cleanup is incomplete: report=%#v active=%v", report.BenchmarkPath, policy.guardActive)
+	}
+}
+
+func TestBeginNodePoolProbeUsesVerifiedPhysicalFallbackWhenGuardHasNoEvidence(t *testing.T) {
+	policy := &emptyGuardPolicy{recordingPolicy: recordingPolicy{capabilities: proxy.Capabilities{IPv4: true}}}
+	runner, _ := newTestRunner(t, policy)
+	runner.physicalPath = cfnetwork.PhysicalPath{Interface: "Ethernet", InterfaceIndex: 4, GatewayIPv4: "192.0.2.1"}
+	runner.benchmark = physicalEvidenceBenchmark{interfaceName: "Ethernet"}
+	finish, evidence, err := runner.beginNodePoolProbe(
+		context.Background(), "run-physical", []netip.Addr{netip.MustParseAddr("1.1.1.1")}, true, []string{"verified-route"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence) != 1 || evidence[0].Adapter != "physical-route" || !evidence[0].PhysicalRouteUsed || !evidence[0].DirectVerified {
+		t.Fatalf("physical fallback evidence is incomplete: %#v", evidence)
+	}
+	if err := finish(); err != nil {
+		t.Fatal(err)
+	}
+	_, evidence, err = runner.beginNodePoolProbe(
+		context.Background(), "run-unverified", []netip.Addr{netip.MustParseAddr("1.1.1.1")}, true, nil,
+	)
+	if err == nil || len(evidence) != 0 {
+		t.Fatalf("missing route evidence was accepted: evidence=%#v err=%v", evidence, err)
 	}
 }
 

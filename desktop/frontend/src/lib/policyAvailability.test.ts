@@ -10,9 +10,10 @@ describe('shouldApplyPolicy', () => {
 });
 
 describe('canApplyManualDomain', () => {
-  it('requires an available adapter and verified policy', () => {
-    expect(canApplyManualDomain(true, true)).toBe(true);
-    expect(canApplyManualDomain(false, true)).toBe(false);
-    expect(canApplyManualDomain(true, false)).toBe(false);
+  it('requires a passing test for the current draft address', () => {
+    expect(canApplyManualDomain(true, '104.16.0.1', '104.16.0.1')).toBe(true);
+    expect(canApplyManualDomain(false, '104.16.0.1', '104.16.0.1')).toBe(false);
+    expect(canApplyManualDomain(true, '104.16.0.1', '104.16.0.2')).toBe(false);
+    expect(canApplyManualDomain(true, undefined, '104.16.0.1')).toBe(false);
   });
 });

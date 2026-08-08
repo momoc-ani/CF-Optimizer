@@ -127,17 +127,12 @@ func Build(cfg config.Config, configPath string, logger *slog.Logger) (*Runtime,
 	mihomoAutoDetected := false
 	if cfg.Network.ManageRoutes {
 		managedConfig.Hosts.Enabled = cfg.Acceleration.Enabled
-		if cfg.Proxy.AutoDetect {
-			detection, detectErr := mihomo.AutoDetect(context.Background(), cfg.Proxy.Mihomo)
-			if detectErr == nil && detection.Present {
-				if detectedConfig, configureErr := mihomo.ConfigureDetected(cfg.Proxy.Mihomo, detection, cfg.DataDir); configureErr == nil {
-					managedConfig.Proxy.Mihomo = detectedConfig
-					runtimeConfig.Proxy.Mihomo = detectedConfig
-					mihomoAutoDetected = true
-				} else {
-					logger.Warn("已发现 Mihomo，但无法建立安全管理路径", "component", "proxy", "adapter", "mihomo", "error", configureErr)
-				}
-			}
+	}
+	if cfg.Proxy.AutoDetect {
+		if detectedConfig, detected, detectErr := discoverMihomoConfig(context.Background(), cfg, logger); detectErr == nil && detected {
+			managedConfig.Proxy.Mihomo = detectedConfig
+			runtimeConfig.Proxy.Mihomo = detectedConfig
+			mihomoAutoDetected = true
 		}
 	}
 	proxyCoordinator, err := buildProxyCoordinator(managedConfig, physicalPath, routeController, directDial, logger)
@@ -146,6 +141,7 @@ func Build(cfg config.Config, configPath string, logger *slog.Logger) (*Runtime,
 	}
 	rangeCatalog := ranges.NewCatalog(cfg.Ranges, cfg.DataDir)
 	benchmarker := benchmark.New(cfg.Benchmark, directDial)
+	benchmarker.SetBoundInterface(physicalPath.Interface)
 	runner, err := optimizer.NewRunner(managedConfig, rangeCatalog, benchmarker, stateStore, routeController, physicalPath, proxyCoordinator, logger)
 	if err != nil {
 		return nil, err
@@ -250,7 +246,7 @@ func (r *Runtime) TryExecute(ctx context.Context, expectedRevision string, actio
 // RuleGuardStrategies 构造当前配置启用的按内核划分规则守护策略。
 func (r *Runtime) RuleGuardStrategies() ([]guard.Strategy, error) {
 	view := r.View()
-	if !view.Config.Proxy.Mihomo.Enabled && (!view.Config.Proxy.AutoDetect || !view.Config.Network.ManageRoutes) {
+	if !view.Config.Proxy.Mihomo.Enabled && !view.Config.Proxy.AutoDetect {
 		return []guard.Strategy{}, nil
 	}
 	strategy, err := mihomo.NewRuleGuardStrategy(view.Config.Proxy, view.Config.DataDir, view.RouteBackend, view.PhysicalPath, view.MihomoAutoDetected)
@@ -339,17 +335,12 @@ func (r *Runtime) ReloadConfig(ctx context.Context, cfg config.Config, refreshPo
 	mihomoAutoDetected := false
 	if cfg.Network.ManageRoutes {
 		managedConfig.Hosts.Enabled = cfg.Acceleration.Enabled
-		if cfg.Proxy.AutoDetect {
-			detection, detectErr := mihomo.AutoDetect(ctx, cfg.Proxy.Mihomo)
-			if detectErr == nil && detection.Present {
-				if detectedConfig, configureErr := mihomo.ConfigureDetected(cfg.Proxy.Mihomo, detection, cfg.DataDir); configureErr == nil {
-					managedConfig.Proxy.Mihomo = detectedConfig
-					runtimeConfig.Proxy.Mihomo = detectedConfig
-					mihomoAutoDetected = true
-				} else {
-					r.Logger.Warn("热重载已发现 Mihomo，但无法建立安全管理路径", "component", "proxy", "adapter", "mihomo", "error", configureErr)
-				}
-			}
+	}
+	if cfg.Proxy.AutoDetect {
+		if detectedConfig, detected, detectErr := discoverMihomoConfig(ctx, cfg, r.Logger); detectErr == nil && detected {
+			managedConfig.Proxy.Mihomo = detectedConfig
+			runtimeConfig.Proxy.Mihomo = detectedConfig
+			mihomoAutoDetected = true
 		}
 	}
 	proxyCoordinator, err := buildProxyCoordinator(managedConfig, physicalPath, routeController, directDial, r.Logger)
@@ -358,6 +349,7 @@ func (r *Runtime) ReloadConfig(ctx context.Context, cfg config.Config, refreshPo
 	}
 	rangeCatalog := ranges.NewCatalog(cfg.Ranges, cfg.DataDir)
 	benchmarker := benchmark.New(managedConfig.Benchmark, directDial)
+	benchmarker.SetBoundInterface(physicalPath.Interface)
 	domainVerifier, err := acceleration.NewVerifierWithOptions(directDial, acceleration.VerificationOptions{
 		PreflightTimeout: managedConfig.Benchmark.TLSTimeout.Duration(),
 		ApplyTimeout:     managedConfig.Acceleration.ApplyVerificationTimeout.Duration(),
@@ -484,12 +476,16 @@ type DomainTestResult struct {
 
 // DomainApplyResult 返回手动域名映射经过策略验证后的应用结果。
 type DomainApplyResult struct {
-	Domain           string    `json:"domain"`
-	Address          string    `json:"address"`
-	DownloadMbps     float64   `json:"download_mbps"`
-	DownloadVerified bool      `json:"download_verified"`
-	PolicyRefreshed  bool      `json:"policy_refreshed"`
-	AppliedAt        time.Time `json:"applied_at"`
+	Domain              string    `json:"domain"`
+	Address             string    `json:"address"`
+	DownloadMbps        float64   `json:"download_mbps"`
+	DownloadVerified    bool      `json:"download_verified"`
+	PolicyRefreshed     bool      `json:"policy_refreshed"`
+	ApplyState          string    `json:"apply_state"`
+	AppliedAdapters     []string  `json:"applied_adapters,omitempty"`
+	SkippedCapabilities []string  `json:"skipped_capabilities,omitempty"`
+	Warnings            []string  `json:"warnings,omitempty"`
+	AppliedAt           time.Time `json:"applied_at,omitempty"`
 }
 
 // validateManualDomainAddress 校验域名属于显式手动列表且地址属于当前 Cloudflare 快照。
@@ -625,18 +621,17 @@ func (r *Runtime) ApplyManualDomainMapping(ctx context.Context, domain, rawAddre
 	if !exists || record.Source != "manual" || record.DownloadAddress != address.String() || !record.DownloadVerified || record.DownloadTestedAt.IsZero() {
 		return DomainApplyResult{}, errors.New("manual domain must pass a recent direct download test before application")
 	}
-	if stateBefore.Policy == nil {
-		return DomainApplyResult{}, errors.New("cannot apply manual domain mapping before a verified policy exists")
-	}
 	manualDomains := make(map[string]struct{}, len(view.Config.Acceleration.ManualDomains))
 	for _, configuredDomain := range view.Config.Acceleration.ManualDomains {
 		manualDomains[normalizeManualDomain(configuredDomain)] = struct{}{}
 	}
 	fullMappings := make(map[string]string, len(manualDomains))
-	for _, mapping := range stateBefore.Policy.DomainMappings {
-		mappingDomain := normalizeManualDomain(mapping.Domain)
-		if _, isManual := manualDomains[mappingDomain]; isManual && len(mapping.Addresses) == 1 {
-			fullMappings[mappingDomain] = mapping.Addresses[0]
+	if stateBefore.Policy != nil {
+		for _, mapping := range stateBefore.Policy.DomainMappings {
+			mappingDomain := normalizeManualDomain(mapping.Domain)
+			if _, isManual := manualDomains[mappingDomain]; isManual && len(mapping.Addresses) == 1 {
+				fullMappings[mappingDomain] = mapping.Addresses[0]
+			}
 		}
 	}
 	for mappingDomain, mappingAddress := range view.Config.Acceleration.ManualMappings {
@@ -658,7 +653,7 @@ func (r *Runtime) ApplyManualDomainMapping(ctx context.Context, domain, rawAddre
 	if err := config.Save(r.ConfigPath, nextConfig); err != nil {
 		return DomainApplyResult{}, fmt.Errorf("persist manual domain mapping configuration: %w", err)
 	}
-	policyRefreshed, applyErr := view.Runner.ApplyManualDomainMapping(ctx, normalizedDomain, address.String(), fullMappings)
+	applyResult, applyErr := view.Runner.ApplyManualDomainMappingDetailed(ctx, normalizedDomain, address.String(), fullMappings)
 	if applyErr != nil {
 		if restoreErr := config.Save(r.ConfigPath, previousConfig); restoreErr != nil && r.Logger != nil {
 			r.Logger.Error("手动域名策略应用失败且配置恢复失败", "domain", normalizedDomain, "error", restoreErr)
@@ -670,14 +665,16 @@ func (r *Runtime) ApplyManualDomainMapping(ctx context.Context, domain, rawAddre
 	r.notifyConfigChangedLocked()
 	r.mutex.Unlock()
 	stateAfter := r.Store.Snapshot()
-	appliedAt := time.Now().UTC()
-	if stateAfter.Policy != nil && !stateAfter.Policy.AppliedAt.IsZero() {
+	var appliedAt time.Time
+	if applyResult.ApplyState != optimizer.ManualMappingApplyStateDeferred && stateAfter.Policy != nil && !stateAfter.Policy.AppliedAt.IsZero() {
 		appliedAt = stateAfter.Policy.AppliedAt
 	}
 	updatedRecord := stateAfter.DiscoveredDomains[normalizedDomain]
 	return DomainApplyResult{
 		Domain: normalizedDomain, Address: address.String(), DownloadMbps: updatedRecord.DownloadMbps,
-		DownloadVerified: updatedRecord.DownloadVerified, PolicyRefreshed: policyRefreshed, AppliedAt: appliedAt,
+		DownloadVerified: updatedRecord.DownloadVerified, PolicyRefreshed: applyResult.PolicyRefreshed,
+		ApplyState: applyResult.ApplyState, AppliedAdapters: applyResult.AppliedAdapters,
+		SkippedCapabilities: applyResult.SkippedCapabilities, Warnings: applyResult.Warnings, AppliedAt: appliedAt,
 	}, nil
 }
 
@@ -1044,6 +1041,7 @@ func (r *Runtime) BuildManagedSession(physicalPath cfnetwork.PhysicalPath, detec
 		return RuntimeSession{}, err
 	}
 	benchmarker := benchmark.New(managedConfig.Benchmark, directDial)
+	benchmarker.SetBoundInterface(physicalPath.Interface)
 	runner, err := optimizer.NewRunner(managedConfig, view.Ranges, benchmarker, r.Store, view.Routes, physicalPath, proxyCoordinator, r.Logger)
 	if err != nil {
 		return RuntimeSession{}, err
@@ -1145,10 +1143,14 @@ func configForDetectedAdapters(cfg config.Config, detections map[string]proxy.De
 	isPresent := func(name string) bool { return detections[name].Present }
 	cfg.Proxy.Generic.Enabled = isPresent(cleanupAdapterGeneric)
 	cfg.Proxy.Mihomo.Enabled = false
-	if detection := detections[cleanupAdapterMihomo]; detection.Present && detection.Manageable {
-		if managed, err := mihomo.ConfigureDetected(cfg.Proxy.Mihomo, detection, cfg.DataDir); err == nil {
-			cfg.Proxy.Mihomo = managed
+	if detection := detections[cleanupAdapterMihomo]; detection.Present {
+		managed, _ := mihomo.ConfigureDetected(cfg.Proxy.Mihomo, detection, cfg.DataDir)
+		managed.Enabled = true
+		managed.Controller = detection.Endpoint
+		if !detection.Manageable {
+			managed.ReloadConfig = ""
 		}
+		cfg.Proxy.Mihomo = managed
 	}
 	cfg.Proxy.SingBox.Enabled = cfg.Proxy.SingBox.Enabled && isPresent(cleanupAdapterSingBox)
 	cfg.Proxy.Xray.Enabled = cfg.Proxy.Xray.Enabled && isPresent(cleanupAdapterXray)
@@ -1250,6 +1252,67 @@ func configForStoredReceipts(cfg config.Config, state store.State) (config.Confi
 	return cfg, nil
 }
 
+// discoverMihomoConfig 探测本机控制端并尽量定位当前活动配置；配置定位失败时仍保留控制 API 管理能力。
+func discoverMihomoConfig(ctx context.Context, cfg config.Config, logger *slog.Logger) (config.MihomoConfig, bool, error) {
+	detection, err := mihomo.AutoDetect(ctx, cfg.Proxy.Mihomo)
+	if err != nil && !detection.Present {
+		if logger != nil {
+			logger.Warn("Mihomo 自动发现失败", "component", "proxy", "adapter", "mihomo", "result", "deferred", "error", err)
+		}
+		return cfg.Proxy.Mihomo, false, err
+	}
+	if !detection.Present {
+		return cfg.Proxy.Mihomo, false, nil
+	}
+	managed, configureErr := mihomo.ConfigureDetected(cfg.Proxy.Mihomo, detection, cfg.DataDir)
+	if configureErr == nil {
+		return managed, true, nil
+	}
+	// /version 可访问但无法定位活动 YAML 时，仍允许 IP/进程 DIRECT；域名映射会等待可管理配置。
+	fallback, _ := mihomo.ConfigureDetected(cfg.Proxy.Mihomo, detection, cfg.DataDir)
+	fallback.Enabled = true
+	fallback.Controller = detection.Endpoint
+	fallback.ReloadConfig = ""
+	if logger != nil {
+		logger.Warn("已发现 Mihomo，但暂时无法定位活动配置", "component", "proxy", "adapter", "mihomo", "result", "partial", "error", configureErr)
+	}
+	return fallback, true, nil
+}
+
+// newMihomoAdapter 按运行时配置创建 Mihomo 客户端，并统一注入验证和物理拨号参数。
+func newMihomoAdapter(cfg config.Config, mihomoConfig config.MihomoConfig, physicalPath cfnetwork.PhysicalPath, benchmarkDial cfnetwork.DialContextFunc) (*mihomo.Adapter, error) {
+	adapter, err := mihomo.New(mihomoConfig)
+	if err != nil {
+		return nil, err
+	}
+	adapter.SetConnectionVerificationWindow(
+		cfg.Acceleration.ApplyVerificationTimeout.Duration(),
+		cfg.Acceleration.ApplyAttemptTimeout.Duration(),
+		cfg.Acceleration.ApplyRetryInterval.Duration(),
+		cfg.Acceleration.ApplyMaxAttempts,
+	)
+	if benchmarkDial != nil {
+		adapter.SetBenchmarkDialer(physicalPath.Interface, benchmarkDial)
+	}
+	return adapter, nil
+}
+
+// mihomoResolver 返回失联后重新发现控制端的回调；自动发现模式会重新定位活动配置。
+func mihomoResolver(cfg config.Config, physicalPath cfnetwork.PhysicalPath, benchmarkDial cfnetwork.DialContextFunc, logger *slog.Logger) proxy.AdapterResolver {
+	return func(ctx context.Context) (proxy.Adapter, error) {
+		discoveryConfig := cfg.Proxy.Mihomo
+		discoveryConfig.ReloadConfig = ""
+		managed, detected, err := discoverMihomoConfig(ctx, config.Config{DataDir: cfg.DataDir, Proxy: config.ProxyConfig{Mihomo: discoveryConfig}}, logger)
+		if err != nil {
+			return nil, err
+		}
+		if !detected {
+			return nil, errors.New("未发现可访问的 Mihomo 控制 API")
+		}
+		return newMihomoAdapter(cfg, managed, physicalPath, benchmarkDial)
+	}
+}
+
 func buildProxyCoordinator(cfg config.Config, physicalPath cfnetwork.PhysicalPath, routeController *cfnetwork.RouteController, benchmarkDial cfnetwork.DialContextFunc, logger *slog.Logger) (*proxy.Coordinator, error) {
 	var adapters []proxy.Adapter
 	if cfg.Proxy.Generic.Enabled && cfg.Network.ManageRoutes {
@@ -1259,19 +1322,10 @@ func buildProxyCoordinator(cfg config.Config, physicalPath cfnetwork.PhysicalPat
 		}
 		adapters = append(adapters, adapter)
 	}
-	if cfg.Proxy.Mihomo.Enabled {
-		adapter, err := mihomo.New(cfg.Proxy.Mihomo)
+	if cfg.Proxy.Mihomo.Enabled || cfg.Proxy.AutoDetect {
+		adapter, err := newMihomoAdapter(cfg, cfg.Proxy.Mihomo, physicalPath, benchmarkDial)
 		if err != nil {
 			return nil, err
-		}
-		adapter.SetConnectionVerificationWindow(
-			cfg.Acceleration.ApplyVerificationTimeout.Duration(),
-			cfg.Acceleration.ApplyAttemptTimeout.Duration(),
-			cfg.Acceleration.ApplyRetryInterval.Duration(),
-			cfg.Acceleration.ApplyMaxAttempts,
-		)
-		if benchmarkDial != nil {
-			adapter.SetBenchmarkDialer(physicalPath.Interface, benchmarkDial)
 		}
 		adapters = append(adapters, adapter)
 	}
@@ -1306,5 +1360,12 @@ func buildProxyCoordinator(cfg config.Config, physicalPath cfnetwork.PhysicalPat
 	if len(adapters) == 0 {
 		return nil, nil
 	}
-	return proxy.NewCoordinator(adapters, logger)
+	coordinator, err := proxy.NewCoordinator(adapters, logger)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Proxy.AutoDetect {
+		coordinator.SetAdapterResolver(cleanupAdapterMihomo, mihomoResolver(cfg, physicalPath, benchmarkDial, logger))
+	}
+	return coordinator, nil
 }
