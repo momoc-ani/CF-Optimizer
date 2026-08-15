@@ -232,6 +232,11 @@ func (a *Adapter) Capabilities() proxy.Capabilities {
 	return proxy.Capabilities{Processes: true, IPv4: true, IPv6: true, Domains: true, DomainMappings: a.config.ReloadConfig != "", HotReload: a.config.ReloadConfig != "", Rollback: true}
 }
 
+// DomainMappingVerification 声明 Mihomo Verify 已通过真实连接与控制面证据验证域名映射。
+func (a *Adapter) DomainMappingVerification() proxy.DomainMappingVerification {
+	return proxy.DomainMappingVerification{ConnectionVerified: true}
+}
+
 // Detect 读取控制端版本，不把认证信息写入结果。
 func (a *Adapter) Detect(ctx context.Context) (proxy.Detection, error) {
 	body, status, err := a.request(ctx, http.MethodGet, "/version", nil)

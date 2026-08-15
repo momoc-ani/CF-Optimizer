@@ -62,6 +62,11 @@ func (a *Adapter) Capabilities() proxy.Capabilities {
 	return proxy.Capabilities{DomainMappings: true, Rollback: true}
 }
 
+// DomainMappingVerification 声明 Hosts 映射必须继续通过系统解析验证真实连接。
+func (a *Adapter) DomainMappingVerification() proxy.DomainMappingVerification {
+	return proxy.DomainMappingVerification{SystemResolverRequired: true}
+}
+
 // Detect 确认目标 Hosts 文件存在且可读取。
 func (a *Adapter) Detect(context.Context) (proxy.Detection, error) {
 	if _, err := os.Stat(a.config.Path); err != nil {

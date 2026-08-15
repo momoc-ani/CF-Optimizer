@@ -392,7 +392,7 @@ func (r *Runner) applyManualMappingOnlyLocked(ctx context.Context, before store.
 	if err != nil {
 		return proxy.ApplyResult{}, proxy.DirectPolicy{}, err
 	}
-	if len(normalized.DomainMappings) > 0 {
+	if len(normalized.DomainMappings) > 0 && proxy.RequiresSystemDomainMappingVerification(applied) {
 		if r.domainVerifier == nil {
 			if rollbackErr := r.policy.Rollback(ctx, applied); rollbackErr != nil {
 				return proxy.ApplyResult{}, proxy.DirectPolicy{}, errors.Join(errors.New("domain mapping verification is unavailable"), rollbackErr)
@@ -1633,7 +1633,7 @@ retryRefresh:
 			return fmt.Errorf("refresh policy: %w", applyErr)
 		}
 		newApplied := applied
-		if len(policy.DomainMappings) > 0 {
+		if len(policy.DomainMappings) > 0 && proxy.RequiresSystemDomainMappingVerification(applied) {
 			if r.domainVerifier == nil {
 				if rollbackErr := r.policy.Rollback(ctx, applied); rollbackErr != nil {
 					return errors.Join(errors.New("domain mapping verification is unavailable"), rollbackErr)
@@ -1918,10 +1918,13 @@ func (r *Runner) applySelectedPolicy(ctx context.Context, state store.State, rep
 		return proxy.ApplyResult{}, nil, fmt.Errorf("apply final policy: %w", err)
 	}
 	combined := proxy.ApplyResult{
-		Receipts: append(append([]proxy.Receipt{}, transition.Receipts...), finalResult.Receipts...),
-		Skipped:  append(append([]string{}, transition.Skipped...), finalResult.Skipped...),
+		Receipts:                            append(append([]proxy.Receipt{}, transition.Receipts...), finalResult.Receipts...),
+		Skipped:                             append(append([]string{}, transition.Skipped...), finalResult.Skipped...),
+		DomainMappingAdapters:               transition.DomainMappingAdapters + finalResult.DomainMappingAdapters,
+		DomainMappingVerifiedAdapters:       transition.DomainMappingVerifiedAdapters + finalResult.DomainMappingVerifiedAdapters,
+		DomainMappingSystemResolverRequired: transition.DomainMappingSystemResolverRequired || finalResult.DomainMappingSystemResolverRequired,
 	}
-	if len(finalPolicy.DomainMappings) > 0 {
+	if len(finalPolicy.DomainMappings) > 0 && proxy.RequiresSystemDomainMappingVerification(combined) {
 		if r.domainVerifier == nil {
 			if rollbackErr := r.policy.Rollback(ctx, combined); rollbackErr != nil {
 				return proxy.ApplyResult{}, nil, errors.Join(errors.New("domain mapping verification is unavailable"), rollbackErr)

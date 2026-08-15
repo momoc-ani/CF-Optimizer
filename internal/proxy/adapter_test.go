@@ -19,6 +19,18 @@ type lifecycleAdapter struct {
 	rollbackContextError error
 }
 
+type domainVerificationAdapter struct {
+	lifecycleAdapter
+	verification DomainMappingVerification
+}
+
+func (a *domainVerificationAdapter) Capabilities() Capabilities {
+	return Capabilities{DomainMappings: true, Rollback: true}
+}
+func (a *domainVerificationAdapter) DomainMappingVerification() DomainMappingVerification {
+	return a.verification
+}
+
 type rediscoveredAdapter struct {
 	name         string
 	present      bool
@@ -134,6 +146,45 @@ func TestCoordinatorRejectsUnsupportedPolicyField(t *testing.T) {
 	}
 	if _, err := coordinator.Apply(context.Background(), DirectPolicy{Domains: []string{"example.com"}}); err == nil {
 		t.Fatal("expected unsupported domain policy to be rejected")
+	}
+}
+
+func TestCoordinatorRecordsDomainMappingVerificationScope(t *testing.T) {
+	policy := DirectPolicy{DomainMappings: []DomainMapping{{Domain: "ani.momoc.top", Addresses: []string{"104.19.208.241"}}}}
+	mihomo := &domainVerificationAdapter{
+		lifecycleAdapter: lifecycleAdapter{name: "mihomo"},
+		verification:     DomainMappingVerification{ConnectionVerified: true},
+	}
+	coordinator, err := NewCoordinator([]Adapter{mihomo}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.Apply(context.Background(), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DomainMappingAdapters != 1 || result.DomainMappingVerifiedAdapters != 1 || RequiresSystemDomainMappingVerification(result) {
+		t.Fatalf("unexpected Mihomo verification scope: %#v", result)
+	}
+
+	mihomo = &domainVerificationAdapter{
+		lifecycleAdapter: lifecycleAdapter{name: "mihomo"},
+		verification:     DomainMappingVerification{ConnectionVerified: true},
+	}
+	hosts := &domainVerificationAdapter{
+		lifecycleAdapter: lifecycleAdapter{name: "windows-hosts"},
+		verification:     DomainMappingVerification{SystemResolverRequired: true},
+	}
+	coordinator, err = NewCoordinator([]Adapter{mihomo, hosts}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err = coordinator.Apply(context.Background(), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DomainMappingAdapters != 2 || result.DomainMappingVerifiedAdapters != 1 || !result.DomainMappingSystemResolverRequired || !RequiresSystemDomainMappingVerification(result) {
+		t.Fatalf("Hosts requirement was not retained: %#v", result)
 	}
 }
 

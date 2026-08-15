@@ -145,6 +145,20 @@ type guardedRecordingPolicy struct {
 	guardActive bool
 }
 
+type adapterVerifiedRecordingPolicy struct {
+	recordingPolicy
+}
+
+func (p *adapterVerifiedRecordingPolicy) Apply(ctx context.Context, policy proxy.DirectPolicy) (proxy.ApplyResult, error) {
+	result, err := p.recordingPolicy.Apply(ctx, policy)
+	if err != nil {
+		return proxy.ApplyResult{}, err
+	}
+	result.DomainMappingAdapters = 1
+	result.DomainMappingVerifiedAdapters = 1
+	return result, nil
+}
+
 type emptyGuardPolicy struct {
 	recordingPolicy
 }
@@ -205,7 +219,8 @@ func (r staticDomainResolver) Resolve(context.Context, string) ([]netip.Addr, er
 }
 
 type selectiveDomainVerifier struct {
-	rejected map[string]map[string]bool
+	rejected     map[string]map[string]bool
+	appliedCalls int
 }
 
 type rankedDomainDownloadTester struct {
@@ -237,7 +252,8 @@ func (v *selectiveDomainVerifier) VerifyPreflight(_ context.Context, mappings []
 	return nil
 }
 
-func (*selectiveDomainVerifier) VerifyApplied(context.Context, []proxy.DomainMapping) error {
+func (v *selectiveDomainVerifier) VerifyApplied(context.Context, []proxy.DomainMapping) error {
+	v.appliedCalls++
 	return nil
 }
 
@@ -609,11 +625,28 @@ func TestApplyManualDomainMappingDefersWhenAdapterIsMissing(t *testing.T) {
 	}
 }
 
+func TestApplyManualDomainMappingUsesAdapterConnectionEvidence(t *testing.T) {
+	policyApplier := &adapterVerifiedRecordingPolicy{
+		recordingPolicy: recordingPolicy{capabilities: proxy.Capabilities{Domains: true, DomainMappings: true}},
+	}
+	runner, stateStore := newTestRunner(t, policyApplier)
+	runner.config.Acceleration.ManualDomains = []string{"manual.example"}
+
+	result, err := runner.ApplyManualDomainMappingDetailed(context.Background(), "manual.example", "1.1.1.2", map[string]string{"manual.example": "1.1.1.2"})
+	if err != nil || result.ApplyState != ManualMappingApplyStateApplied || !result.PolicyRefreshed {
+		t.Fatalf("adapter-verified mapping was not applied: result=%#v err=%v", result, err)
+	}
+	if stateStore.Snapshot().Policy == nil {
+		t.Fatal("adapter-verified mapping was not committed")
+	}
+}
+
 func TestApplyManualDomainMappingCanCreateMappingOnlyPolicy(t *testing.T) {
 	policyApplier := &recordingPolicy{capabilities: proxy.Capabilities{Domains: true, DomainMappings: true}}
 	runner, stateStore := newTestRunner(t, policyApplier)
 	runner.config.Acceleration.ManualDomains = []string{"manual.example"}
-	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	verifier := &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	runner.domainVerifier = verifier
 	result, err := runner.ApplyManualDomainMappingDetailed(context.Background(), "manual.example", "1.1.1.2", map[string]string{"manual.example": "1.1.1.2"})
 	if err != nil || result.ApplyState != ManualMappingApplyStateApplied || !result.PolicyRefreshed {
 		t.Fatalf("mapping-only policy was not applied: result=%#v err=%v", result, err)
@@ -623,6 +656,9 @@ func TestApplyManualDomainMappingCanCreateMappingOnlyPolicy(t *testing.T) {
 	}
 	if stateStore.Snapshot().Policy == nil {
 		t.Fatal("mapping-only policy was not committed")
+	}
+	if verifier.appliedCalls != 1 {
+		t.Fatalf("system mapping verification calls = %d, want 1", verifier.appliedCalls)
 	}
 }
 

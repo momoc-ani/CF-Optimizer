@@ -86,8 +86,30 @@ type ConflictCleaner interface {
 
 // ApplyResult 汇总一组适配器成功应用并验证的收据。
 type ApplyResult struct {
-	Receipts []Receipt `json:"receipts"`
-	Skipped  []string  `json:"skipped"`
+	Receipts                            []Receipt `json:"receipts"`
+	Skipped                             []string  `json:"skipped"`
+	DomainMappingAdapters               int       `json:"domain_mapping_adapters,omitempty"`
+	DomainMappingVerifiedAdapters       int       `json:"domain_mapping_verified_adapters,omitempty"`
+	DomainMappingSystemResolverRequired bool      `json:"domain_mapping_system_resolver_required,omitempty"`
+}
+
+// DomainMappingVerification 描述适配器对域名映射提供的真实连接验证范围。
+type DomainMappingVerification struct {
+	ConnectionVerified     bool
+	SystemResolverRequired bool
+}
+
+// DomainMappingVerificationProvider 声明适配器 Verify 是否已经提供真实域名连接证据。
+type DomainMappingVerificationProvider interface {
+	DomainMappingVerification() DomainMappingVerification
+}
+
+// RequiresSystemDomainMappingVerification 判断应用结果是否仍需通过物理接口验证系统解析。
+func RequiresSystemDomainMappingVerification(result ApplyResult) bool {
+	if result.DomainMappingAdapters == 0 {
+		return true
+	}
+	return result.DomainMappingVerifiedAdapters < result.DomainMappingAdapters || result.DomainMappingSystemResolverRequired
 }
 
 // BenchmarkPathEvidence 描述一次真实测速 Socket 在代理控制面中的 DIRECT 证据。
@@ -308,6 +330,20 @@ func (c *Coordinator) Apply(ctx context.Context, policy DirectPolicy) (ApplyResu
 		c.logPhase(adapter.Name(), receipt.ID, "apply", "completed", nil)
 		if verifyErr := adapter.Verify(ctx, normalized, receipt); verifyErr != nil {
 			return result, c.rollbackAll(ctx, result.Receipts, fmt.Errorf("verify %s: %w", adapter.Name(), verifyErr))
+		}
+		if len(normalized.DomainMappings) > 0 && adapter.Capabilities().DomainMappings {
+			result.DomainMappingAdapters++
+			verification := DomainMappingVerification{SystemResolverRequired: true}
+			if provider, ok := adapter.(DomainMappingVerificationProvider); ok {
+				verification = provider.DomainMappingVerification()
+				if !verification.ConnectionVerified && !verification.SystemResolverRequired {
+					verification.SystemResolverRequired = true
+				}
+			}
+			if verification.ConnectionVerified {
+				result.DomainMappingVerifiedAdapters++
+			}
+			result.DomainMappingSystemResolverRequired = result.DomainMappingSystemResolverRequired || verification.SystemResolverRequired
 		}
 		c.logPhase(adapter.Name(), receipt.ID, "verify", "completed", nil)
 	}
