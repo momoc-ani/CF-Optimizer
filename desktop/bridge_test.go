@@ -28,6 +28,8 @@ func TestBridgeAllowsAccelerationDomainMethods(t *testing.T) {
 	for _, method := range []string{
 		"acceleration.domain_test",
 		"acceleration.domain_apply",
+		"acceleration.manual_domain_add",
+		"acceleration.manual_domain_remove",
 	} {
 		if _, allowed := allowedMethods[method]; !allowed {
 			t.Errorf("%s should be available to the desktop UI", method)
