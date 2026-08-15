@@ -100,6 +100,19 @@ export interface DomainDiscoveryResult {
   discovered: number;
   policy_refreshed: boolean;
   domains: DomainDiscovery[];
+  operations?: ManualDomainOperation[];
+}
+
+export type ManualDomainOperationState = 'pending' | 'verifying' | 'verified' | 'deferred' | 'failed' | 'removing' | 'removed';
+
+/** ManualDomainOperation 描述手动域名配置与后台策略验证的当前状态。 */
+export interface ManualDomainOperation {
+  operation_id: string;
+  domain: string;
+  action: 'add' | 'remove';
+  state: ManualDomainOperationState;
+  message?: string;
+  updated_at: string;
 }
 
 export interface DiscoveredDomainCleanupResult {

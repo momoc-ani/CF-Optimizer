@@ -4,6 +4,7 @@ import type {
   DiagnosticReport,
   DomainDiscovery,
   LatestBenchmark,
+  ManualDomainOperation,
   OptimizerEvent,
   ProxyDetections,
   QuickStartPlan,
@@ -41,6 +42,8 @@ let latestBenchmark: LatestBenchmark = {
 };
 
 const manualDomain: DomainDiscovery = { domain: 'ani.momoc.top', source: 'manual', first_seen_at: iso(-60), last_seen_at: iso(0), cloudflare_verified: true, preflight_verified: true, download_verified: true, download_mbps: 86.4, download_address: '104.16.132.229', download_probe_url: 'https://ani.momoc.top/assets/test.bin', download_tested_at: iso(-4), active: true, last_resolved_addresses: ['104.21.92.119', '172.67.192.253'], accelerated_addresses: ['104.16.132.229'], verified_adapters: ['generic-route', 'mihomo', 'windows-hosts'], applied_at: iso(-3) };
+let manualDomains: DomainDiscovery[] = [manualDomain];
+let manualDomainOperations: ManualDomainOperation[] = [];
 let discoveredDomains: DomainDiscovery[] = [
   { domain: 'dash.cloudflare.com', source: 'mihomo', first_seen_at: iso(-45), last_seen_at: iso(-1), cloudflare_verified: true, preflight_verified: true, download_verified: false, active: true, last_resolved_addresses: ['104.16.123.96'], accelerated_addresses: ['172.66.44.18'], verified_adapters: ['generic-route', 'mihomo', 'windows-hosts'], applied_at: iso(-3) },
 ];
@@ -190,8 +193,8 @@ export async function mockRequest<T>(method: string, parameters: Record<string, 
     case 'history.latest': return latestBenchmark as T;
     case 'routes.list': return routes as T;
     case 'proxy.detect': return proxyDetections as T;
-    case 'acceleration.domains': return { observed: 0, verified: 1, activated: 0, discovered: discoveredDomains.length, policy_refreshed: false, domains: [manualDomain, ...discoveredDomains] } as T;
-    case 'acceleration.discover': return { observed: 12, verified: 1, activated: 0, discovered: discoveredDomains.length, policy_refreshed: false, domains: [manualDomain, ...discoveredDomains] } as T;
+    case 'acceleration.domains': return { observed: 0, verified: manualDomains.filter((domain) => domain.active).length, activated: 0, discovered: discoveredDomains.length, policy_refreshed: false, domains: [...manualDomains, ...discoveredDomains], operations: manualDomainOperations } as T;
+    case 'acceleration.discover': return { observed: 12, verified: manualDomains.filter((domain) => domain.active).length, activated: 0, discovered: discoveredDomains.length, policy_refreshed: false, domains: [...manualDomains, ...discoveredDomains], operations: manualDomainOperations } as T;
     case 'acceleration.clear_discovered': {
       const cleared = discoveredDomains.length;
       discoveredDomains = [];
@@ -207,6 +210,32 @@ export async function mockRequest<T>(method: string, parameters: Record<string, 
         domain: String(parameters.domain), address: String(parameters.address), download_mbps: 42.5,
         download_verified: true, policy_refreshed: true, apply_state: 'applied', applied_adapters: ['mihomo'], applied_at: new Date().toISOString(),
       } as T;
+    case 'acceleration.manual_domain_add': {
+      const domain = String(parameters.domain).trim().toLowerCase();
+      const operation: ManualDomainOperation = { operation_id: `manual-domain-${Date.now()}`, domain, action: 'add', state: 'pending', message: '已写入配置，等待后台验证', updated_at: new Date().toISOString() };
+      manualDomainOperations = [...manualDomainOperations.filter((item) => item.domain !== domain), operation];
+      mockConfig.acceleration.manual_domains = [...(mockConfig.acceleration.manual_domains ?? []), domain];
+      manualDomains = [...manualDomains, { domain, source: 'manual', first_seen_at: new Date().toISOString(), last_seen_at: new Date().toISOString(), cloudflare_verified: false, preflight_verified: false, download_verified: false, active: false }];
+      window.setTimeout(() => {
+        const address = '104.17.210.9';
+        manualDomains = manualDomains.map((item) => item.domain === domain ? { ...item, cloudflare_verified: true, preflight_verified: true, download_verified: true, download_mbps: 42.5, download_address: address, download_tested_at: new Date().toISOString(), active: true, accelerated_addresses: [address], verified_adapters: ['generic-route', 'mihomo'], applied_at: new Date().toISOString() } : item);
+        mockConfig.acceleration.manual_mappings[domain] = address;
+        manualDomainOperations = manualDomainOperations.map((item) => item.operation_id === operation.operation_id ? { ...item, state: 'verified', message: `已验证并应用 ${address}`, updated_at: new Date().toISOString() } : item);
+      }, 1_200);
+      return operation as T;
+    }
+    case 'acceleration.manual_domain_remove': {
+      const domain = String(parameters.domain).trim().toLowerCase();
+      const operation: ManualDomainOperation = { operation_id: `manual-domain-${Date.now()}`, domain, action: 'remove', state: 'removing', message: '已标记移除，等待后台验证策略清理', updated_at: new Date().toISOString() };
+      manualDomainOperations = [...manualDomainOperations.filter((item) => item.domain !== domain), operation];
+      window.setTimeout(() => {
+        manualDomains = manualDomains.filter((item) => item.domain !== domain);
+        mockConfig.acceleration.manual_domains = (mockConfig.acceleration.manual_domains ?? []).filter((item) => item !== domain);
+        delete mockConfig.acceleration.manual_mappings[domain];
+        manualDomainOperations = manualDomainOperations.map((item) => item.operation_id === operation.operation_id ? { ...item, state: 'removed', message: '已验证策略移除并完成配置清理', updated_at: new Date().toISOString() } : item);
+      }, 1_200);
+      return operation as T;
+    }
     case 'config.get': return mockConfig as T;
     case 'config.update': return { saved: true, hot_applied: true, policy_refreshed: false, restart_required: false } as T;
     case 'logs.tail': return [

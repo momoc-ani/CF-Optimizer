@@ -209,6 +209,14 @@ func (r *Runtime) setVerifiedManualMappings(mappings map[string]string) {
 	r.mutex.Unlock()
 }
 
+// setConfigSnapshot 发布已经持久化的期望配置，不提前改变 Runner 的策略输入。
+func (r *Runtime) setConfigSnapshot(cfg config.Config) {
+	r.mutex.Lock()
+	r.Config = cfg
+	r.notifyConfigChangedLocked()
+	r.mutex.Unlock()
+}
+
 // CurrentDesiredPolicy 返回规则守护可原样恢复的最后一份已验证策略。
 func (r *Runtime) CurrentDesiredPolicy(ctx context.Context) (guard.DesiredPolicy, bool, error) {
 	if err := ctx.Err(); err != nil {
@@ -452,6 +460,7 @@ type DomainDiscoveryResult struct {
 	Discovered      int                        `json:"discovered"`
 	PolicyRefreshed bool                       `json:"policy_refreshed"`
 	Domains         []DomainAccelerationStatus `json:"domains"`
+	Operations      []ManualDomainOperation    `json:"operations,omitempty"`
 }
 
 // DomainAccelerationStatus 提供域名发现状态和不含回滚正文的已验证策略证据。

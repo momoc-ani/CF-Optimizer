@@ -49,6 +49,8 @@ func (manualMappingBenchmark) Run(context.Context, []netip.Addr, func(benchmark.
 type manualMappingPolicy struct {
 	fail     bool
 	policies []proxy.DirectPolicy
+	started  chan struct{}
+	block    <-chan struct{}
 }
 
 func (*manualMappingPolicy) Capabilities() proxy.Capabilities {
@@ -56,6 +58,15 @@ func (*manualMappingPolicy) Capabilities() proxy.Capabilities {
 }
 
 func (p *manualMappingPolicy) Apply(_ context.Context, policy proxy.DirectPolicy) (proxy.ApplyResult, error) {
+	if p.started != nil {
+		select {
+		case p.started <- struct{}{}:
+		default:
+		}
+	}
+	if p.block != nil {
+		<-p.block
+	}
 	if p.fail {
 		return proxy.ApplyResult{}, errors.New("forced policy application failure")
 	}
@@ -275,6 +286,163 @@ func TestManualDomainMethodsRejectUnknownAndMissingParameters(t *testing.T) {
 			}
 		})
 	}
+	for _, method := range []string{"acceleration.manual_domain_add", "acceleration.manual_domain_remove"} {
+		t.Run(method+" unknown", func(t *testing.T) {
+			_, err := api.Handle(context.Background(), ipc.Request{Method: method, Params: json.RawMessage(`{"domain":"ani.momoc.top","unexpected":true}`)}, nil)
+			var ipcErr *ipc.Error
+			if !errors.As(err, &ipcErr) || ipcErr.Code != "invalid_params" {
+				t.Fatalf("unexpected IPC error: %#v", err)
+			}
+		})
+		t.Run(method+" missing", func(t *testing.T) {
+			_, err := api.Handle(context.Background(), ipc.Request{Method: method, Params: json.RawMessage(`{}`)}, nil)
+			var ipcErr *ipc.Error
+			if !errors.As(err, &ipcErr) || ipcErr.Code != "invalid_params" {
+				t.Fatalf("unexpected IPC error: %#v", err)
+			}
+		})
+	}
+}
+
+func TestManualDomainAddVerifiesInBackgroundAndPersistsMapping(t *testing.T) {
+	api, runtimeState, _ := newManualMappingRunAPI(t, false)
+	if _, err := api.RunOptimization(context.Background(), optimizer.RunOptions{ApplyPolicy: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := api.Handle(context.Background(), ipc.Request{Method: "acceleration.manual_domain_add", Params: json.RawMessage(`{"domain":"added.example"}`)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, ok := result.(ManualDomainOperation)
+	if !ok || operation.State != manualDomainStatePending || operation.Domain != "added.example" {
+		t.Fatalf("unexpected immediate operation: %#v", result)
+	}
+	completed := waitForManualDomainOperation(t, api, "added.example", manualDomainStateVerified)
+	if completed.Message == "" {
+		t.Fatal("verified operation should include a status message")
+	}
+
+	persisted, err := config.Load(runtimeState.ConfigPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsNormalizedDomain(persisted.Acceleration.ManualDomains, "added.example") || persisted.Acceleration.ManualMappings["added.example"] == "" {
+		t.Fatalf("verified domain was not fully persisted: %#v", persisted.Acceleration)
+	}
+	if !policyContainsManualDomain(runtimeState.Store.Snapshot().Policy, "added.example") {
+		t.Fatal("verified policy does not contain the added domain")
+	}
+}
+
+func TestManualDomainRemoveVerifiesPolicyBeforeFinalConfigCleanup(t *testing.T) {
+	api, runtimeState, policy := newManualMappingRunAPI(t, false)
+	if _, err := api.RunOptimization(context.Background(), optimizer.RunOptions{ApplyPolicy: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	policy.started = started
+	policy.block = release
+
+	result, err := api.Handle(context.Background(), ipc.Request{Method: "acceleration.manual_domain_remove", Params: json.RawMessage(`{"domain":"manual.example"}`)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, ok := result.(ManualDomainOperation)
+	if !ok || operation.State != manualDomainStateRemoving {
+		t.Fatalf("unexpected immediate operation: %#v", result)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("background policy removal did not start")
+	}
+	if persisted, loadErr := config.Load(runtimeState.ConfigPath, ""); loadErr != nil || !containsNormalizedDomain(persisted.Acceleration.ManualDomains, "manual.example") {
+		t.Fatalf("domain was removed before background verification: config=%#v err=%v", persisted.Acceleration, loadErr)
+	}
+	close(release)
+	waitForManualDomainOperation(t, api, "manual.example", manualDomainStateRemoved)
+
+	persisted, err := config.Load(runtimeState.ConfigPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsNormalizedDomain(persisted.Acceleration.ManualDomains, "manual.example") || persisted.Acceleration.ManualMappings["manual.example"] != "" {
+		t.Fatalf("domain configuration was not cleaned after verification: %#v", persisted.Acceleration)
+	}
+	if policyContainsManualDomain(runtimeState.Store.Snapshot().Policy, "manual.example") {
+		t.Fatal("verified policy still contains the removed domain")
+	}
+}
+
+func TestManualDomainRemoveFailureKeepsConfigAndPreviousPolicy(t *testing.T) {
+	api, runtimeState, policy := newManualMappingRunAPI(t, false)
+	if _, err := api.RunOptimization(context.Background(), optimizer.RunOptions{ApplyPolicy: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	policy.fail = true
+
+	if _, err := api.Handle(context.Background(), ipc.Request{Method: "acceleration.manual_domain_remove", Params: json.RawMessage(`{"domain":"manual.example"}`)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitForManualDomainOperation(t, api, "manual.example", manualDomainStateFailed)
+
+	persisted, err := config.Load(runtimeState.ConfigPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsNormalizedDomain(persisted.Acceleration.ManualDomains, "manual.example") || persisted.Acceleration.ManualMappings["manual.example"] == "" {
+		t.Fatalf("failed removal changed persisted configuration: %#v", persisted.Acceleration)
+	}
+	if !policyContainsManualDomain(runtimeState.Store.Snapshot().Policy, "manual.example") {
+		t.Fatal("failed removal discarded the previous verified policy")
+	}
+}
+
+func TestManualDomainRemovePersistenceFailureRestoresPreviousPolicy(t *testing.T) {
+	api, runtimeState, _ := newManualMappingRunAPI(t, false)
+	if _, err := api.RunOptimization(context.Background(), optimizer.RunOptions{ApplyPolicy: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	api.saveConfig = func(string, config.Config) error { return errors.New("forced configuration save failure") }
+
+	if _, err := api.Handle(context.Background(), ipc.Request{Method: "acceleration.manual_domain_remove", Params: json.RawMessage(`{"domain":"manual.example"}`)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitForManualDomainOperation(t, api, "manual.example", manualDomainStateFailed)
+
+	persisted, err := config.Load(runtimeState.ConfigPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsNormalizedDomain(persisted.Acceleration.ManualDomains, "manual.example") || persisted.Acceleration.ManualMappings["manual.example"] == "" {
+		t.Fatalf("persistence failure changed the saved domain: %#v", persisted.Acceleration)
+	}
+	if !policyContainsManualDomain(runtimeState.Store.Snapshot().Policy, "manual.example") {
+		t.Fatal("persistence failure did not restore the previous verified policy")
+	}
+}
+
+func waitForManualDomainOperation(t *testing.T, api *API, domain, expectedState string) ManualDomainOperation {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, operation := range api.manualDomainOperations() {
+			if operation.Domain != domain {
+				continue
+			}
+			if operation.State == expectedState {
+				return operation
+			}
+			if operation.State == manualDomainStateFailed && expectedState != manualDomainStateFailed {
+				t.Fatalf("manual domain operation failed: %#v", operation)
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("manual domain %s did not reach %s: %#v", domain, expectedState, api.manualDomainOperations())
+	return ManualDomainOperation{}
 }
 
 func TestActiveEventIsClonedAndClearedWithRun(t *testing.T) {

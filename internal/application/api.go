@@ -38,6 +38,8 @@ type API struct {
 	scheduleStatus        ScheduleStatus
 	policyGuardMutex      sync.RWMutex
 	policyGuards          map[string]guard.Status
+	manualDomainMutex     sync.RWMutex
+	manualDomainOps       map[string]ManualDomainOperation
 	configurationMutex    sync.Mutex
 	quickStartMutex       sync.Mutex
 	quickStartPlan        *quickStartPlanRecord
@@ -124,6 +126,7 @@ func NewAPI(runtime *Runtime) (*API, error) {
 		scheduleStatus:        ScheduleStatus{Enabled: schedule.Enabled, Interval: schedule.Interval.String()},
 		startupStatus:         StartupStatus{Ready: true, Stage: "ready", StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()},
 		policyGuards:          map[string]guard.Status{},
+		manualDomainOps:       map[string]ManualDomainOperation{},
 		networkFingerprint:    cfnetwork.NetworkFingerprint,
 		detectManagedAdapters: runtime.DetectManagedAdapters,
 		buildManagedSession:   runtime.BuildManagedSession,
@@ -162,7 +165,7 @@ func (a *API) Handle(ctx context.Context, request ipc.Request, emit func(any) er
 	case "proxy.detect":
 		return a.runtime.DetectProxyAdapters(ctx), nil
 	case "acceleration.domains":
-		return a.runtime.domainDiscoverySnapshot(), nil
+		return a.accelerationDomainsSnapshot(), nil
 	case "acceleration.discover":
 		return a.runtime.DiscoverAccelerationDomains(ctx)
 	case "acceleration.clear_discovered":
@@ -195,6 +198,10 @@ func (a *API) Handle(ctx context.Context, request ipc.Request, emit func(any) er
 			return nil, invalidParams(errors.New("domain and address are required"))
 		}
 		return a.runtime.ApplyManualDomainMapping(ctx, parameters.Domain, parameters.Address)
+	case "acceleration.manual_domain_add":
+		return a.addManualDomain(request.Params)
+	case "acceleration.manual_domain_remove":
+		return a.removeManualDomain(request.Params)
 	case "diagnostics.route":
 		return a.routeDiagnostics(ctx, request.Params)
 	case "config.get":
@@ -618,6 +625,9 @@ func (a *API) updateConfig(ctx context.Context, raw json.RawMessage) (map[string
 		return nil, &ipc.Error{Code: "conflict", Message: "configuration update or quick-start run is already active"}
 	}
 	defer a.configurationMutex.Unlock()
+	if a.manualDomainOperationActive() {
+		return nil, &ipc.Error{Code: "conflict", Message: "manual domain verification or removal is already active"}
+	}
 	view := a.runtime.View()
 	parameters.Config.Proxy.Mihomo.Secret = view.Config.Proxy.Mihomo.Secret
 	parameters.Config.ApplyDefaults()

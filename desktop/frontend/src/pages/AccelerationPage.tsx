@@ -3,17 +3,17 @@ import { notifications } from '@mantine/notifications';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { ColumnDef } from '@tanstack/react-table';
-import { CheckCircle2, CircleAlert, Gauge, RefreshCw, Save, ScanSearch, ShieldAlert, ShieldCheck, Trash2 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { CheckCircle2, CircleAlert, Gauge, Plus, RefreshCw, Save, ScanSearch, ShieldAlert, ShieldCheck, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { request } from '../api/client';
 import { queryKeys, useAccelerationDomains, useConfig, useRoutes, useStatus } from '../api/hooks';
-import type { AppConfig, DiscoveredDomainCleanupResult, DomainApplyResult, DomainDiscovery, DomainDiscoveryResult, DomainTestResult, RouteTransaction } from '../api/types';
+import type { AppConfig, DiscoveredDomainCleanupResult, DomainApplyResult, DomainDiscovery, DomainDiscoveryResult, DomainTestResult, ManualDomainOperation, RouteTransaction } from '../api/types';
 import { DataTable } from '../components/DataTable';
 import { ErrorState, LoadingState, Metric, PageHeader, Section } from '../components/Page';
 import { StatusBadge } from '../components/StatusBadge';
-import { joinConfigLines, parseDomainLines, retainConfiguredManualMappings } from '../lib/configCollections';
+import { joinConfigLines, parseDomainLines } from '../lib/configCollections';
 import { describeConfigUpdateResult, type ConfigUpdateResult } from '../lib/configUpdate';
 import { findVerifiedDomainRoute, isDomainAccelerated } from '../lib/domainAcceleration';
 import { formatDate } from '../lib/format';
@@ -22,7 +22,6 @@ import { canApplyManualDomain } from '../lib/policyAvailability';
 const durationPattern = /^\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h)$/;
 const accelerationSettingsSchema = z.object({
   enabled: z.boolean(),
-  manualDomains: z.string(),
   excludedDomains: z.string(),
   manualDownloadTest: z.boolean(),
   manualDownloadMinMbps: z.number().min(0.1, '最低速度必须大于 0 Mbps').max(100000, '最低速度不能超过 100000 Mbps'),
@@ -47,6 +46,7 @@ interface DomainRow extends DomainDiscovery {
   isRouteVerified: boolean;
   policyLabel: string;
   verifiedRoute?: RouteTransaction;
+  manualOperation?: ManualDomainOperation;
 }
 
 /** describePolicy 将已验证适配器转换为不泄露配置内容的策略摘要。 */
@@ -57,11 +57,33 @@ function describePolicy(adapters: string[] = []): string {
   return adapters.includes('generic-route') ? '系统直连' : '域名映射';
 }
 
+/** manualOperationStatus 将后台操作状态转换为紧凑的界面状态。 */
+function manualOperationStatus(operation?: ManualDomainOperation): { label: string; tone: 'verified' | 'pending' | 'failed' | 'warning' | 'neutral' } | undefined {
+  if (!operation) return undefined;
+  switch (operation.state) {
+    case 'pending': return { label: '待验证', tone: 'pending' };
+    case 'verifying': return { label: operation.action === 'remove' ? '验证移除中' : '验证中', tone: 'pending' };
+    case 'removing': return { label: '移除中', tone: 'warning' };
+    case 'verified': return { label: '已验证', tone: 'verified' };
+    case 'removed': return { label: '已移除', tone: 'neutral' };
+    case 'deferred': return { label: '等待策略', tone: 'warning' };
+    case 'failed': return { label: operation.action === 'remove' ? '移除失败' : '验证失败', tone: 'failed' };
+  }
+}
+
+/** finalDomainStatus 优先显示当前新增或删除操作，避免旧策略状态覆盖后台进度。 */
+function finalDomainStatus(row: DomainRow): { label: string; tone: 'verified' | 'pending' | 'failed' | 'warning' | 'neutral' } {
+  const operationStatus = manualOperationStatus(row.manualOperation);
+  if (operationStatus && !['verified', 'removed'].includes(row.manualOperation?.state ?? '')) return operationStatus;
+  if (row.isAccelerated) return { label: '已加速', tone: 'verified' };
+  if (row.last_error) return { label: '验证失败', tone: 'failed' };
+  return operationStatus ?? { label: '待验证', tone: 'pending' };
+}
+
 /** accelerationFormFromConfig 将域名加速配置投影为独立页面表单。 */
 function accelerationFormFromConfig(config: AppConfig['acceleration']): AccelerationSettingsForm {
   return {
     enabled: config.enabled,
-    manualDomains: joinConfigLines(config.manual_domains),
     excludedDomains: joinConfigLines(config.excluded_domains),
     manualDownloadTest: config.manual_download_test,
     manualDownloadMinMbps: config.manual_download_min_mbps,
@@ -73,14 +95,11 @@ function accelerationFormFromConfig(config: AppConfig['acceleration']): Accelera
 
 /** mergeAccelerationConfig 仅更新域名加速字段并保留完整后台配置。 */
 function mergeAccelerationConfig(config: AppConfig, form: AccelerationSettingsForm): AppConfig {
-  const manualDomains = parseDomainLines(form.manualDomains);
   return {
     ...config,
     acceleration: {
       ...config.acceleration,
       enabled: form.enabled,
-      manual_domains: manualDomains,
-      manual_mappings: retainConfiguredManualMappings(config.acceleration.manual_mappings, manualDomains),
       excluded_domains: parseDomainLines(form.excludedDomains),
       manual_download_test: form.manualDownloadTest,
       manual_download_min_mbps: form.manualDownloadMinMbps,
@@ -103,11 +122,13 @@ export function AccelerationPage() {
   const [mappingDraft, setMappingDraft] = useState('');
   const [domainTestResult, setDomainTestResult] = useState<DomainTestResult>();
   const [isCleanupOpen, setIsCleanupOpen] = useState(false);
+  const [manualDomainDraft, setManualDomainDraft] = useState('');
+  const [removeTarget, setRemoveTarget] = useState<string>();
+  const localOperationIDs = useRef(new Set<string>());
   const form = useForm<AccelerationSettingsForm>({
     resolver: zodResolver(accelerationSettingsSchema),
     defaultValues: {
       enabled: true,
-      manualDomains: '',
       excludedDomains: '',
       manualDownloadTest: true,
       manualDownloadMinMbps: 20,
@@ -120,17 +141,42 @@ export function AccelerationPage() {
     if (config.data) form.reset(accelerationFormFromConfig(config.data.acceleration));
   }, [config.data, form]);
 
-  const rows = useMemo<DomainRow[]>(() => (domains.data?.domains ?? []).map((domain) => {
-    const addresses = domain.accelerated_addresses ?? [];
-    const verifiedRoutes = addresses.map((address) => findVerifiedDomainRoute(address, routes.data ?? [], status.data?.physical_path));
-    return {
-      ...domain,
-      isAccelerated: isDomainAccelerated(domain, routes.data ?? [], status.data?.physical_path),
-      isRouteVerified: addresses.length > 0 && verifiedRoutes.every(Boolean),
-      policyLabel: describePolicy(domain.verified_adapters),
-      verifiedRoute: verifiedRoutes.find(Boolean),
-    };
-  }), [domains.data?.domains, routes.data, status.data?.physical_path]);
+  useEffect(() => {
+    for (const operation of domains.data?.operations ?? []) {
+      if (!localOperationIDs.current.has(operation.operation_id) || !['verified', 'removed', 'deferred', 'failed'].includes(operation.state)) continue;
+      localOperationIDs.current.delete(operation.operation_id);
+      if (operation.state === 'verified') {
+        notifications.show({ color: 'green', title: '手动域名验证完成', message: `${operation.domain} 已完成策略与连接验证。` });
+      } else if (operation.state === 'removed') {
+        notifications.show({ color: 'green', title: '手动域名已移除', message: `${operation.domain} 的策略和配置已清理。` });
+      } else if (operation.state === 'deferred') {
+        notifications.show({ color: 'yellow', title: '手动域名等待验证', message: operation.message || `${operation.domain} 将在策略可用后验证。` });
+      } else {
+        notifications.show({ color: 'red', title: operation.action === 'remove' ? '手动域名移除失败' : '手动域名验证失败', message: operation.message || operation.domain });
+      }
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.config }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.routes }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.status }),
+      ]);
+    }
+  }, [domains.data?.operations, queryClient]);
+
+  const rows = useMemo<DomainRow[]>(() => {
+    const operations = new Map((domains.data?.operations ?? []).map((operation) => [operation.domain, operation]));
+    return (domains.data?.domains ?? []).map((domain) => {
+      const addresses = domain.accelerated_addresses ?? [];
+      const verifiedRoutes = addresses.map((address) => findVerifiedDomainRoute(address, routes.data ?? [], status.data?.physical_path));
+      return {
+        ...domain,
+        isAccelerated: isDomainAccelerated(domain, routes.data ?? [], status.data?.physical_path),
+        isRouteVerified: addresses.length > 0 && verifiedRoutes.every(Boolean),
+        policyLabel: describePolicy(domain.verified_adapters),
+        verifiedRoute: verifiedRoutes.find(Boolean),
+        manualOperation: operations.get(domain.domain),
+      };
+    });
+  }, [domains.data?.domains, domains.data?.operations, routes.data, status.data?.physical_path]);
   const selected = rows.find((row) => row.domain === selectedDomain);
   const acceleratedCount = rows.filter((row) => row.isAccelerated).length;
   const pendingCount = rows.length - acceleratedCount;
@@ -144,6 +190,9 @@ export function AccelerationPage() {
     domainTestResult?.address,
     mappingDraft,
   );
+  const manualDomains = accelerationConfig?.manual_domains ?? [];
+  const manualOperations = new Map((domains.data?.operations ?? []).map((operation) => [operation.domain, operation]));
+  const hasActiveManualOperation = (domains.data?.operations ?? []).some((operation) => ['pending', 'verifying', 'removing'].includes(operation.state));
 
   const columns = useMemo<ColumnDef<DomainRow>[]>(() => [
     { accessorKey: 'domain', header: '域名', size: 220, cell: ({ getValue }) => <Text ff="monospace" size="sm" fw={650}>{String(getValue())}</Text> },
@@ -155,7 +204,8 @@ export function AccelerationPage() {
     { accessorKey: 'policyLabel', header: '直连策略', size: 180, cell: ({ row }) => <StatusBadge label={row.original.policyLabel} tone={row.original.active ? 'verified' : 'neutral'} /> },
     { accessorKey: 'isRouteVerified', header: '物理路由', size: 120, cell: ({ getValue }) => <StatusBadge label={getValue<boolean>() ? '已验证' : '待验证'} tone={getValue<boolean>() ? 'verified' : 'warning'} /> },
     { accessorKey: 'last_seen_at', header: '最近发现', size: 155, cell: ({ getValue }) => formatDate(String(getValue())) },
-    { accessorKey: 'isAccelerated', header: '最终状态', size: 120, cell: ({ row }) => <StatusBadge label={row.original.isAccelerated ? '已加速' : row.original.last_error ? '验证失败' : '待验证'} tone={row.original.isAccelerated ? 'verified' : row.original.last_error ? 'failed' : 'pending'} /> },
+    { accessorKey: 'isAccelerated', header: '最终状态', size: 130, cell: ({ row }) => { const state = finalDomainStatus(row.original); return <StatusBadge label={state.label} tone={state.tone} />; } },
+    { id: 'actions', header: '', size: 52, enableSorting: false, cell: ({ row }) => row.original.source === 'manual' ? <Tooltip label="删除手动域名"><ActionIcon aria-label={`删除 ${row.original.domain}`} color="red" variant="subtle" disabled={Boolean(row.original.manualOperation && ['pending', 'verifying', 'removing'].includes(row.original.manualOperation.state))} onClick={(event) => { event.stopPropagation(); setRemoveTarget(row.original.domain); }}><Trash2 size={16} /></ActionIcon></Tooltip> : null },
   ], []);
 
   const discover = useMutation({
@@ -181,6 +231,35 @@ export function AccelerationPage() {
       ]);
     },
     onError: (error: Error) => notifications.show({ color: 'red', title: '保存失败', message: error.message }),
+  });
+
+  const addManualDomain = useMutation({
+    mutationFn: (domain: string) => request<ManualDomainOperation>('acceleration.manual_domain_add', { domain }),
+    onSuccess: async (operation) => {
+      localOperationIDs.current.add(operation.operation_id);
+      setManualDomainDraft('');
+      notifications.show({ color: 'blue', title: '手动域名已保存', message: `${operation.domain} 已进入后台验证。` });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.config }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.accelerationDomains }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.status }),
+      ]);
+    },
+    onError: (error: Error) => notifications.show({ color: 'red', title: '新增失败', message: error.message }),
+  });
+
+  const removeManualDomain = useMutation({
+    mutationFn: (domain: string) => request<ManualDomainOperation>('acceleration.manual_domain_remove', { domain }),
+    onSuccess: async (operation) => {
+      localOperationIDs.current.add(operation.operation_id);
+      setRemoveTarget(undefined);
+      notifications.show({ color: 'blue', title: '正在移除手动域名', message: `${operation.domain} 的旧配置会保留到策略验证完成。` });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.accelerationDomains }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.status }),
+      ]);
+    },
+    onError: (error: Error) => notifications.show({ color: 'red', title: '移除失败', message: error.message }),
   });
 
   const clearDiscovered = useMutation({
@@ -264,6 +343,10 @@ export function AccelerationPage() {
   const physicalPath = status.data?.physical_path;
   const errors = form.formState.errors;
   const submitPolicy = form.handleSubmit((values) => savePolicy.mutate(mergeAccelerationConfig(config.data, values)));
+  const submitManualDomain = () => {
+    const domain = manualDomainDraft.trim().toLowerCase().replace(/\.$/, '');
+    if (domain) addManualDomain.mutate(domain);
+  };
   return (
     <Stack gap="lg">
       <PageHeader
@@ -287,6 +370,16 @@ export function AccelerationPage() {
         </Stack>
       </Modal>
 
+      <Modal opened={Boolean(removeTarget)} onClose={() => setRemoveTarget(undefined)} title="删除手动域名" centered>
+        <Stack gap="md">
+          <Text size="sm">将先验证直连策略不再包含 <Text component="span" ff="monospace" fw={650}>{removeTarget}</Text>，验证成功后才清理域名和映射配置。</Text>
+          <Group justify="flex-end">
+            <Button variant="default" onClick={() => setRemoveTarget(undefined)}>取消</Button>
+            <Button color="red" leftSection={<Trash2 size={16} />} loading={removeManualDomain.isPending} disabled={!removeTarget} onClick={() => removeTarget && removeManualDomain.mutate(removeTarget)}>确认删除</Button>
+          </Group>
+        </Stack>
+      </Modal>
+
       <Alert color={isAutomatic ? 'green' : 'yellow'} icon={isAutomatic ? <ShieldCheck size={18} /> : <ShieldAlert size={18} />} title={isAutomatic ? '自动加速已开启' : '自动加速未完全开启'}>
         <Text size="sm">域名加速 {accelerationConfig?.enabled ? '开启' : '关闭'} · 手动域名下载复测 {accelerationConfig?.manual_download_test ? `开启（≥ ${accelerationConfig.manual_download_min_mbps} Mbps）` : '关闭'} · 自动发现 {accelerationConfig?.auto_discover ? '开启' : '关闭'} · 自动应用 {accelerationConfig?.auto_apply ? '开启' : '关闭'} · 周期 {accelerationConfig?.discovery_interval ?? '—'}</Text>
       </Alert>
@@ -294,7 +387,7 @@ export function AccelerationPage() {
       <form onSubmit={submitPolicy}>
         <Section
           title="加速策略"
-          aside={<Button type="submit" size="compact-sm" leftSection={<Save size={15} />} loading={savePolicy.isPending} disabled={!form.formState.isDirty}>保存策略</Button>}
+          aside={<Button type="submit" size="compact-sm" leftSection={<Save size={15} />} loading={savePolicy.isPending} disabled={!form.formState.isDirty || hasActiveManualOperation}>保存策略</Button>}
         >
           <Stack gap="md">
             <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="md">
@@ -308,7 +401,43 @@ export function AccelerationPage() {
               <Controller control={form.control} name="manualDownloadMinMbps" render={({ field }) => <NumberInput label="直连下载最低速度" suffix=" Mbps" min={0.1} max={100000} decimalScale={2} value={field.value} onChange={field.onChange} error={errors.manualDownloadMinMbps?.message} disabled={!form.watch('manualDownloadTest')} />} />
             </SimpleGrid>
             <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
-              <Controller control={form.control} name="manualDomains" render={({ field }) => <Textarea {...field} label="手动域名（越靠前优先级越高）" autosize minRows={3} ff="monospace" placeholder="每行一个精确域名" />} />
+              <Stack gap="xs">
+                <Group align="flex-end" wrap="nowrap">
+                  <TextInput
+                    label="新增手动域名"
+                    value={manualDomainDraft}
+                    onChange={(event) => setManualDomainDraft(event.currentTarget.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        submitManualDomain();
+                      }
+                    }}
+                    placeholder="comfy.momoc.top"
+                    ff="monospace"
+                    style={{ flex: 1 }}
+                  />
+                  <Tooltip label="新增手动域名">
+                    <ActionIcon aria-label="新增手动域名" size={36} variant="filled" loading={addManualDomain.isPending} disabled={!manualDomainDraft.trim() || hasActiveManualOperation} onClick={submitManualDomain}><Plus size={18} /></ActionIcon>
+                  </Tooltip>
+                </Group>
+                <Stack gap={4}>
+                  {manualDomains.map((domain) => {
+                    const operation = manualOperations.get(domain);
+                    const operationStatus = manualOperationStatus(operation);
+                    return (
+                      <Group key={domain} justify="space-between" wrap="nowrap" px="xs" py={6} style={{ borderBottom: '1px solid var(--mantine-color-default-border)' }}>
+                        <Text ff="monospace" size="sm" truncate>{domain}</Text>
+                        <Group gap="xs" wrap="nowrap">
+                          {operationStatus && <StatusBadge label={operationStatus.label} tone={operationStatus.tone} />}
+                          <Tooltip label="删除手动域名"><ActionIcon aria-label={`删除 ${domain}`} color="red" variant="subtle" disabled={Boolean(operation && ['pending', 'verifying', 'removing'].includes(operation.state))} onClick={() => setRemoveTarget(domain)}><Trash2 size={15} /></ActionIcon></Tooltip>
+                        </Group>
+                      </Group>
+                    );
+                  })}
+                  {manualDomains.length === 0 && <Text size="sm" c="dimmed">暂无手动域名</Text>}
+                </Stack>
+              </Stack>
               <Controller control={form.control} name="excludedDomains" render={({ field }) => <Textarea {...field} label="排除域名" autosize minRows={3} ff="monospace" placeholder="每行一个精确域名" />} />
             </SimpleGrid>
           </Stack>
@@ -334,13 +463,17 @@ export function AccelerationPage() {
                 <Text ff="monospace" fw={700}>{selected.domain}</Text>
                 <Text size="sm" c="dimmed">{selected.source === 'manual' ? '手动域名' : 'Mihomo 自动发现'}</Text>
               </Stack>
-              <StatusBadge label={selected.isAccelerated ? '已加速' : selected.last_error ? '验证失败' : '待验证'} tone={selected.isAccelerated ? 'verified' : selected.last_error ? 'failed' : 'pending'} />
+              <Group gap="xs" wrap="nowrap">
+                {selected.source === 'manual' && <Tooltip label="删除手动域名"><ActionIcon aria-label={`删除 ${selected.domain}`} color="red" variant="light" disabled={Boolean(selected.manualOperation && ['pending', 'verifying', 'removing'].includes(selected.manualOperation.state))} onClick={() => setRemoveTarget(selected.domain)}><Trash2 size={16} /></ActionIcon></Tooltip>}
+                {(() => { const state = finalDomainStatus(selected); return <StatusBadge label={state.label} tone={state.tone} />; })()}
+              </Group>
             </Group>
 
             {selected.source === 'manual' ? (
               <Stack gap="sm">
+                {selected.manualOperation && <Alert color={selected.manualOperation.state === 'failed' ? 'red' : selected.manualOperation.state === 'deferred' ? 'yellow' : 'blue'} title={manualOperationStatus(selected.manualOperation)?.label}>{selected.manualOperation.message}</Alert>}
                 <TextInput label="映射 IP" value={mappingDraft} onChange={(event) => setMappingDraft(event.currentTarget.value)} placeholder="例如 104.16.132.229" ff="monospace" />
-                <Button leftSection={<Gauge size={16} />} loading={testDomain.isPending} disabled={!mappingDraft.trim()} onClick={() => testDomain.mutate({ domain: selected.domain, address: mappingDraft.trim() })}>手动测速</Button>
+                <Button leftSection={<Gauge size={16} />} loading={testDomain.isPending} disabled={!mappingDraft.trim() || Boolean(selected.manualOperation && ['pending', 'verifying', 'removing'].includes(selected.manualOperation.state))} onClick={() => testDomain.mutate({ domain: selected.domain, address: mappingDraft.trim() })}>手动测速</Button>
                 {domainTestResult ? (
                   <Alert color={domainTestResult.download_verified ? 'green' : 'yellow'} icon={domainTestResult.download_verified ? <CheckCircle2 size={17} /> : <CircleAlert size={17} />} title={`${domainTestResult.download_mbps.toFixed(2)} Mbps`}>
                     <Stack gap={3}>
@@ -355,7 +488,7 @@ export function AccelerationPage() {
                 ) : <Text size="sm" c="dimmed">测速完成后才可选择应用此映射。</Text>}
                 {!policyAvailable && <Alert color="yellow" icon={<ShieldAlert size={17} />} title="当前没有可用适配器">映射会先保存到配置；适配器恢复后可再次应用，或通过下一次策略刷新重试。当前未声明加速已生效。</Alert>}
                 {policyAvailable && !policyVerified && <Alert color="yellow" icon={<ShieldAlert size={17} />} title="当前没有已验证的整体策略">仍可按当前适配器能力尝试应用域名映射，实际结果以应用状态和验证证据为准。</Alert>}
-                <Button color="green" leftSection={<ShieldCheck size={16} />} loading={applyDomain.isPending} disabled={!manualDomainApplyReady} onClick={() => applyDomain.mutate({ domain: selected.domain, address: mappingDraft.trim() })}>应用此映射</Button>
+                <Button color="green" leftSection={<ShieldCheck size={16} />} loading={applyDomain.isPending} disabled={!manualDomainApplyReady || Boolean(selected.manualOperation && ['pending', 'verifying', 'removing'].includes(selected.manualOperation.state))} onClick={() => applyDomain.mutate({ domain: selected.domain, address: mappingDraft.trim() })}>应用此映射</Button>
               </Stack>
             ) : (
               <Alert color="blue" title="自动发现域名只读">

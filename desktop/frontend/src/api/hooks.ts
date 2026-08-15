@@ -58,6 +58,6 @@ export function useAccelerationDomains() {
   return useQuery({
     queryKey: queryKeys.accelerationDomains,
     queryFn: () => request<DomainDiscoveryResult>('acceleration.domains'),
-    refetchInterval: 5_000,
+    refetchInterval: 2_000,
   });
 }
