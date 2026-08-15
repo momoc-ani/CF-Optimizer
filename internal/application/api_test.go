@@ -567,13 +567,21 @@ func TestSystemStatusReportsPolicyAvailability(t *testing.T) {
 func TestConfigUpdateHotAppliesClearedManualDomains(t *testing.T) {
 	api, runtimeState := newConfigUpdateTestAPI(t)
 	next := runtimeState.View().Config
+	next.Acceleration.ManualMappings = map[string]string{"comfy.momoc.top": "104.19.208.241"}
 	next.Acceleration.ManualDomains = []string{}
+	next.Acceleration.ManualDownloadTest = !next.Acceleration.ManualDownloadTest
 	result := updateConfigForTest(t, api, next)
 	if !result["saved"] || !result["hot_applied"] || result["policy_refreshed"] || result["restart_required"] {
 		t.Fatalf("unexpected update result: %#v", result)
 	}
 	if domains := runtimeState.View().Config.Acceleration.ManualDomains; len(domains) != 0 {
 		t.Fatalf("runtime retained cleared manual domains: %#v", domains)
+	}
+	if mappings := runtimeState.View().Config.Acceleration.ManualMappings; len(mappings) != 0 {
+		t.Fatalf("runtime retained mappings for removed manual domains: %#v", mappings)
+	}
+	if runtimeState.View().Config.Acceleration.ManualDownloadTest != next.Acceleration.ManualDownloadTest {
+		t.Fatal("runtime did not apply the manual domain download test switch")
 	}
 	response, err := api.Handle(context.Background(), ipc.Request{Method: "config.get"}, nil)
 	if err != nil {
@@ -582,6 +590,12 @@ func TestConfigUpdateHotAppliesClearedManualDomains(t *testing.T) {
 	persisted := response.(config.Config)
 	if len(persisted.Acceleration.ManualDomains) != 0 {
 		t.Fatalf("config.get returned stale manual domains: %#v", persisted.Acceleration.ManualDomains)
+	}
+	if len(persisted.Acceleration.ManualMappings) != 0 {
+		t.Fatalf("config.get returned stale manual mappings: %#v", persisted.Acceleration.ManualMappings)
+	}
+	if persisted.Acceleration.ManualDownloadTest != next.Acceleration.ManualDownloadTest {
+		t.Fatal("config.get returned a stale manual domain download test switch")
 	}
 	domainResponse, err := api.Handle(context.Background(), ipc.Request{Method: "acceleration.domains"}, nil)
 	if err != nil {

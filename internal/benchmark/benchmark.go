@@ -495,6 +495,10 @@ func (t *Tester) download(ctx context.Context, conn net.Conn, target *url.URL, r
 		}
 	}
 	result.DownloadTime = t.now().Sub(started)
+	// 某些平台的时钟分辨率低于本地测试响应耗时，保留成功下载的有效统计。
+	if result.DownloadTime <= 0 {
+		result.DownloadTime = time.Nanosecond
+	}
 	result.Downloaded = downloaded
 	if downloaded > 0 && result.DownloadTime > 0 {
 		result.Mbps = float64(downloaded*8) / result.DownloadTime.Seconds() / 1_000_000

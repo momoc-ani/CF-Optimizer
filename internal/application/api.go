@@ -621,6 +621,7 @@ func (a *API) updateConfig(ctx context.Context, raw json.RawMessage) (map[string
 	view := a.runtime.View()
 	parameters.Config.Proxy.Mihomo.Secret = view.Config.Proxy.Mihomo.Secret
 	parameters.Config.ApplyDefaults()
+	pruneOrphanedManualMappings(&parameters.Config)
 	if parameters.Config.DataDir == "" {
 		parameters.Config.DataDir = view.Config.DataDir
 	}
@@ -689,6 +690,26 @@ func (a *API) updateConfig(ctx context.Context, raw json.RawMessage) (map[string
 		a.runtime.Logger.Info("配置保存完成", "component", "config", "manual_domains", len(parameters.Config.Acceleration.ManualDomains), "excluded_domains", len(parameters.Config.Acceleration.ExcludedDomains), "hot_applied", hotApplied, "policy_refreshed", policyRefreshed, "restart_required", restartRequired, "result", "completed")
 	}
 	return map[string]bool{"saved": true, "hot_applied": hotApplied, "policy_refreshed": policyRefreshed, "restart_required": restartRequired}, nil
+}
+
+// pruneOrphanedManualMappings 清理已不在 manual_domains 中的映射，同时保留 Validate 的严格约束。
+func pruneOrphanedManualMappings(cfg *config.Config) {
+	if cfg == nil || len(cfg.Acceleration.ManualMappings) == 0 {
+		return
+	}
+	configured := make(map[string]struct{}, len(cfg.Acceleration.ManualDomains))
+	for _, rawDomain := range cfg.Acceleration.ManualDomains {
+		domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(rawDomain)), ".")
+		if domain != "" {
+			configured[domain] = struct{}{}
+		}
+	}
+	for rawDomain := range cfg.Acceleration.ManualMappings {
+		domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(rawDomain)), ".")
+		if _, exists := configured[domain]; !exists {
+			delete(cfg.Acceleration.ManualMappings, rawDomain)
+		}
+	}
 }
 
 // configsEqual 比较保存目标与当前运行配置，忽略切片底层数组差异。

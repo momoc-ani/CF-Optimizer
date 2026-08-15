@@ -13,7 +13,7 @@ import type { AppConfig, DiscoveredDomainCleanupResult, DomainApplyResult, Domai
 import { DataTable } from '../components/DataTable';
 import { ErrorState, LoadingState, Metric, PageHeader, Section } from '../components/Page';
 import { StatusBadge } from '../components/StatusBadge';
-import { joinConfigLines, parseDomainLines } from '../lib/configCollections';
+import { joinConfigLines, parseDomainLines, retainConfiguredManualMappings } from '../lib/configCollections';
 import { describeConfigUpdateResult, type ConfigUpdateResult } from '../lib/configUpdate';
 import { findVerifiedDomainRoute, isDomainAccelerated } from '../lib/domainAcceleration';
 import { formatDate } from '../lib/format';
@@ -73,12 +73,14 @@ function accelerationFormFromConfig(config: AppConfig['acceleration']): Accelera
 
 /** mergeAccelerationConfig 仅更新域名加速字段并保留完整后台配置。 */
 function mergeAccelerationConfig(config: AppConfig, form: AccelerationSettingsForm): AppConfig {
+  const manualDomains = parseDomainLines(form.manualDomains);
   return {
     ...config,
     acceleration: {
       ...config.acceleration,
       enabled: form.enabled,
-      manual_domains: parseDomainLines(form.manualDomains),
+      manual_domains: manualDomains,
+      manual_mappings: retainConfiguredManualMappings(config.acceleration.manual_mappings, manualDomains),
       excluded_domains: parseDomainLines(form.excludedDomains),
       manual_download_test: form.manualDownloadTest,
       manual_download_min_mbps: form.manualDownloadMinMbps,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { joinConfigLines, parseDomainLines } from './configCollections';
+import { joinConfigLines, parseDomainLines, retainConfiguredManualMappings } from './configCollections';
 
 describe('joinConfigLines', () => {
   it('normalizes nullable migrated collections', () => {
@@ -15,5 +15,24 @@ describe('parseDomainLines', () => {
       'ani.momoc.top',
       'cdn.example.com',
     ]);
+  });
+});
+
+describe('retainConfiguredManualMappings', () => {
+  it('drops mappings whose manual domain was removed', () => {
+    expect(retainConfiguredManualMappings({
+      'ani.momoc.top': '104.16.132.229',
+      'comfy.momoc.top': '104.19.208.241',
+    }, ['ani.momoc.top'])).toEqual({
+      'ani.momoc.top': '104.16.132.229',
+    });
+  });
+
+  it('matches configured domains after case and trailing-dot normalization', () => {
+    expect(retainConfiguredManualMappings({
+      'ANI.MOMOC.TOP.': '104.16.132.229',
+    }, ['ani.momoc.top'])).toEqual({
+      'ANI.MOMOC.TOP.': '104.16.132.229',
+    });
   });
 });

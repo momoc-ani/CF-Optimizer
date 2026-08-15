@@ -137,6 +137,10 @@ func (t *DownloadTester) Measure(ctx context.Context, domain, rawAddress, rawPro
 	}
 	downloaded, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, t.maxBytes))
 	duration := t.now().Sub(started)
+	// 某些平台的时钟分辨率低于本地测试响应耗时，不能因此把成功下载判为无效。
+	if duration <= 0 {
+		duration = time.Nanosecond
+	}
 	if downloaded == 0 {
 		if readErr != nil {
 			return DownloadResult{}, fmt.Errorf("read domain download body: %w", readErr)
@@ -145,9 +149,6 @@ func (t *DownloadTester) Measure(ctx context.Context, domain, rawAddress, rawPro
 	}
 	if readErr != nil && !isTimeout(readErr) {
 		return DownloadResult{}, fmt.Errorf("read domain download body: %w", readErr)
-	}
-	if duration <= 0 {
-		return DownloadResult{}, errors.New("domain download duration is invalid")
 	}
 	return DownloadResult{
 		ProbeURL: probeURL.String(), Downloaded: downloaded, Duration: duration,
