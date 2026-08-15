@@ -286,7 +286,7 @@ export interface QuickStartPlan {
   plan_id: string;
   expires_at: string;
   physical_path: PhysicalPath;
-  effects: string[];
+  effects: string[] | null;
   warnings?: string[];
   detections: ProxyDetections;
   can_apply: boolean;

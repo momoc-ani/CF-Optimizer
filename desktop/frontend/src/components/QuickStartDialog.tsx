@@ -27,6 +27,7 @@ interface QuickStartDialogProps {
 /** QuickStartDialog 只展示服务端签发计划允许确认的影响范围。 */
 export function QuickStartDialog({ opened, plan, mode, running, onModeChange, onClose, onConfirm, onBenchmarkOnly, onAdvanced }: QuickStartDialogProps) {
   const path = plan?.physical_path;
+  const effects = plan?.effects ?? [];
   return (
     <Modal opened={opened} onClose={onClose} title="确认一键优选" centered size="lg" closeOnClickOutside={!running} closeOnEscape={!running}>
       {plan && (
@@ -45,7 +46,7 @@ export function QuickStartDialog({ opened, plan, mode, running, onModeChange, on
             <Text c="dimmed" size="sm">物理接口</Text><Text ff="monospace" fw={600}>{path?.interface || '未发现'}</Text>
             <Text c="dimmed" size="sm">IPv4 网关</Text><Text ff="monospace">{path?.gateway_ipv4 || '—'}</Text>
             <Text c="dimmed" size="sm">IPv6 网关</Text><Text ff="monospace">{path?.gateway_ipv6 || '—'}</Text>
-            <Text c="dimmed" size="sm">影响范围</Text><Group gap={6}>{plan.effects.length ? plan.effects.map((effect) => <Text size="sm" key={effect}>{effectLabels[effect] || effect}</Text>) : <Text size="sm">无可应用策略</Text>}</Group>
+            <Text c="dimmed" size="sm">影响范围</Text><Group gap={6}>{effects.length ? effects.map((effect) => <Text size="sm" key={effect}>{effectLabels[effect] || effect}</Text>) : <Text size="sm">无可应用策略</Text>}</Group>
           </div>
 
           {(plan.warnings ?? []).map((warning) => <Alert key={warning} color="yellow" py="xs">{warning}</Alert>)}

@@ -48,4 +48,10 @@ describe('QuickStartDialog', () => {
     expect(onBenchmarkOnly).toHaveBeenCalledOnce();
     expect(onAdvanced).toHaveBeenCalledOnce();
   });
+
+  it('renders a backend null effects list as an empty plan', () => {
+    renderDialog({ ...readyPlan, can_apply: false, manual_required: true, effects: null });
+    expect(screen.getByText('无可应用策略')).toBeVisible();
+    expect(screen.getByRole('button', { name: '仅测速' })).toBeVisible();
+  });
 });
