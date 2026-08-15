@@ -75,6 +75,23 @@ func TestLoadEnablesDefaultDownloadWhenURLIsBlank(t *testing.T) {
 	}
 }
 
+// TestLoadRestoresDefaultHostsPath 验证旧配置的空路径会在启用 Hosts 管理前恢复为平台默认值。
+func TestLoadRestoresDefaultHostsPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := []byte("version: 1\nhosts:\n  enabled: true\n  path: \"\"\n")
+	if err := osWriteFile(path, data); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(cfg.Hosts.Path) {
+		t.Fatalf("hosts.path = %q, want an absolute platform default", cfg.Hosts.Path)
+	}
+}
+
 func TestValidateRejectsInvalidDownloadConcurrency(t *testing.T) {
 	for _, value := range []int{0, 257} {
 		cfg := Default()

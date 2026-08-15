@@ -295,13 +295,16 @@ func Save(path string, cfg Config) error {
 	return fsutil.WriteFileAtomic(path, data, 0o600)
 }
 
-// ApplyDefaults 将可选测速配置归一化为可运行的默认值。
+// ApplyDefaults 将可选测速和系统文件配置归一化为可运行的平台默认值。
 func (c *Config) ApplyDefaults() {
 	if strings.TrimSpace(c.Benchmark.DownloadURL) == "" {
 		c.Benchmark.DownloadURL = DefaultDownloadURL
 		if c.Benchmark.DownloadMaxBytes <= 0 {
 			c.Benchmark.DownloadMaxBytes = DefaultDownloadMaxBytes
 		}
+	}
+	if strings.TrimSpace(c.Hosts.Path) == "" {
+		c.Hosts.Path = defaultHostsPath()
 	}
 }
 
