@@ -489,6 +489,7 @@ type DomainApplyResult struct {
 	Address             string    `json:"address"`
 	DownloadMbps        float64   `json:"download_mbps"`
 	DownloadVerified    bool      `json:"download_verified"`
+	DownloadTestSkipped bool      `json:"download_test_skipped"`
 	PolicyRefreshed     bool      `json:"policy_refreshed"`
 	ApplyState          string    `json:"apply_state"`
 	AppliedAdapters     []string  `json:"applied_adapters,omitempty"`
@@ -614,6 +615,16 @@ func (r *Runtime) TestManualDomain(ctx context.Context, domain, rawAddress strin
 
 // ApplyManualDomainMapping 只应用后台已保存且达标的最近一次手动测速映射。
 func (r *Runtime) ApplyManualDomainMapping(ctx context.Context, domain, rawAddress string) (DomainApplyResult, error) {
+	return r.applyManualDomainMapping(ctx, domain, rawAddress, false)
+}
+
+// ApplyManualDomainMappingWithoutDownloadTest 跳过下载测速，但保留域名、连接和物理出口验证。
+func (r *Runtime) ApplyManualDomainMappingWithoutDownloadTest(ctx context.Context, domain, rawAddress string) (DomainApplyResult, error) {
+	return r.applyManualDomainMapping(ctx, domain, rawAddress, true)
+}
+
+// applyManualDomainMapping 共享映射持久化与策略应用，只按入口要求校验下载证据。
+func (r *Runtime) applyManualDomainMapping(ctx context.Context, domain, rawAddress string, skipDownloadTest bool) (DomainApplyResult, error) {
 	if !r.accelerationMutex.TryLock() {
 		return DomainApplyResult{}, errors.New("domain test or policy application is already active")
 	}
@@ -627,7 +638,7 @@ func (r *Runtime) ApplyManualDomainMapping(ctx context.Context, domain, rawAddre
 	}
 	stateBefore := r.Store.Snapshot()
 	record, exists := stateBefore.DiscoveredDomains[normalizedDomain]
-	if !exists || record.Source != "manual" || record.DownloadAddress != address.String() || !record.DownloadVerified || record.DownloadTestedAt.IsZero() {
+	if !skipDownloadTest && (!exists || record.Source != "manual" || record.DownloadAddress != address.String() || !record.DownloadVerified || record.DownloadTestedAt.IsZero()) {
 		return DomainApplyResult{}, errors.New("manual domain must pass a recent direct download test before application")
 	}
 	manualDomains := make(map[string]struct{}, len(view.Config.Acceleration.ManualDomains))
@@ -662,7 +673,8 @@ func (r *Runtime) ApplyManualDomainMapping(ctx context.Context, domain, rawAddre
 	if err := config.Save(r.ConfigPath, nextConfig); err != nil {
 		return DomainApplyResult{}, fmt.Errorf("persist manual domain mapping configuration: %w", err)
 	}
-	applyResult, applyErr := view.Runner.ApplyManualDomainMappingDetailed(ctx, normalizedDomain, address.String(), fullMappings)
+	// 下载证据已由 Runtime 校验或由用户明确跳过，策略刷新不得再次执行同一下载复测。
+	applyResult, applyErr := view.Runner.ApplyManualDomainMappingWithoutDownloadTestDetailed(ctx, normalizedDomain, address.String(), fullMappings)
 	if applyErr != nil {
 		if restoreErr := config.Save(r.ConfigPath, previousConfig); restoreErr != nil && r.Logger != nil {
 			r.Logger.Error("手动域名策略应用失败且配置恢复失败", "domain", normalizedDomain, "error", restoreErr)
@@ -681,7 +693,7 @@ func (r *Runtime) ApplyManualDomainMapping(ctx context.Context, domain, rawAddre
 	updatedRecord := stateAfter.DiscoveredDomains[normalizedDomain]
 	return DomainApplyResult{
 		Domain: normalizedDomain, Address: address.String(), DownloadMbps: updatedRecord.DownloadMbps,
-		DownloadVerified: updatedRecord.DownloadVerified, PolicyRefreshed: applyResult.PolicyRefreshed,
+		DownloadVerified: updatedRecord.DownloadVerified, DownloadTestSkipped: skipDownloadTest, PolicyRefreshed: applyResult.PolicyRefreshed,
 		ApplyState: applyResult.ApplyState, AppliedAdapters: applyResult.AppliedAdapters,
 		SkippedCapabilities: applyResult.SkippedCapabilities, Warnings: applyResult.Warnings, AppliedAt: appliedAt,
 	}, nil

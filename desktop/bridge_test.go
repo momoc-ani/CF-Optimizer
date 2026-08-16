@@ -28,6 +28,7 @@ func TestBridgeAllowsAccelerationDomainMethods(t *testing.T) {
 	for _, method := range []string{
 		"acceleration.domain_test",
 		"acceleration.domain_apply",
+		"acceleration.domain_apply_direct",
 		"acceleration.manual_domain_add",
 		"acceleration.manual_domain_remove",
 	} {

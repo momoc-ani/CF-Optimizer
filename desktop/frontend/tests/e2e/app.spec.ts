@@ -65,14 +65,22 @@ test('域名加速页面展示完整的直连验证证据', async ({ page }, tes
   await page.locator('tbody tr').filter({ hasText: 'ani.momoc.top' }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
   await expect(page.getByLabel('映射 IP')).toHaveValue('104.16.132.229');
-  await expect(page.getByRole('button', { name: '手动测速', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: '手动测速', exact: true }).click();
+  await expect(page.getByRole('button', { name: '测速后应用', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '不用测试直接应用', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '测速后应用', exact: true }).click();
   await expect(page.getByRole('dialog')).toContainText('42.50 Mbps');
-  await expect(page.getByRole('button', { name: '应用此映射', exact: true })).toBeEnabled();
-  await page.getByRole('button', { name: '应用此映射', exact: true }).click();
-  await expect(page.getByText('域名加速已应用', { exact: true })).toBeVisible();
+  await expect(page.getByText('域名映射已应用并验证', { exact: true })).toBeVisible();
   await expect(page.getByText('HTTPS 与物理直连证据完整')).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('acceleration-page.png'), fullPage: false });
+});
+
+test('手动域名可跳过下载测速直接应用', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: '域名加速', exact: true }).click();
+  await page.locator('tbody tr').filter({ hasText: 'ani.momoc.top' }).click();
+  await page.getByRole('button', { name: '不用测试直接应用', exact: true }).click();
+  await expect(page.getByText('域名映射已应用并验证', { exact: true })).toBeVisible();
+  await expect(page.getByRole('dialog')).not.toContainText('下载 1,048,576 bytes');
 });
 
 test('清理自动发现域名保留手动域名', async ({ page }) => {
@@ -92,8 +100,8 @@ test('自动发现域名详情保持只读', async ({ page }) => {
   await page.locator('tbody tr').filter({ hasText: 'dash.cloudflare.com' }).click();
   await expect(page.getByRole('dialog')).toContainText('自动发现域名只读');
   await expect(page.getByLabel('映射 IP')).toHaveCount(0);
-  await expect(page.getByRole('button', { name: '手动测速', exact: true })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: '应用此映射', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '测速后应用', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '不用测试直接应用', exact: true })).toHaveCount(0);
 });
 
 test('域名加速配置只在独立页面编辑', async ({ page }) => {

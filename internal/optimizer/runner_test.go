@@ -625,6 +625,36 @@ func TestApplyManualDomainMappingDefersWhenAdapterIsMissing(t *testing.T) {
 	}
 }
 
+func TestApplyManualDomainMappingWithoutDownloadTestSkipsTester(t *testing.T) {
+	policyApplier := &recordingPolicy{capabilities: proxy.Capabilities{IPv4: true, Domains: true, DomainMappings: true}}
+	runner, stateStore := newTestRunner(t, policyApplier)
+	runner.config.Acceleration.ManualDomains = []string{"manual.example"}
+	runner.config.Acceleration.ManualDownloadTest = true
+	runner.domainResolver = staticDomainResolver{addresses: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+	runner.domainVerifier = &selectiveDomainVerifier{rejected: map[string]map[string]bool{}}
+	downloadTester := &rankedDomainDownloadTester{mbps: map[string]float64{"1.1.1.2": 35}}
+	runner.domainDownload = downloadTester
+	if err := stateStore.Update(func(state *store.State) error {
+		state.Policy = &store.PolicySnapshot{Receipts: json.RawMessage(`{"receipts":[]}`)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := runner.ApplyManualDomainMappingWithoutDownloadTestDetailed(context.Background(), "manual.example", "1.1.1.2", map[string]string{"manual.example": "1.1.1.2"})
+	if err != nil || result.ApplyState != ManualMappingApplyStateApplied || !result.PolicyRefreshed {
+		t.Fatalf("direct mapping was not applied: result=%#v err=%v", result, err)
+	}
+	if len(downloadTester.calls) != 0 {
+		t.Fatalf("direct mapping unexpectedly ran download tests: %#v", downloadTester.calls)
+	}
+	state := stateStore.Snapshot()
+	record := state.DiscoveredDomains["manual.example"]
+	if !record.Active || record.DownloadVerified {
+		t.Fatalf("direct mapping evidence is incorrect: %#v", record)
+	}
+}
+
 func TestApplyManualDomainMappingUsesAdapterConnectionEvidence(t *testing.T) {
 	policyApplier := &adapterVerifiedRecordingPolicy{
 		recordingPolicy: recordingPolicy{capabilities: proxy.Capabilities{Domains: true, DomainMappings: true}},

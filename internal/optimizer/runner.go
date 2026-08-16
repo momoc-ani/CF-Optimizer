@@ -178,6 +178,7 @@ type domainAllocationCandidate struct {
 type domainAllocationOptions struct {
 	manualMappingOverrides map[string]string
 	excludedAddresses      map[string]map[string]struct{}
+	skipManualDownloadTest bool
 }
 
 // RunReport 汇总候选结果、地址族决策、策略状态和可恢复警告。
@@ -285,6 +286,16 @@ func (r *Runner) ApplyManualDomainMapping(ctx context.Context, domain, rawAddres
 
 // ApplyManualDomainMappingDetailed 保存映射；适配器不可用时返回 deferred 而不回滚配置。
 func (r *Runner) ApplyManualDomainMappingDetailed(ctx context.Context, domain, rawAddress string, mappings map[string]string) (ManualMappingApplyResult, error) {
+	return r.applyManualDomainMappingDetailed(ctx, domain, rawAddress, mappings, false)
+}
+
+// ApplyManualDomainMappingWithoutDownloadTestDetailed 跳过下载复测并执行其余映射验证。
+func (r *Runner) ApplyManualDomainMappingWithoutDownloadTestDetailed(ctx context.Context, domain, rawAddress string, mappings map[string]string) (ManualMappingApplyResult, error) {
+	return r.applyManualDomainMappingDetailed(ctx, domain, rawAddress, mappings, true)
+}
+
+// applyManualDomainMappingDetailed 共享手动映射维护事务，并按入口控制下载复测。
+func (r *Runner) applyManualDomainMappingDetailed(ctx context.Context, domain, rawAddress string, mappings map[string]string, skipDownloadTest bool) (ManualMappingApplyResult, error) {
 	result := ManualMappingApplyResult{ApplyState: ManualMappingApplyStateDeferred}
 	if !r.tryAcquireMaintenance() {
 		return result, ErrAlreadyRunning
@@ -318,7 +329,7 @@ func (r *Runner) ApplyManualDomainMappingDetailed(ctx context.Context, domain, r
 		}
 		applyErr = err
 	} else {
-		applyErr = r.refreshPolicyWithManualMappingsLocked(ctx, nextMappings, nil)
+		applyErr = r.refreshPolicyWithManualMappingsOptionsLocked(ctx, nextMappings, nil, skipDownloadTest)
 		if applyErr == nil {
 			result.ApplyState = ManualMappingApplyStateApplied
 			result.PolicyRefreshed = true
@@ -1538,6 +1549,11 @@ func (r *Runner) refreshPolicyWithStateMutationLocked(ctx context.Context, mutat
 
 // refreshPolicyWithManualMappingsLocked 在维护流程中保留当前已应用映射，或使用调用方确认的显式映射。
 func (r *Runner) refreshPolicyWithManualMappingsLocked(ctx context.Context, manualMappingOverrides map[string]string, mutateState func(*store.State)) error {
+	return r.refreshPolicyWithManualMappingsOptionsLocked(ctx, manualMappingOverrides, mutateState, false)
+}
+
+// refreshPolicyWithManualMappingsOptionsLocked 按维护入口要求控制手动域名下载复测。
+func (r *Runner) refreshPolicyWithManualMappingsOptionsLocked(ctx context.Context, manualMappingOverrides map[string]string, mutateState func(*store.State), skipManualDownloadTest bool) error {
 	if r.policy == nil {
 		return errors.New("policy refresh requested but no adapter is configured")
 	}
@@ -1563,6 +1579,7 @@ retryRefresh:
 		mappings, allocations, allocationWarnings, allocationErr := r.allocateDomainMappings(ctx, rangeResult.Snapshot, ranked, planned, domainAllocationOptions{
 			manualMappingOverrides: allocationOverrides,
 			excludedAddresses:      failedDomainAddresses,
+			skipManualDownloadTest: skipManualDownloadTest,
 		})
 		if allocationErr != nil {
 			return fmt.Errorf("allocate accelerated domains during policy refresh: %w", allocationErr)
@@ -2119,7 +2136,7 @@ func (r *Runner) allocateDomainMappings(ctx context.Context, snapshot ranges.Sna
 	preflightRejectedCandidates := make(map[string]struct{})
 	for _, candidate := range candidatesByDomain {
 		allocation := DomainAllocationResult{Domain: candidate.domain, Source: candidate.source}
-		requiresDownload := candidate.source == "manual" && r.config.Acceleration.ManualDownloadTest
+		requiresDownload := candidate.source == "manual" && r.config.Acceleration.ManualDownloadTest && !options.skipManualDownloadTest
 		if requiresDownload && r.domainDownload == nil {
 			allocation.Error = "manual domain download verification is unavailable"
 			allocations = append(allocations, allocation)

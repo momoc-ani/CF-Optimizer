@@ -17,7 +17,6 @@ import { joinConfigLines, parseDomainLines } from '../lib/configCollections';
 import { describeConfigUpdateResult, type ConfigUpdateResult } from '../lib/configUpdate';
 import { findVerifiedDomainRoute, isDomainAccelerated } from '../lib/domainAcceleration';
 import { formatDate } from '../lib/format';
-import { canApplyManualDomain } from '../lib/policyAvailability';
 
 const durationPattern = /^\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h)$/;
 const accelerationSettingsSchema = z.object({
@@ -185,11 +184,6 @@ export function AccelerationPage() {
   const discoveredCount = domains.data?.discovered ?? 0;
   const policyAvailable = Boolean(status.data?.policy_available);
   const policyVerified = Boolean(status.data?.state.current_ipv4?.policy_verified || status.data?.state.current_ipv6?.policy_verified);
-  const manualDomainApplyReady = canApplyManualDomain(
-    Boolean(domainTestResult?.download_verified),
-    domainTestResult?.address,
-    mappingDraft,
-  );
   const manualDomains = accelerationConfig?.manual_domains ?? [];
   const manualOperations = new Map((domains.data?.operations ?? []).map((operation) => [operation.domain, operation]));
   const hasActiveManualOperation = (domains.data?.operations ?? []).some((operation) => ['pending', 'verifying', 'removing'].includes(operation.state));
@@ -277,51 +271,63 @@ export function AccelerationPage() {
     onError: (error: Error) => notifications.show({ color: 'red', title: '清理失败', message: error.message }),
   });
 
-  const testDomain = useMutation({
-    mutationFn: ({ domain, address }: { domain: string; address: string }) => request<DomainTestResult>('acceleration.domain_test', { domain, address }),
-    onSuccess: async (result) => {
-      setDomainTestResult(result);
-      notifications.show({ color: result.download_verified ? 'green' : 'yellow', title: '域名测速完成', message: `${result.download_mbps.toFixed(2)} Mbps${result.download_verified ? '，达到应用阈值' : '，未达到应用阈值'}` });
-      await queryClient.invalidateQueries({ queryKey: queryKeys.accelerationDomains });
+  /** handleDomainApplySuccess 统一展示策略应用结果并刷新后台证据。 */
+  const handleDomainApplySuccess = async (result: DomainApplyResult) => {
+    // 后台可能在没有可用适配器时返回 deferred，前端不能将配置保存误报为已生效。
+    const applyState = result.apply_state ?? 'applied';
+    const adapters = result.applied_adapters?.join('、');
+    const skipped = result.skipped_capabilities?.join('、');
+    const warning = result.warnings?.join('；');
+    if (applyState === 'deferred') {
+      notifications.show({
+        color: 'yellow',
+        title: '域名映射已保存，等待适配器',
+        message: `${result.domain} → ${result.address}；当前未声明加速已生效。${warning ? ` ${warning}` : ''}`,
+      });
+    } else if (applyState === 'partial') {
+      notifications.show({
+        color: 'yellow',
+        title: '域名映射部分应用',
+        message: `${result.domain} → ${result.address}${adapters ? `；已应用：${adapters}` : ''}${skipped ? `；跳过：${skipped}` : ''}${warning ? `；${warning}` : ''}`,
+      });
+    } else {
+      notifications.show({
+        color: 'green',
+        title: '域名映射已应用并验证',
+        message: `${result.domain} → ${result.address}${adapters ? `；已应用：${adapters}` : ''}`,
+      });
+    }
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: queryKeys.config }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.accelerationDomains }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.routes }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.status }),
+    ]);
+  };
+
+  const testAndApplyDomain = useMutation({
+    mutationFn: async ({ domain, address }: { domain: string; address: string }) => {
+      const testResult = await request<DomainTestResult>('acceleration.domain_test', { domain, address });
+      setDomainTestResult(testResult);
+      if (!testResult.download_verified) return { testResult };
+      const applyResult = await request<DomainApplyResult>('acceleration.domain_apply', { domain, address });
+      return { testResult, applyResult };
     },
-    onError: (error: Error) => notifications.show({ color: 'red', title: '域名测速失败', message: error.message }),
+    onSuccess: async ({ testResult, applyResult }) => {
+      if (!applyResult) {
+        notifications.show({ color: 'yellow', title: '测速未达标，未应用', message: `${testResult.download_mbps.toFixed(2)} Mbps，低于应用阈值` });
+        await queryClient.invalidateQueries({ queryKey: queryKeys.accelerationDomains });
+        return;
+      }
+      await handleDomainApplySuccess(applyResult);
+    },
+    onError: (error: Error) => notifications.show({ color: 'red', title: '测速或应用失败', message: error.message }),
   });
 
-  const applyDomain = useMutation({
-    mutationFn: ({ domain, address }: { domain: string; address: string }) => request<DomainApplyResult>('acceleration.domain_apply', { domain, address }),
-    onSuccess: async (result) => {
-      // 后台可能在没有可用适配器时返回 deferred，前端不能将配置保存误报为已生效。
-      const applyState = result.apply_state ?? 'applied';
-      const adapters = result.applied_adapters?.join('、');
-      const skipped = result.skipped_capabilities?.join('、');
-      const warning = result.warnings?.join('；');
-      if (applyState === 'deferred') {
-        notifications.show({
-          color: 'yellow',
-          title: '域名映射已保存，等待适配器',
-          message: `${result.domain} → ${result.address}；当前未声明加速已生效。${warning ? ` ${warning}` : ''}`,
-        });
-      } else if (applyState === 'partial') {
-        notifications.show({
-          color: 'yellow',
-          title: '域名映射部分应用',
-          message: `${result.domain} → ${result.address}${adapters ? `；已应用：${adapters}` : ''}${skipped ? `；跳过：${skipped}` : ''}${warning ? `；${warning}` : ''}`,
-        });
-      } else {
-        notifications.show({
-          color: 'green',
-          title: '域名映射已应用并验证',
-          message: `${result.domain} → ${result.address}${adapters ? `；已应用：${adapters}` : ''}`,
-        });
-      }
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.config }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.accelerationDomains }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.routes }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.status }),
-      ]);
-    },
-    onError: (error: Error) => notifications.show({ color: 'red', title: '应用失败', message: error.message }),
+  const applyDomainDirect = useMutation({
+    mutationFn: ({ domain, address }: { domain: string; address: string }) => request<DomainApplyResult>('acceleration.domain_apply_direct', { domain, address }),
+    onSuccess: handleDomainApplySuccess,
+    onError: (error: Error) => notifications.show({ color: 'red', title: '直接应用失败', message: error.message }),
   });
 
   const openDomainDetails = (row: DomainRow) => {
@@ -472,8 +478,11 @@ export function AccelerationPage() {
             {selected.source === 'manual' ? (
               <Stack gap="sm">
                 {selected.manualOperation && <Alert color={selected.manualOperation.state === 'failed' ? 'red' : selected.manualOperation.state === 'deferred' ? 'yellow' : 'blue'} title={manualOperationStatus(selected.manualOperation)?.label}>{selected.manualOperation.message}</Alert>}
-                <TextInput label="映射 IP" value={mappingDraft} onChange={(event) => setMappingDraft(event.currentTarget.value)} placeholder="例如 104.16.132.229" ff="monospace" />
-                <Button leftSection={<Gauge size={16} />} loading={testDomain.isPending} disabled={!mappingDraft.trim() || Boolean(selected.manualOperation && ['pending', 'verifying', 'removing'].includes(selected.manualOperation.state))} onClick={() => testDomain.mutate({ domain: selected.domain, address: mappingDraft.trim() })}>手动测速</Button>
+                <TextInput label="映射 IP" value={mappingDraft} onChange={(event) => { setMappingDraft(event.currentTarget.value); setDomainTestResult(undefined); }} placeholder="例如 104.16.132.229" ff="monospace" />
+                <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="sm">
+                  <Button color="green" leftSection={<Gauge size={16} />} loading={testAndApplyDomain.isPending} disabled={!mappingDraft.trim() || applyDomainDirect.isPending || Boolean(selected.manualOperation && ['pending', 'verifying', 'removing'].includes(selected.manualOperation.state))} onClick={() => testAndApplyDomain.mutate({ domain: selected.domain, address: mappingDraft.trim() })}>测速后应用</Button>
+                  <Button color="orange" variant="light" leftSection={<ShieldCheck size={16} />} loading={applyDomainDirect.isPending} disabled={!mappingDraft.trim() || testAndApplyDomain.isPending || Boolean(selected.manualOperation && ['pending', 'verifying', 'removing'].includes(selected.manualOperation.state))} onClick={() => { setDomainTestResult(undefined); applyDomainDirect.mutate({ domain: selected.domain, address: mappingDraft.trim() }); }}>不用测试直接应用</Button>
+                </SimpleGrid>
                 {domainTestResult ? (
                   <Alert color={domainTestResult.download_verified ? 'green' : 'yellow'} icon={domainTestResult.download_verified ? <CheckCircle2 size={17} /> : <CircleAlert size={17} />} title={`${domainTestResult.download_mbps.toFixed(2)} Mbps`}>
                     <Stack gap={3}>
@@ -485,10 +494,9 @@ export function AccelerationPage() {
                   </Alert>
                 ) : selected.download_tested_at ? (
                   <Text size="sm" c="dimmed">上次测速：{selected.download_mbps?.toFixed(2) ?? '—'} Mbps · {formatDate(selected.download_tested_at)}</Text>
-                ) : <Text size="sm" c="dimmed">测速完成后才可选择应用此映射。</Text>}
+                ) : null}
                 {!policyAvailable && <Alert color="yellow" icon={<ShieldAlert size={17} />} title="当前没有可用适配器">映射会先保存到配置；适配器恢复后可再次应用，或通过下一次策略刷新重试。当前未声明加速已生效。</Alert>}
                 {policyAvailable && !policyVerified && <Alert color="yellow" icon={<ShieldAlert size={17} />} title="当前没有已验证的整体策略">仍可按当前适配器能力尝试应用域名映射，实际结果以应用状态和验证证据为准。</Alert>}
-                <Button color="green" leftSection={<ShieldCheck size={16} />} loading={applyDomain.isPending} disabled={!manualDomainApplyReady || Boolean(selected.manualOperation && ['pending', 'verifying', 'removing'].includes(selected.manualOperation.state))} onClick={() => applyDomain.mutate({ domain: selected.domain, address: mappingDraft.trim() })}>应用此映射</Button>
               </Stack>
             ) : (
               <Alert color="blue" title="自动发现域名只读">

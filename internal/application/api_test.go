@@ -247,6 +247,47 @@ func TestApplyManualDomainMappingPersistsDeferredResultWithoutPolicyAdapter(t *t
 	}
 }
 
+func TestApplyManualDomainMappingWithoutDownloadTestPersistsDeferredMapping(t *testing.T) {
+	dataDir := t.TempDir()
+	cfg := config.Default()
+	cfg.DataDir = dataDir
+	cfg.Acceleration.ManualDomains = []string{"manual.example"}
+	cfg.Acceleration.ManualMappings = map[string]string{}
+	configPath := filepath.Join(dataDir, "config.yaml")
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err := store.Open(dataDir, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	runner, err := optimizer.NewRunner(cfg, configUpdateRanges{}, configUpdateBenchmark{}, stateStore, nil, cfnetwork.PhysicalPath{}, nil, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeState := &Runtime{
+		Config: cfg, ConfigPath: configPath, Store: stateStore, Runner: runner,
+		Ranges: ranges.NewCatalog(cfg.Ranges, dataDir), Logger: logger,
+	}
+
+	address := "104.16.0.1"
+	result, err := runtimeState.ApplyManualDomainMappingWithoutDownloadTest(context.Background(), "manual.example", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.DownloadTestSkipped || result.DownloadVerified || result.ApplyState != optimizer.ManualMappingApplyStateDeferred {
+		t.Fatalf("direct mapping result is incorrect: %#v", result)
+	}
+	persisted, err := config.Load(configPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Acceleration.ManualMappings["manual.example"] != address || runtimeState.View().Config.Acceleration.ManualMappings["manual.example"] != address {
+		t.Fatalf("direct mapping was not persisted: persisted=%#v runtime=%#v", persisted.Acceleration.ManualMappings, runtimeState.View().Config.Acceleration.ManualMappings)
+	}
+}
+
 func TestDecodeStrictRejectsUnknownFieldAndTrailingValue(t *testing.T) {
 	var target struct {
 		Value bool `json:"value"`
@@ -270,7 +311,7 @@ func TestClearDiscoveredDomainsRejectsUnknownParameters(t *testing.T) {
 
 func TestManualDomainMethodsRejectUnknownAndMissingParameters(t *testing.T) {
 	api := &API{runtime: &Runtime{}}
-	for _, method := range []string{"acceleration.domain_test", "acceleration.domain_apply"} {
+	for _, method := range []string{"acceleration.domain_test", "acceleration.domain_apply", "acceleration.domain_apply_direct"} {
 		t.Run(method+" unknown", func(t *testing.T) {
 			_, err := api.Handle(context.Background(), ipc.Request{Method: method, Params: json.RawMessage(`{"domain":"ani.momoc.top","address":"104.16.132.229","unexpected":true}`)}, nil)
 			var ipcErr *ipc.Error

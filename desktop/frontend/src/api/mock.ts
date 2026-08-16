@@ -208,7 +208,12 @@ export async function mockRequest<T>(method: string, parameters: Record<string, 
     case 'acceleration.domain_apply':
       return {
         domain: String(parameters.domain), address: String(parameters.address), download_mbps: 42.5,
-        download_verified: true, policy_refreshed: true, apply_state: 'applied', applied_adapters: ['mihomo'], applied_at: new Date().toISOString(),
+        download_verified: true, download_test_skipped: false, policy_refreshed: true, apply_state: 'applied', applied_adapters: ['mihomo'], applied_at: new Date().toISOString(),
+      } as T;
+    case 'acceleration.domain_apply_direct':
+      return {
+        domain: String(parameters.domain), address: String(parameters.address), download_mbps: 0,
+        download_verified: false, download_test_skipped: true, policy_refreshed: true, apply_state: 'applied', applied_adapters: ['mihomo'], applied_at: new Date().toISOString(),
       } as T;
     case 'acceleration.manual_domain_add': {
       const domain = String(parameters.domain).trim().toLowerCase();

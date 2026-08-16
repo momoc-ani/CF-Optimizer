@@ -137,6 +137,7 @@ export interface DomainApplyResult {
   address: string;
   download_mbps: number;
   download_verified: boolean;
+  download_test_skipped: boolean;
   policy_refreshed: boolean;
   apply_state?: 'applied' | 'partial' | 'deferred';
   applied_adapters?: string[];
