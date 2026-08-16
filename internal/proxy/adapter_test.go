@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 )
@@ -24,11 +25,33 @@ type domainVerificationAdapter struct {
 	verification DomainMappingVerification
 }
 
+type domainConnectionCleaningAdapter struct {
+	domainVerificationAdapter
+	cleanupResult      DomainConnectionCleanupResult
+	cleanupErr         error
+	cleanupDomains     []string
+	cleanupCompleted   bool
+	verifiedAfterClean bool
+}
+
 func (a *domainVerificationAdapter) Capabilities() Capabilities {
 	return Capabilities{DomainMappings: true, Rollback: true}
 }
 func (a *domainVerificationAdapter) DomainMappingVerification() DomainMappingVerification {
 	return a.verification
+}
+
+// CloseDomainConnections 记录协调器提交的精确域名并返回测试指定的清理结果。
+func (a *domainConnectionCleaningAdapter) CloseDomainConnections(_ context.Context, _ Receipt, domains []string) (DomainConnectionCleanupResult, error) {
+	a.cleanupDomains = append([]string(nil), domains...)
+	a.cleanupCompleted = true
+	return a.cleanupResult, a.cleanupErr
+}
+
+// Verify 记录真实验证是否发生在旧连接清理之后。
+func (a *domainConnectionCleaningAdapter) Verify(context.Context, DirectPolicy, Receipt) error {
+	a.verifiedAfterClean = a.cleanupCompleted
+	return nil
 }
 
 type rediscoveredAdapter struct {
@@ -185,6 +208,51 @@ func TestCoordinatorRecordsDomainMappingVerificationScope(t *testing.T) {
 	}
 	if result.DomainMappingAdapters != 2 || result.DomainMappingVerifiedAdapters != 1 || !result.DomainMappingSystemResolverRequired || !RequiresSystemDomainMappingVerification(result) {
 		t.Fatalf("Hosts requirement was not retained: %#v", result)
+	}
+}
+
+func TestCoordinatorCleansDomainConnectionsBeforeVerification(t *testing.T) {
+	adapter := &domainConnectionCleaningAdapter{
+		domainVerificationAdapter: domainVerificationAdapter{
+			lifecycleAdapter: lifecycleAdapter{name: "mihomo"},
+			verification:     DomainMappingVerification{ConnectionVerified: true},
+		},
+		cleanupResult: DomainConnectionCleanupResult{Matched: 2, Closed: 2},
+	}
+	coordinator, err := NewCoordinator([]Adapter{adapter}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.Apply(context.Background(), DirectPolicy{DomainMappings: []DomainMapping{
+		{Domain: "comfy.momoc.top", Addresses: []string{"104.21.5.240"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !adapter.verifiedAfterClean || len(adapter.cleanupDomains) != 1 || adapter.cleanupDomains[0] != "comfy.momoc.top" || len(result.Warnings) != 0 {
+		t.Fatalf("unexpected cleanup lifecycle: domains=%v verified_after=%t result=%#v", adapter.cleanupDomains, adapter.verifiedAfterClean, result)
+	}
+}
+
+func TestCoordinatorKeepsAppliedPolicyWhenDomainConnectionCleanupFails(t *testing.T) {
+	adapter := &domainConnectionCleaningAdapter{
+		domainVerificationAdapter: domainVerificationAdapter{
+			lifecycleAdapter: lifecycleAdapter{name: "mihomo"},
+			verification:     DomainMappingVerification{ConnectionVerified: true},
+		},
+		cleanupResult: DomainConnectionCleanupResult{Matched: 2, Closed: 1},
+		cleanupErr:    errors.New("controller rejected one connection"),
+	}
+	coordinator, err := NewCoordinator([]Adapter{adapter}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.Apply(context.Background(), DirectPolicy{DomainMappings: []DomainMapping{{Domain: "comfy.momoc.top", Addresses: []string{"104.21.5.240"}}}})
+	if err != nil {
+		t.Fatalf("cleanup warning must not fail policy application: %v", err)
+	}
+	if adapter.rolledBack || !adapter.verifiedAfterClean || len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "已关闭 1 条") {
+		t.Fatalf("cleanup failure was not preserved as a warning: rolled_back=%t result=%#v", adapter.rolledBack, result)
 	}
 }
 

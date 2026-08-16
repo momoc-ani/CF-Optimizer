@@ -294,10 +294,11 @@ func (a *API) verifyAddedManualDomain(ctx context.Context, operation ManualDomai
 		return errors.New("optimizer runner is unavailable for manual domain verification")
 	}
 	policyBefore := a.runtime.Store.Snapshot().Policy
-	policyRefreshed, err := view.Runner.UpdateAccelerationDomains(ctx, normalizedManualDomains(view.Config.Acceleration.ManualDomains), slices.Clone(view.Config.Acceleration.ExcludedDomains))
+	refreshResult, err := view.Runner.UpdateAccelerationDomainsDetailed(ctx, normalizedManualDomains(view.Config.Acceleration.ManualDomains), slices.Clone(view.Config.Acceleration.ExcludedDomains))
 	if err != nil {
 		return fmt.Errorf("verify added manual domain %s: %w", domain, err)
 	}
+	policyRefreshed := refreshResult.PolicyRefreshed
 	stateAfter := a.runtime.Store.Snapshot()
 	if !policyRefreshed {
 		if policyBefore == nil {
@@ -328,7 +329,11 @@ func (a *API) verifyAddedManualDomain(ctx context.Context, operation ManualDomai
 		return fmt.Errorf("persist verified manual mapping %s: %w", domain, persistErr)
 	}
 	a.runtime.setConfigSnapshot(nextConfig)
-	a.finishManualDomainOperation(operation.OperationID, manualDomainStateVerified, fmt.Sprintf("已验证并应用 %s", address))
+	message := fmt.Sprintf("已验证并应用 %s", address)
+	if len(refreshResult.Warnings) > 0 {
+		message += "；" + strings.Join(refreshResult.Warnings, "；")
+	}
+	a.finishManualDomainOperation(operation.OperationID, manualDomainStateVerified, message)
 	return nil
 }
 
@@ -346,10 +351,11 @@ func (a *API) verifyRemovedManualDomain(ctx context.Context, operation ManualDom
 			nextManualDomains = append(nextManualDomains, configuredDomain)
 		}
 	}
-	policyRefreshed, err := view.Runner.UpdateAccelerationDomains(ctx, nextManualDomains, slices.Clone(previous.Acceleration.ExcludedDomains))
+	refreshResult, err := view.Runner.UpdateAccelerationDomainsDetailed(ctx, nextManualDomains, slices.Clone(previous.Acceleration.ExcludedDomains))
 	if err != nil {
 		return fmt.Errorf("verify removal of manual domain %s: %w", domain, err)
 	}
+	policyRefreshed := refreshResult.PolicyRefreshed
 	stateAfter := a.runtime.Store.Snapshot()
 	if previousPolicy != nil && (!policyRefreshed || policyContainsManualDomain(stateAfter.Policy, domain)) {
 		_, _ = view.Runner.UpdateAccelerationDomains(context.WithoutCancel(ctx), manualDomains, slices.Clone(previous.Acceleration.ExcludedDomains))
@@ -373,7 +379,11 @@ func (a *API) verifyRemovedManualDomain(ctx context.Context, operation ManualDom
 		return fmt.Errorf("persist final manual domain removal: %w", persistErr)
 	}
 	a.runtime.setConfigSnapshot(nextConfig)
-	a.finishManualDomainOperation(operation.OperationID, manualDomainStateRemoved, "已验证策略移除并完成配置清理")
+	message := "已验证策略移除并完成配置清理"
+	if len(refreshResult.Warnings) > 0 {
+		message += "；" + strings.Join(refreshResult.Warnings, "；")
+	}
+	a.finishManualDomainOperation(operation.OperationID, manualDomainStateRemoved, message)
 	return nil
 }
 

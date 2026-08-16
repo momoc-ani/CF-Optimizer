@@ -106,6 +106,12 @@ type ManualMappingApplyResult struct {
 	Warnings            []string
 }
 
+// AccelerationDomainsUpdateResult 汇总域名集合更新及策略刷新时的非阻断警告。
+type AccelerationDomainsUpdateResult struct {
+	PolicyRefreshed bool
+	Warnings        []string
+}
+
 type policyReceiptJournalSetter interface {
 	SetReceiptJournal(proxy.ReceiptJournal)
 }
@@ -329,10 +335,12 @@ func (r *Runner) applyManualDomainMappingDetailed(ctx context.Context, domain, r
 		}
 		applyErr = err
 	} else {
-		applyErr = r.refreshPolicyWithManualMappingsOptionsLocked(ctx, nextMappings, nil, skipDownloadTest)
+		var warnings []string
+		applyErr = r.refreshPolicyWithManualMappingsOptionsAndWarningsLocked(ctx, nextMappings, nil, skipDownloadTest, &warnings)
 		if applyErr == nil {
 			result.ApplyState = ManualMappingApplyStateApplied
 			result.PolicyRefreshed = true
+			result.Warnings = append(result.Warnings, warnings...)
 			r.logger.Info("手动域名映射已应用并验证", "domain", normalizedDomain, "target_ip", strings.TrimSpace(rawAddress), "policy_refreshed", true, "result", "completed")
 			return result, nil
 		}
@@ -481,7 +489,7 @@ func mergeManualMappingsIntoStoredPolicy(previous *store.PolicySnapshot, mapping
 
 // manualMappingResultFromApply 将协调器收据转换为稳定的前端状态载荷。
 func manualMappingResultFromApply(applied proxy.ApplyResult, partial bool) ManualMappingApplyResult {
-	result := ManualMappingApplyResult{PolicyRefreshed: len(applied.Receipts) > 0, ApplyState: ManualMappingApplyStateDeferred}
+	result := ManualMappingApplyResult{PolicyRefreshed: len(applied.Receipts) > 0, ApplyState: ManualMappingApplyStateDeferred, Warnings: append([]string(nil), applied.Warnings...)}
 	seen := make(map[string]struct{}, len(applied.Receipts))
 	for _, receipt := range applied.Receipts {
 		if _, exists := seen[receipt.Adapter]; exists {
@@ -1481,12 +1489,19 @@ func (r *Runner) ClearDiscoveredDomains(ctx context.Context) (DiscoveredDomainCl
 
 // UpdateAccelerationDomains 在单任务边界内替换域名集合，并在活动适配器可用时刷新当前策略。
 func (r *Runner) UpdateAccelerationDomains(ctx context.Context, manualDomains, excludedDomains []string) (bool, error) {
+	result, err := r.UpdateAccelerationDomainsDetailed(ctx, manualDomains, excludedDomains)
+	return result.PolicyRefreshed, err
+}
+
+// UpdateAccelerationDomainsDetailed 更新域名集合并返回策略刷新产生的非阻断警告。
+func (r *Runner) UpdateAccelerationDomainsDetailed(ctx context.Context, manualDomains, excludedDomains []string) (AccelerationDomainsUpdateResult, error) {
+	result := AccelerationDomainsUpdateResult{}
 	if !r.tryAcquireMaintenance() {
-		return false, ErrAlreadyRunning
+		return result, ErrAlreadyRunning
 	}
 	defer r.operationGate.release()
 	if slices.Equal(r.config.Acceleration.ManualDomains, manualDomains) && slices.Equal(r.config.Acceleration.ExcludedDomains, excludedDomains) {
-		return false, nil
+		return result, nil
 	}
 	previousManualDomains := append([]string(nil), r.config.Acceleration.ManualDomains...)
 	previousExcludedDomains := append([]string(nil), r.config.Acceleration.ExcludedDomains...)
@@ -1495,19 +1510,20 @@ func (r *Runner) UpdateAccelerationDomains(ctx context.Context, manualDomains, e
 	policySnapshot := r.store.Snapshot().Policy
 	if policySnapshot == nil {
 		r.logger.Info("域名加速配置已热更新", "manual_domains", len(manualDomains), "excluded_domains", len(excludedDomains), "policy_refreshed", false, "result", "completed")
-		return false, nil
+		return result, nil
 	}
 	if r.policy == nil {
 		r.logger.Warn("域名加速配置已保存但当前策略未刷新", "manual_domains", len(manualDomains), "excluded_domains", len(excludedDomains), "policy_refreshed", false, "policy_snapshot_present", true, "result", "deferred")
-		return false, nil
+		return result, nil
 	}
-	if err := r.refreshPolicyLocked(ctx); err != nil {
+	if err := r.refreshPolicyWithManualMappingsOptionsAndWarningsLocked(ctx, nil, nil, false, &result.Warnings); err != nil {
 		r.config.Acceleration.ManualDomains = previousManualDomains
 		r.config.Acceleration.ExcludedDomains = previousExcludedDomains
-		return false, fmt.Errorf("refresh policy after acceleration domain update: %w", err)
+		return result, fmt.Errorf("refresh policy after acceleration domain update: %w", err)
 	}
+	result.PolicyRefreshed = true
 	r.logger.Info("域名加速配置已热更新", "manual_domains", len(manualDomains), "excluded_domains", len(excludedDomains), "policy_refreshed", true, "result", "completed")
-	return true, nil
+	return result, nil
 }
 
 // tryAcquireMaintenance 仅在没有完整优选排队时允许后台维护立即取得执行权。
@@ -1554,6 +1570,11 @@ func (r *Runner) refreshPolicyWithManualMappingsLocked(ctx context.Context, manu
 
 // refreshPolicyWithManualMappingsOptionsLocked 按维护入口要求控制手动域名下载复测。
 func (r *Runner) refreshPolicyWithManualMappingsOptionsLocked(ctx context.Context, manualMappingOverrides map[string]string, mutateState func(*store.State), skipManualDownloadTest bool) error {
+	return r.refreshPolicyWithManualMappingsOptionsAndWarningsLocked(ctx, manualMappingOverrides, mutateState, skipManualDownloadTest, nil)
+}
+
+// refreshPolicyWithManualMappingsOptionsAndWarningsLocked 刷新策略并将适配器非阻断警告交给调用方展示。
+func (r *Runner) refreshPolicyWithManualMappingsOptionsAndWarningsLocked(ctx context.Context, manualMappingOverrides map[string]string, mutateState func(*store.State), skipManualDownloadTest bool, warnings *[]string) error {
 	if r.policy == nil {
 		return errors.New("policy refresh requested but no adapter is configured")
 	}
@@ -1737,6 +1758,9 @@ retryRefresh:
 		}
 		if err := r.reinstateApplicationFailureCooldown(failedAddresses); err != nil {
 			return err
+		}
+		if warnings != nil {
+			*warnings = append(*warnings, applied.Warnings...)
 		}
 		return nil
 	}
@@ -1937,6 +1961,7 @@ func (r *Runner) applySelectedPolicy(ctx context.Context, state store.State, rep
 	combined := proxy.ApplyResult{
 		Receipts:                            append(append([]proxy.Receipt{}, transition.Receipts...), finalResult.Receipts...),
 		Skipped:                             append(append([]string{}, transition.Skipped...), finalResult.Skipped...),
+		Warnings:                            append(append([]string{}, transition.Warnings...), finalResult.Warnings...),
 		DomainMappingAdapters:               transition.DomainMappingAdapters + finalResult.DomainMappingAdapters,
 		DomainMappingVerifiedAdapters:       transition.DomainMappingVerifiedAdapters + finalResult.DomainMappingVerifiedAdapters,
 		DomainMappingSystemResolverRequired: transition.DomainMappingSystemResolverRequired || finalResult.DomainMappingSystemResolverRequired,

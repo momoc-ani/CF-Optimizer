@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 )
@@ -88,9 +89,21 @@ type ConflictCleaner interface {
 type ApplyResult struct {
 	Receipts                            []Receipt `json:"receipts"`
 	Skipped                             []string  `json:"skipped"`
+	Warnings                            []string  `json:"warnings,omitempty"`
 	DomainMappingAdapters               int       `json:"domain_mapping_adapters,omitempty"`
 	DomainMappingVerifiedAdapters       int       `json:"domain_mapping_verified_adapters,omitempty"`
 	DomainMappingSystemResolverRequired bool      `json:"domain_mapping_system_resolver_required,omitempty"`
+}
+
+// DomainConnectionCleanupResult 汇总一次按域名清理活动连接的结果。
+type DomainConnectionCleanupResult struct {
+	Matched int `json:"matched"`
+	Closed  int `json:"closed"`
+}
+
+// DomainConnectionCleaner 声明适配器可以按精确域名关闭已有连接；清理失败不应阻止规则提交。
+type DomainConnectionCleaner interface {
+	CloseDomainConnections(context.Context, Receipt, []string) (DomainConnectionCleanupResult, error)
 }
 
 // DomainMappingVerification 描述适配器对域名映射提供的真实连接验证范围。
@@ -328,6 +341,19 @@ func (c *Coordinator) Apply(ctx context.Context, policy DirectPolicy) (ApplyResu
 			}
 		}
 		c.logPhase(adapter.Name(), receipt.ID, "apply", "completed", nil)
+		if receipt.Changed {
+			if cleaner, ok := adapter.(DomainConnectionCleaner); ok {
+				domains := domainMappingNames(normalized.DomainMappings)
+				cleanup, cleanupErr := cleaner.CloseDomainConnections(ctx, receipt, domains)
+				if cleanupErr != nil {
+					warning := fmt.Sprintf("清理 %s 旧连接失败（已匹配 %d 条、已关闭 %d 条）：%v", adapter.Name(), cleanup.Matched, cleanup.Closed, cleanupErr)
+					result.Warnings = append(result.Warnings, warning)
+					c.logger.Warn("代理旧连接清理失败，保留已写入策略", "adapter", adapter.Name(), "matched", cleanup.Matched, "closed", cleanup.Closed, "domains", domains, "result", "degraded", "error", cleanupErr)
+				} else if cleanup.Matched > 0 {
+					c.logger.Info("代理旧连接已按域名清理", "adapter", adapter.Name(), "matched", cleanup.Matched, "closed", cleanup.Closed, "domains", domains, "result", "completed")
+				}
+			}
+		}
 		if verifyErr := adapter.Verify(ctx, normalized, receipt); verifyErr != nil {
 			return result, c.rollbackAll(ctx, result.Receipts, fmt.Errorf("verify %s: %w", adapter.Name(), verifyErr))
 		}
@@ -348,6 +374,24 @@ func (c *Coordinator) Apply(ctx context.Context, policy DirectPolicy) (ApplyResu
 		c.logPhase(adapter.Name(), receipt.ID, "verify", "completed", nil)
 	}
 	return result, nil
+}
+
+// domainMappingNames 返回规范化且去重的精确域名，避免清理范围扩展到子域名或无关连接。
+func domainMappingNames(mappings []DomainMapping) []string {
+	seen := make(map[string]struct{}, len(mappings))
+	result := make([]string, 0, len(mappings))
+	for _, mapping := range mappings {
+		domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(mapping.Domain)), ".")
+		if domain == "" {
+			continue
+		}
+		if _, exists := seen[domain]; exists {
+			continue
+		}
+		seen[domain] = struct{}{}
+		result = append(result, domain)
+	}
+	return result
 }
 
 // Rollback 逆序撤销一组已验证收据，供跨阶段切换失败时恢复旧策略。
