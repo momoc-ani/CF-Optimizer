@@ -1,4 +1,4 @@
-import type { DomainDiscovery, PhysicalPath, RouteTransaction } from '../api/types';
+import type { AppConfig, DomainDiscovery, PhysicalPath, RouteTransaction } from '../api/types';
 
 function routeInterfaceMatches(route: RouteTransaction['route'], path: PhysicalPath): boolean {
   if (route.interface_index && path.interface_index) return route.interface_index === path.interface_index;
@@ -35,4 +35,13 @@ export function isDomainAccelerated(domain: DomainDiscovery, routes: RouteTransa
     && addresses.length > 0
     && Boolean(domain.verified_adapters?.length)
     && addresses.every((address) => Boolean(findVerifiedDomainRoute(address, routes, path)));
+}
+
+/** filterUsableResolvedAddresses 隐藏当前策略未启用或缺少受管物理网关的历史 DNS 地址族。 */
+export function filterUsableResolvedAddresses(addresses: string[] = [], config?: AppConfig, path?: PhysicalPath): string[] {
+  if (!config) return addresses;
+  const requiresGateway = config.network.manage_routes;
+  const allowIPv4 = config.benchmark.ipv4 && (!requiresGateway || Boolean(path?.gateway_ipv4));
+  const allowIPv6 = config.benchmark.ipv6 && (!requiresGateway || Boolean(path?.gateway_ipv6));
+  return addresses.filter((address) => address.includes(':') ? allowIPv6 : allowIPv4);
 }

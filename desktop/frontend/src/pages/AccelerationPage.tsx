@@ -15,7 +15,7 @@ import { ErrorState, LoadingState, Metric, PageHeader, Section } from '../compon
 import { StatusBadge } from '../components/StatusBadge';
 import { joinConfigLines, parseDomainLines } from '../lib/configCollections';
 import { describeConfigUpdateResult, type ConfigUpdateResult } from '../lib/configUpdate';
-import { findVerifiedDomainRoute, isDomainAccelerated } from '../lib/domainAcceleration';
+import { filterUsableResolvedAddresses, findVerifiedDomainRoute, isDomainAccelerated } from '../lib/domainAcceleration';
 import { formatDate } from '../lib/format';
 
 const durationPattern = /^\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h)$/;
@@ -505,7 +505,7 @@ export function AccelerationPage() {
             )}
 
             <div className="property-grid">
-              <Text c="dimmed">物理 DNS</Text><Text ff="monospace">{selected.last_resolved_addresses?.join(', ') || '—'}</Text>
+              <Text c="dimmed">物理 DNS</Text><Text ff="monospace">{filterUsableResolvedAddresses(selected.last_resolved_addresses, config.data, physicalPath).join(', ') || '—'}</Text>
               <Text c="dimmed">优选 IP</Text><Text ff="monospace">{selected.accelerated_addresses?.join(', ') || '—'}</Text>
               <Text c="dimmed">TLS SNI</Text><Text ff="monospace">{selected.domain}</Text>
               <Text c="dimmed">HTTP Host</Text><Text ff="monospace">{selected.domain}</Text>

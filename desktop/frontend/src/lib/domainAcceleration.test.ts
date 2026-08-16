@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { DomainDiscovery, PhysicalPath, RouteTransaction } from '../api/types';
-import { findVerifiedDomainRoute, isDomainAccelerated } from './domainAcceleration';
+import type { AppConfig, DomainDiscovery, PhysicalPath, RouteTransaction } from '../api/types';
+import { filterUsableResolvedAddresses, findVerifiedDomainRoute, isDomainAccelerated } from './domainAcceleration';
 
 const path: PhysicalPath = {
   interface: '以太网 3',
@@ -61,5 +61,16 @@ describe('domainAcceleration', () => {
     expect(isDomainAccelerated(domain, [wrongInterface], path)).toBe(false);
     expect(isDomainAccelerated(domain, [wrongSource], path)).toBe(false);
     expect(isDomainAccelerated({ ...domain, verified_adapters: [] }, [route], path)).toBe(false);
+  });
+
+  it('路由管理时隐藏缺少物理网关的历史 DNS 地址族', () => {
+    const config = {
+      benchmark: { ipv4: true, ipv6: true },
+      network: { manage_routes: true },
+    } as AppConfig;
+    const addresses = ['104.21.92.119', '2606:4700:3037::ac43:c0fd'];
+    expect(filterUsableResolvedAddresses(addresses, config, path)).toEqual(['104.21.92.119']);
+    expect(filterUsableResolvedAddresses(addresses, config, { ...path, gateway_ipv6: 'fe80::1' })).toEqual(addresses);
+    expect(filterUsableResolvedAddresses(addresses, { ...config, network: { ...config.network, manage_routes: false } }, path)).toEqual(addresses);
   });
 });

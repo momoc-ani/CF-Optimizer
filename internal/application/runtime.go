@@ -167,7 +167,7 @@ func Build(cfg config.Config, configPath string, logger *slog.Logger) (*Runtime,
 	if err != nil {
 		return nil, fmt.Errorf("discover physical DNS servers: %w", err)
 	}
-	domainResolver, err := acceleration.NewPhysicalResolver(directDial, dnsServers, cfg.Ranges.RequestTimeout.Duration())
+	domainResolver, err := acceleration.NewPhysicalResolver(directDial, dnsServers, cfg.Ranges.RequestTimeout.Duration(), domainResolverOptions(managedConfig, physicalPath))
 	if err != nil {
 		return nil, err
 	}
@@ -188,6 +188,16 @@ func newDomainDownloadTester(cfg config.Config, dial cfnetwork.DialContextFunc) 
 		DownloadTimeout:  cfg.Benchmark.DownloadDuration.Duration(),
 		MaxBytes:         acceleration.DefaultDomainDownloadMaxBytes,
 	})
+}
+
+// domainResolverOptions 与候选和路由策略使用同一地址族可用性判断，避免保留无法走物理出口的 DNS 结果。
+func domainResolverOptions(cfg config.Config, physicalPath cfnetwork.PhysicalPath) acceleration.ResolverOptions {
+	ipv4, ipv6 := cfg.Benchmark.IPv4, cfg.Benchmark.IPv6
+	if cfg.Network.ManageRoutes {
+		ipv4 = ipv4 && physicalPath.GatewayIPv4 != ""
+		ipv6 = ipv6 && physicalPath.GatewayIPv6 != ""
+	}
+	return acceleration.ResolverOptions{IPv4: ipv4, IPv6: ipv6}
 }
 
 // View 返回同一时刻的运行配置与 Runner，避免持续维护切换期间出现数据竞争。
@@ -372,7 +382,7 @@ func (r *Runtime) ReloadConfig(ctx context.Context, cfg config.Config, refreshPo
 	if err != nil {
 		return false, fmt.Errorf("discover physical DNS servers for runtime reload: %w", err)
 	}
-	domainResolver, err := acceleration.NewPhysicalResolver(directDial, dnsServers, cfg.Ranges.RequestTimeout.Duration())
+	domainResolver, err := acceleration.NewPhysicalResolver(directDial, dnsServers, cfg.Ranges.RequestTimeout.Duration(), domainResolverOptions(managedConfig, physicalPath))
 	if err != nil {
 		return false, err
 	}
@@ -1088,7 +1098,7 @@ func (r *Runtime) BuildManagedSession(physicalPath cfnetwork.PhysicalPath, detec
 	if err != nil {
 		return RuntimeSession{}, fmt.Errorf("discover confirmed physical DNS servers: %w", err)
 	}
-	domainResolver, err := acceleration.NewPhysicalResolver(directDial, dnsServers, managedConfig.Ranges.RequestTimeout.Duration())
+	domainResolver, err := acceleration.NewPhysicalResolver(directDial, dnsServers, managedConfig.Ranges.RequestTimeout.Duration(), domainResolverOptions(managedConfig, physicalPath))
 	if err != nil {
 		return RuntimeSession{}, err
 	}

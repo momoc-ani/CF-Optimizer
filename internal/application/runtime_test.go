@@ -9,10 +9,26 @@ import (
 	"time"
 
 	"github.com/cf-optimizer/cf-optimizer/internal/config"
+	cfnetwork "github.com/cf-optimizer/cf-optimizer/internal/network"
 	"github.com/cf-optimizer/cf-optimizer/internal/proxy"
 	"github.com/cf-optimizer/cf-optimizer/internal/ranges"
 	"github.com/cf-optimizer/cf-optimizer/internal/store"
 )
+
+// TestDomainResolverOptionsRequireManagedFamilyGateway 验证路由管理时不展示缺少物理网关的 DNS 地址族。
+func TestDomainResolverOptionsRequireManagedFamilyGateway(t *testing.T) {
+	cfg := config.Default()
+	cfg.Network.ManageRoutes = true
+	options := domainResolverOptions(cfg, cfnetwork.PhysicalPath{GatewayIPv4: "192.168.15.1"})
+	if !options.IPv4 || options.IPv6 {
+		t.Fatalf("managed IPv4-only path enabled wrong resolver families: %#v", options)
+	}
+	cfg.Network.ManageRoutes = false
+	options = domainResolverOptions(cfg, cfnetwork.PhysicalPath{GatewayIPv4: "192.168.15.1"})
+	if !options.IPv4 || !options.IPv6 {
+		t.Fatalf("unmanaged dual-stack configuration was unexpectedly filtered: %#v", options)
+	}
+}
 
 func TestActivateSessionBroadcastsConfigChange(t *testing.T) {
 	runtimeState := &Runtime{Config: config.Default()}
